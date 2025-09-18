@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Gemini Voice</string>
+    <string name="action_settings">Settings</string>
+
+    <!-- Labels -->
+    <string name="first_fragment_label">Gemini Voice Agent</string>
+
+    <!-- Conversation UI -->
+    <string name="conversation_log_hint">Conversation will appear here...</string>
+    <string name="start_conversation">Tap to Speak</string>
+
+    <!-- Models -->
+    <string name="gemini_pro">Gemini 2.5 Pro</string>
+    <string name="gemini_flash">Gemini 2.5 Flash</string>
+    <string name="gpt5_high">GPT-5 High</string>
+    <string name="gpt5_mini">GPT-5 Mini</string>
+
+    <!-- API key hints -->
+    <string name="gemini_api_key_hint">Gemini API key</string>
+    <string name="openai_api_key_hint">OpenAI API key</string>
+
+    <!-- Status -->
+    <string name="status_listening">Listening...</string>
+    <string name="status_thinking">Assistant is thinking...</string>
+    <string name="status_ready">Tap to Speak</string>
+
+    <!-- Buttons -->
+    <string name="new_recording">New recording</string>
+    <string name="stop_conversation">Stop</string>
+
+    <!-- Errors -->
+    <string name="error_tts_init">Text-to-Speech initialization failed.</string>
+    <string name="error_permission_denied">Audio permission is required to use the voice feature.</string>
+    <string name="error_stt">Speech recognition failed. Please try again.</string>
+    <string name="error_gemini">Error communicating with the AI. Please check your connection and API key.</string>
+
+    <!-- For second fragment template if present -->
+    <string name="previous">Previous</string>
+    <string name="lorem_ipsum">Lorem ipsum dolor sit amet, consectetur adipiscing elit.</string>
+</resources>

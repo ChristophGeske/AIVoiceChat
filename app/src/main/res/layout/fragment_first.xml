@@ -7,13 +7,15 @@
     android:padding="12dp"
     tools:context=".FirstFragment">
 
+    <!-- Scrollable content (conversation + settings).
+         Bottom bar is pinned and not part of this ScrollView. -->
     <ScrollView
-        android:id="@+id/rootScroll"
+        android:id="@+id/contentScroll"
         android:layout_width="0dp"
         android:layout_height="0dp"
         android:fillViewport="true"
         app:layout_constraintTop_toTopOf="parent"
-        app:layout_constraintBottom_toBottomOf="parent"
+        app:layout_constraintBottom_toTopOf="@+id/bottomBar"
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintEnd_toEndOf="parent">
 
@@ -23,158 +25,202 @@
             android:layout_height="wrap_content"
             android:orientation="vertical">
 
-            <!-- Conversation log -->
-            <ScrollView
-                android:id="@+id/scrollView"
+            <!-- Conversation log (no inner ScrollView, expands with content) -->
+            <TextView
+                android:id="@+id/conversationLog"
                 android:layout_width="match_parent"
-                android:layout_height="0dp"
-                android:layout_weight="1"
-                android:fillViewport="true"
-                android:layout_marginBottom="12dp">
+                android:layout_height="wrap_content"
+                android:hint="@string/conversation_log_hint"
+                android:textSize="16sp"
+                android:lineSpacingExtra="6dp"
+                android:textIsSelectable="true"
+                android:paddingBottom="12dp" />
 
-                <TextView
-                    android:id="@+id/conversationLog"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:hint="@string/conversation_log_hint"
-                    android:textSize="16sp"
-                    android:lineSpacingExtra="6dp"
-                    android:textIsSelectable="true" />
-            </ScrollView>
+            <!-- Settings header (collapsible) -->
+            <TextView
+                android:id="@+id/settingsHeader"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:padding="8dp"
+                android:text="@string/settings_show"
+                android:textStyle="bold"
+                android:background="?android:selectableItemBackground"
+                android:clickable="true"
+                android:focusable="true" />
 
-            <!-- API keys -->
+            <!-- Collapsible settings container (initially hidden) -->
             <LinearLayout
-                android:id="@+id/apiKeysGroup"
+                android:id="@+id/settingsContainer"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:orientation="vertical"
-                android:layout_marginBottom="12dp">
+                android:visibility="gone">
 
-                <EditText
-                    android:id="@+id/geminiApiKeyInput"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:hint="@string/gemini_api_key_hint"
-                    android:inputType="textPassword"
-                    android:autofillHints="password"
-                    android:importantForAutofill="yes" />
-
-                <EditText
-                    android:id="@+id/openaiApiKeyInput"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="8dp"
-                    android:hint="@string/openai_api_key_hint"
-                    android:inputType="textPassword"
-                    android:autofillHints="password"
-                    android:importantForAutofill="yes" />
-            </LinearLayout>
-
-            <!-- Models: 2 per row -->
-            <LinearLayout
-                android:id="@+id/modelsContainer"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:orientation="vertical"
-                android:layout_marginBottom="12dp">
-
+                <!-- API keys -->
                 <LinearLayout
+                    android:id="@+id/apiKeysGroup"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:orientation="horizontal">
+                    android:orientation="vertical"
+                    android:layout_marginBottom="12dp">
 
-                    <RadioButton
-                        android:id="@+id/radioGeminiFlash"
-                        android:layout_width="0dp"
+                    <EditText
+                        android:id="@+id/geminiApiKeyInput"
+                        android:layout_width="match_parent"
                         android:layout_height="wrap_content"
-                        android:layout_weight="1"
-                        android:checked="true"
-                        android:text="@string/gemini_flash" />
+                        android:hint="@string/gemini_api_key_hint"
+                        android:inputType="textPassword"
+                        android:autofillHints="password"
+                        android:importantForAutofill="yes" />
 
-                    <RadioButton
-                        android:id="@+id/radioGeminiPro"
-                        android:layout_width="0dp"
+                    <EditText
+                        android:id="@+id/openaiApiKeyInput"
+                        android:layout_width="match_parent"
                         android:layout_height="wrap_content"
-                        android:layout_weight="1"
-                        android:layout_marginStart="12dp"
-                        android:text="@string/gemini_pro" />
+                        android:layout_marginTop="8dp"
+                        android:hint="@string/openai_api_key_hint"
+                        android:inputType="textPassword"
+                        android:autofillHints="password"
+                        android:importantForAutofill="yes" />
                 </LinearLayout>
 
+                <!-- Models: 2 per row -->
                 <LinearLayout
+                    android:id="@+id/modelsContainer"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:orientation="horizontal"
-                    android:layout_marginTop="8dp">
+                    android:orientation="vertical"
+                    android:layout_marginBottom="12dp">
 
-                    <RadioButton
-                        android:id="@+id/radioGpt5"
-                        android:layout_width="0dp"
+                    <LinearLayout
+                        android:layout_width="match_parent"
                         android:layout_height="wrap_content"
-                        android:layout_weight="1"
-                        android:text="@string/gpt5_high" />
+                        android:orientation="horizontal">
 
-                    <RadioButton
-                        android:id="@+id/radioGpt5Mini"
-                        android:layout_width="0dp"
+                        <RadioButton
+                            android:id="@+id/radioGeminiFlash"
+                            android:layout_width="0dp"
+                            android:layout_height="wrap_content"
+                            android:layout_weight="1"
+                            android:checked="true"
+                            android:text="@string/gemini_flash" />
+
+                        <RadioButton
+                            android:id="@+id/radioGeminiPro"
+                            android:layout_width="0dp"
+                            android:layout_height="wrap_content"
+                            android:layout_weight="1"
+                            android:layout_marginStart="12dp"
+                            android:text="@string/gemini_pro" />
+                    </LinearLayout>
+
+                    <LinearLayout
+                        android:layout_width="match_parent"
                         android:layout_height="wrap_content"
-                        android:layout_weight="1"
-                        android:layout_marginStart="12dp"
-                        android:text="@string/gpt5_mini" />
+                        android:orientation="horizontal"
+                        android:layout_marginTop="8dp">
+
+                        <RadioButton
+                            android:id="@+id/radioGpt5"
+                            android:layout_width="0dp"
+                            android:layout_height="wrap_content"
+                            android:layout_weight="1"
+                            android:text="@string/gpt5_high" />
+
+                        <RadioButton
+                            android:id="@+id/radioGpt5Mini"
+                            android:layout_width="0dp"
+                            android:layout_height="wrap_content"
+                            android:layout_weight="1"
+                            android:layout_marginStart="12dp"
+                            android:text="@string/gpt5_mini" />
+                    </LinearLayout>
+                </LinearLayout>
+
+                <!-- Max sentences per turn -->
+                <LinearLayout
+                    android:id="@+id/maxSentencesGroup"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="vertical"
+                    android:layout_marginBottom="12dp">
+
+                    <TextView
+                        android:id="@+id/maxSentencesLabel"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="@string/max_sentences_label" />
+
+                    <EditText
+                        android:id="@+id/maxSentencesInput"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:hint="@string/max_sentences_hint"
+                        android:inputType="number"
+                        android:maxLength="2" />
                 </LinearLayout>
             </LinearLayout>
-
-            <!-- Controls row -->
-            <LinearLayout
-                android:id="@+id/controlsRow"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:orientation="horizontal"
-                android:layout_marginBottom="8dp">
-
-                <Button
-                    android:id="@+id/newRecordingButton"
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="1"
-                    android:visibility="gone"
-                    android:text="@string/new_recording"
-                    android:padding="12dp" />
-
-                <View
-                    android:layout_width="6dp"
-                    android:layout_height="0dp" />
-
-                <Button
-                    android:id="@+id/stopButton"
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="1"
-                    android:text="@string/stop_conversation"
-                    android:padding="12dp" />
-
-                <View
-                    android:layout_width="6dp"
-                    android:layout_height="0dp" />
-
-                <Button
-                    android:id="@+id/askAgainButton"
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="1"
-                    android:visibility="gone"
-                    android:text="Ask again"
-                    android:padding="12dp" />
-            </LinearLayout>
-
-            <!-- Speak button -->
-            <Button
-                android:id="@+id/speakButton"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:text="@string/start_conversation"
-                android:padding="16dp" />
         </LinearLayout>
     </ScrollView>
+
+    <!-- Bottom bar pinned to bottom -->
+    <LinearLayout
+        android:id="@+id/bottomBar"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        app:layout_constraintBottom_toBottomOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintEnd_toEndOf="parent">
+
+        <LinearLayout
+            android:id="@+id/controlsRow"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:layout_marginBottom="8dp">
+
+            <Button
+                android:id="@+id/newRecordingButton"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:visibility="gone"
+                android:text="@string/new_recording"
+                android:padding="12dp" />
+
+            <View
+                android:layout_width="6dp"
+                android:layout_height="0dp" />
+
+            <Button
+                android:id="@+id/stopButton"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="@string/stop_conversation"
+                android:padding="12dp" />
+
+            <View
+                android:layout_width="6dp"
+                android:layout_height="0dp" />
+
+            <Button
+                android:id="@+id/clearButton"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="@string/clear_conversation"
+                android:padding="12dp" />
+        </LinearLayout>
+
+        <Button
+            android:id="@+id/speakButton"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/start_conversation"
+            android:padding="16dp" />
+    </LinearLayout>
 
     <!-- Center overlay progress -->
     <ProgressBar

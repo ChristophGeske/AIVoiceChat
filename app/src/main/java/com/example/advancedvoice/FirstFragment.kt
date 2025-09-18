@@ -11,22 +11,24 @@ import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
 import android.text.Html
 import android.text.Spanned
-import android.util.Log
-import android.view.LayoutInflater
-import android.view.View
-import android.view.ViewGroup
+import android.view.*
 import android.widget.RadioButton
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.view.MenuHost
+import androidx.core.view.MenuProvider
 import androidx.core.widget.addTextChangedListener
 import androidx.fragment.app.Fragment
+import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
 import com.example.advancedvoice.databinding.FragmentFirstBinding
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import okhttp3.OkHttpClient
+import java.util.ArrayDeque
 import java.util.Locale
 import java.util.UUID
 import java.util.concurrent.TimeUnit
+import kotlin.math.min
 
 class FirstFragment : Fragment(), TextToSpeech.OnInitListener {
 
@@ -44,14 +46,22 @@ class FirstFragment : Fragment(), TextToSpeech.OnInitListener {
             .build()
     }
 
-    private var currentModelName = "gemini-2.5-flash"
-    private var autoContinue = true
-    private var isSpeaking = false
-    private var isListening = false
-    private var currentUtteranceId: String? = null
-
     private lateinit var engine: SentenceTurnEngine
 
+    private var currentModelName = "gemini-2.5-flash"
+    private var autoContinue = true
+    private var isListening = false
+    private var isSpeaking = false
+    private var currentUtteranceId: String? = null
+
+    // TTS queue: speak one by one without interrupting previous sentence
+    private val ttsQueue = ArrayDeque<String>()
+    private val ttsBufferLimit = 4 // prefetch up to this many sentences
+
+    // Settings collapse state
+    private var userToggledSettings = false // if user toggles, disable auto-collapse
+
+    // Prefs
     private val prefs by lazy { requireContext().getSharedPreferences("ai_prefs", Context.MODE_PRIVATE) }
 
     private val requestPermissionLauncher =
@@ -73,24 +83,26 @@ class FirstFragment : Fragment(), TextToSpeech.OnInitListener {
                 isSpeaking = true
                 requireActivity().runOnUiThread { binding.newRecordingButton.visibility = View.VISIBLE }
             }
+
             override fun onDone(utteranceId: String?) {
-                isSpeaking = false
                 requireActivity().runOnUiThread {
-                    binding.newRecordingButton.visibility = View.GONE
-                    // If engine is still active and has more, ask next sentence; else resume listening
-                    if (this@FirstFragment::engine.isInitialized && engine.isActive() && engine.hasMoreToSay()) {
-                        engine.requestNext()
-                    } else if (autoContinue) {
-                        startListening()
+                    if (ttsQueue.isNotEmpty()) ttsQueue.removeFirst()
+                    isSpeaking = false
+                    if (ttsQueue.isNotEmpty()) {
+                        speakQueued(ttsQueue.first())
+                    } else {
+                        if (this@FirstFragment::engine.isInitialized && engine.hasMoreToSay()) {
+                            engine.requestNext()
+                        } else if (autoContinue) {
+                            startListening()
+                        }
+                        binding.newRecordingButton.visibility = View.GONE
                     }
                 }
             }
+
             override fun onError(utteranceId: String?) {
-                isSpeaking = false
-                requireActivity().runOnUiThread {
-                    binding.newRecordingButton.visibility = View.GONE
-                    if (autoContinue) startListening()
-                }
+                onDone(utteranceId)
             }
         })
 
@@ -102,8 +114,17 @@ class FirstFragment : Fragment(), TextToSpeech.OnInitListener {
             geminiKeyProvider = { getGeminiApiKey() },
             openAiKeyProvider = { getOpenAiApiKey() },
             onSentence = { sentence ->
+                // queue TTS to avoid interruption
+                ttsQueue.addLast(sentence)
+                if (!isSpeaking) {
+                    speakQueued(ttsQueue.first())
+                }
+                // prefetch more while speaking up to buffer limit (or max sentences)
+                val bufferLimit = min(readMaxSentences(), ttsBufferLimit)
+                while (engine.hasMoreToSay() && ttsQueue.size < bufferLimit) {
+                    engine.requestNext()
+                }
                 appendToConversation("Assistant", sentence)
-                speak(sentence)
             },
             onTurnFinish = {
                 setLoading(false)
@@ -117,20 +138,43 @@ class FirstFragment : Fragment(), TextToSpeech.OnInitListener {
                     .setMessage(msg.take(700))
                     .setPositiveButton("OK", null)
                     .show()
+                setLoading(false)
+                binding.speakButton.text = getString(R.string.status_ready)
             }
         )
 
         setupUI()
+        setupMenu()
         loadSavedKeys()
         setupKeyPersistence()
+
+        // default max sentences = 4
+        binding.maxSentencesInput.setText("4")
+        engine.setMaxSentences(readMaxSentences())
+        binding.maxSentencesInput.addTextChangedListener {
+            engine.setMaxSentences(readMaxSentences())
+        }
     }
 
     private fun setupUI() {
+        // Settings collapsible
+        binding.settingsHeader.setOnClickListener {
+            val visible = binding.settingsContainer.visibility == View.VISIBLE
+            binding.settingsContainer.visibility = if (visible) View.GONE else View.VISIBLE
+            binding.settingsHeader.text = getString(if (visible) R.string.settings_show else R.string.settings_hide)
+            userToggledSettings = true
+        }
+
+        // Clear conversation button (bottom bar)
+        binding.clearButton.setOnClickListener { clearConversationAndRevealSettings() }
+
+        // Speak
         binding.speakButton.setOnClickListener {
             autoContinue = true
             startListening()
         }
 
+        // New recording (preempt)
         binding.newRecordingButton.setOnClickListener {
             autoContinue = true
             stopTts()
@@ -138,20 +182,20 @@ class FirstFragment : Fragment(), TextToSpeech.OnInitListener {
             startListening()
         }
 
+        // Stop conversation
         binding.stopButton.setOnClickListener { stopConversation() }
 
+        // Models (manual single-selection)
         val radios = listOf(
             binding.radioGeminiFlash to "gemini-2.5-flash",
             binding.radioGeminiPro to "gemini-2.5-pro",
             binding.radioGpt5 to "gpt-5",
             binding.radioGpt5Mini to "gpt-5-mini"
         )
-
         val selectRadio: (RadioButton) -> Unit = { selected ->
             radios.forEach { (rb, _) -> if (rb !== selected) rb.isChecked = false }
             selected.isChecked = true
         }
-
         radios.forEach { (rb, model) ->
             rb.setOnClickListener {
                 if (this::engine.isInitialized) engine.abort()
@@ -160,6 +204,36 @@ class FirstFragment : Fragment(), TextToSpeech.OnInitListener {
                 Toast.makeText(context, "Model: $currentModelName", Toast.LENGTH_SHORT).show()
                 appendToConversation("System", "Model switched to $currentModelName")
             }
+        }
+    }
+
+    private fun setupMenu() {
+        val menuHost: MenuHost = requireActivity()
+        menuHost.addMenuProvider(object : MenuProvider {
+            override fun onCreateMenu(menu: Menu, menuInflater: MenuInflater) {
+                menuInflater.inflate(R.menu.menu_main, menu)
+                val clear = menu.findItem(R.id.action_clear)
+                clear?.isVisible = true
+            }
+
+            override fun onMenuItemSelected(menuItem: MenuItem): Boolean {
+                return when (menuItem.itemId) {
+                    R.id.action_clear -> {
+                        clearConversationAndRevealSettings()
+                        true
+                    }
+                    else -> false
+                }
+            }
+        }, viewLifecycleOwner, Lifecycle.State.RESUMED)
+    }
+
+    private fun clearConversationAndRevealSettings() {
+        binding.conversationLog.text = Html.fromHtml("", Html.FROM_HTML_MODE_COMPACT)
+        ttsQueue.clear()
+        if (!userToggledSettings) {
+            binding.settingsContainer.visibility = View.VISIBLE
+            binding.settingsHeader.text = getString(R.string.settings_hide)
         }
     }
 
@@ -174,6 +248,7 @@ class FirstFragment : Fragment(), TextToSpeech.OnInitListener {
                 isListening = true
                 binding.speakButton.text = getString(R.string.status_listening)
                 setLoading(false)
+                maybeAutoCollapseSettings()
             }
 
             override fun onResults(results: Bundle?) {
@@ -189,11 +264,9 @@ class FirstFragment : Fragment(), TextToSpeech.OnInitListener {
 
             override fun onError(error: Int) {
                 isListening = false
-                Log.e("STT_ERROR", "Error: $error")
                 Toast.makeText(context, getString(R.string.error_stt), Toast.LENGTH_SHORT).show()
                 binding.speakButton.text = getString(R.string.status_ready)
                 setLoading(false)
-                if (autoContinue) startListening()
             }
 
             override fun onBeginningOfSpeech() {}
@@ -208,8 +281,6 @@ class FirstFragment : Fragment(), TextToSpeech.OnInitListener {
     private fun startListening() {
         if (isListening) return
         requestPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
-        stopTts()
-
         val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
             putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
             putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.getDefault())
@@ -226,7 +297,11 @@ class FirstFragment : Fragment(), TextToSpeech.OnInitListener {
         setLoading(false)
         binding.speakButton.text = getString(R.string.status_ready)
         binding.newRecordingButton.visibility = View.GONE
-        appendToConversation("System", "Conversation stopped.")
+        if (!userToggledSettings) {
+            binding.settingsContainer.visibility = View.VISIBLE
+            binding.settingsHeader.text = getString(R.string.settings_hide)
+        }
+        ttsQueue.clear()
     }
 
     private fun stopListening() {
@@ -239,6 +314,7 @@ class FirstFragment : Fragment(), TextToSpeech.OnInitListener {
         try { textToSpeech.stop() } catch (_: Exception) {}
         isSpeaking = false
         binding.newRecordingButton.visibility = View.GONE
+        ttsQueue.clear()
     }
 
     private fun callModelApi(userInput: String) {
@@ -251,8 +327,18 @@ class FirstFragment : Fragment(), TextToSpeech.OnInitListener {
             return
         }
 
-        // Start sentence-by-sentence turn (one sentence per request)
+        engine.setMaxSentences(readMaxSentences())
+        ttsQueue.clear()
         engine.startTurn(userInput, currentModelName)
+    }
+
+    private fun maybeAutoCollapseSettings() {
+        if (userToggledSettings) return
+        val longContent = (binding.conversationLog.text?.length ?: 0) > 200
+        if (longContent) {
+            binding.settingsContainer.visibility = View.GONE
+            binding.settingsHeader.text = getString(R.string.settings_show)
+        }
     }
 
     private fun ensureKeyAvailableForModelOrShow(modelName: String): Boolean {
@@ -269,13 +355,16 @@ class FirstFragment : Fragment(), TextToSpeech.OnInitListener {
         return false
     }
 
-    // ---- UI helpers ----
+    private fun readMaxSentences(): Int {
+        val n = binding.maxSentencesInput.text?.toString()?.trim()?.toIntOrNull()
+        return (n ?: 4).coerceIn(1, 10)
+    }
 
-    private fun speak(text: String) {
+    private fun speakQueued(text: String) {
         val id = UUID.randomUUID().toString()
         currentUtteranceId = id
-        val params = Bundle()
-        textToSpeech.speak(text, TextToSpeech.QUEUE_FLUSH, params, id)
+        textToSpeech.speak(text, TextToSpeech.QUEUE_ADD, null, id)
+        isSpeaking = true
     }
 
     private fun appendToConversation(speaker: String, text: String) {
@@ -292,7 +381,7 @@ class FirstFragment : Fragment(), TextToSpeech.OnInitListener {
             ?: Html.fromHtml("", Html.FROM_HTML_MODE_COMPACT)
         val updated = Html.fromHtml(current.toString() + entry, Html.FROM_HTML_MODE_COMPACT)
         binding.conversationLog.text = updated
-        binding.scrollView.post { binding.scrollView.fullScroll(View.FOCUS_DOWN) }
+        binding.contentScroll.post { binding.contentScroll.fullScroll(View.FOCUS_DOWN) }
     }
 
     private fun setLoading(isLoading: Boolean) {
@@ -310,7 +399,10 @@ class FirstFragment : Fragment(), TextToSpeech.OnInitListener {
 
         binding.geminiApiKeyInput.isEnabled = enableInputs
         binding.openaiApiKeyInput.isEnabled = enableInputs
+        binding.maxSentencesInput.isEnabled = enableInputs
     }
+
+    // Persist/load keys
 
     private fun loadSavedKeys() {
         binding.geminiApiKeyInput.setText(prefs.getString("gemini_key", "") ?: "")
@@ -333,11 +425,9 @@ class FirstFragment : Fragment(), TextToSpeech.OnInitListener {
         if (status == TextToSpeech.SUCCESS) {
             val result = textToSpeech.setLanguage(Locale.US)
             if (result == TextToSpeech.LANG_MISSING_DATA || result == TextToSpeech.LANG_NOT_SUPPORTED) {
-                Log.e("TTS", "Language not supported")
                 Toast.makeText(context, "TTS Language not supported.", Toast.LENGTH_SHORT).show()
             }
         } else {
-            Log.e("TTS", "Initialization failed")
             Toast.makeText(context, getString(R.string.error_tts_init), Toast.LENGTH_SHORT).show()
         }
     }

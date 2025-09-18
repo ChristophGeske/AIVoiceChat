@@ -11,10 +11,10 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 /**
- * Minimal sentence-by-sentence engine:
- * - Sends ONE sentence per request (no auto-retry, no provider fallback).
- * - If more text is needed and no user interrupt, call requestNext().
- * - Keeps bounded history (22 turns).
+ * Sentence-by-sentence engine (no auto-retry, no auto-fallback).
+ * - Builds a strict JSON instruction so model returns exactly one sentence with is_final_sentence flag.
+ * - Does not auto-pipeline; caller (UI) controls pacing via requestNext() to sync with TTS.
+ * - Supports user-configured max sentences per turn (default 4).
  */
 class SentenceTurnEngine(
     private val uiScope: CoroutineScope,
@@ -27,17 +27,20 @@ class SentenceTurnEngine(
     private val onError: (String) -> Unit
 ) {
 
-    private data class Msg(val role: String, val text: String) // role: user|assistant
+    private data class Msg(val role: String, val text: String)
 
-    private val history = ArrayList<Msg>()         // user/assistant turns
-    private val maxHistoryTurns = 22               // like the python sample
-    private val maxSentencesPerTurn = 3
+    private val history = ArrayList<Msg>()
+    private var maxSentencesPerTurn = 4
+    private var model = "gemini-2.5-flash"
 
     private var active = false
     private var hasMore = false
-    private var model = "gemini-2.5-flash"
     private var sentencesThisTurn = 0
     private var lastAssistantSentence: String? = null
+
+    fun setMaxSentences(n: Int) {
+        maxSentencesPerTurn = n.coerceIn(1, 10)
+    }
 
     fun isActive(): Boolean = active
     fun hasMoreToSay(): Boolean = hasMore
@@ -47,7 +50,6 @@ class SentenceTurnEngine(
         hasMore = false
         sentencesThisTurn = 0
         lastAssistantSentence = null
-        // Do not clear history; we keep prior context
         onSystem("Generation interrupted.")
     }
 
@@ -64,37 +66,14 @@ class SentenceTurnEngine(
     }
 
     fun requestNext() {
-        if (!active) return
-        if (!hasMore) return
+        if (!active || !hasMore) return
         if (sentencesThisTurn >= maxSentencesPerTurn) {
             active = false
-            onTurnFinish()
+            hasMore = false
+            uiScope.launch { onTurnFinish() }
             return
         }
         requestSentence(initial = false)
-    }
-
-    // ---- Internals ----
-
-    private fun addUser(text: String) {
-        history.add(Msg("user", text))
-        trimHistory()
-    }
-
-    private fun addAssistant(text: String) {
-        history.add(Msg("assistant", text))
-        trimHistory()
-    }
-
-    private fun trimHistory() {
-        // keep last N user/assistant exchanges (2 * maxHistoryTurns messages)
-        var userAssistantCount = history.count { it.role == "user" || it.role == "assistant" }
-        while (userAssistantCount > 2 * maxHistoryTurns && history.isNotEmpty()) {
-            val removed = history.removeAt(0)
-            if (removed.role == "user" || removed.role == "assistant") {
-                userAssistantCount--
-            }
-        }
     }
 
     private fun requestSentence(initial: Boolean) {
@@ -110,7 +89,6 @@ class SentenceTurnEngine(
                 if (!isActive()) return@launch
 
                 if (sentence.isBlank()) {
-                    // No content received, end turn gracefully
                     hasMore = false
                     active = false
                     uiScope.launch { onSystem("No content received from the model.") }
@@ -123,12 +101,11 @@ class SentenceTurnEngine(
                 addAssistant(sentence)
                 uiScope.launch { onSentence(sentence) }
 
-                // If model indicated more is needed AND sentence cap not reached, keep hasMore set
-                if (hasMore && sentencesThisTurn < maxSentencesPerTurn) {
-                    // Wait for TTS to call requestNext(); do nothing here.
-                } else {
-                    hasMore = false
+                // Do not auto-call requestNext() here; UI/tts pacing controls it.
+                // hasMore is already set in parseSentenceJsonOrFirstSentence(...)
+                if (!hasMore || sentencesThisTurn >= maxSentencesPerTurn) {
                     active = false
+                    hasMore = false
                     uiScope.launch { onTurnFinish() }
                 }
             } catch (e: Exception) {
@@ -142,17 +119,31 @@ class SentenceTurnEngine(
     }
 
     private fun buildInstruction(initial: Boolean): String {
-        // We enforce JSON output: {"sentence":"...","is_final_sentence":true|false}
-        // For continuation, we provide last sentence as context.
+        val plan = "Plan up to $maxSentencesPerTurn concise sentences total for this turn."
+        val format = "Respond ONLY with JSON: {\"sentence\":\"<one concise sentence>\",\"is_final_sentence\":<true|false>}."
+        val rule = "Return exactly one sentence per response. Set is_final_sentence=false until you finish or you reach $maxSentencesPerTurn sentences for this turn."
         val continueHint = lastAssistantSentence?.let { " Continue from your last sentence: \"$it\"." } ?: ""
-        val core =
-            "Respond ONLY with a compact JSON object: {\"sentence\":\"<exactly one concise sentence>\",\"is_final_sentence\":<true|false>}." +
-                    " Do not include any extra keys, no explanations or prose outside JSON." +
-                    " If you can continue the answer with another sentence, set is_final_sentence=false; otherwise true."
-        return if (initial) core else core + continueHint
+        return "$plan $format $rule$continueHint"
     }
 
-    // ---- Providers ----
+    private fun addUser(text: String) {
+        history.add(Msg("user", text))
+        trimHistory()
+    }
+
+    private fun addAssistant(text: String) {
+        history.add(Msg("assistant", text))
+        trimHistory()
+    }
+
+    private fun trimHistory() {
+        // keep last 22 user/assistant turns (≈ python sample)
+        var count = history.count { it.role == "user" || it.role == "assistant" }
+        while (count > 44 && history.isNotEmpty()) {
+            val removed = history.removeAt(0)
+            if (removed.role == "user" || removed.role == "assistant") count--
+        }
+    }
 
     private fun callOpenAiOnce(instruction: String): String {
         val apiKey = openAiKeyProvider().trim()
@@ -164,7 +155,6 @@ class SentenceTurnEngine(
         val body = JSONObject().apply {
             put("model", model)
             put("messages", msgs)
-            // For gpt-5 family, avoid temperature to reduce 400s
             if (!model.startsWith("gpt-5", ignoreCase = true)) {
                 put("temperature", 0.7)
             }
@@ -221,23 +211,17 @@ class SentenceTurnEngine(
         }
     }
 
-    // ---- Message builders ----
-
     private fun buildOpenAiMessages(instruction: String): JSONArray {
         val msgs = JSONArray()
-        // System instruction first
         msgs.put(
             JSONObject().apply {
                 put("role", "system")
                 put(
                     "content",
-                    "You must obey formatting strictly. " +
-                            instruction +
-                            " If asked to continue, return the next single sentence."
+                    "You must obey formatting strictly. $instruction If asked to continue, return the next single sentence."
                 )
             }
         )
-        // Add history
         for (m in history) {
             msgs.put(JSONObject().apply {
                 put("role", if (m.role == "assistant") "assistant" else "user")
@@ -249,8 +233,6 @@ class SentenceTurnEngine(
 
     private fun buildGeminiContents(instruction: String): JSONArray {
         val contents = JSONArray()
-
-        // Put instruction as a leading "user" message (Gemini doesn't have system role in v1 body)
         contents.put(
             JSONObject().apply {
                 put("role", "user")
@@ -259,7 +241,6 @@ class SentenceTurnEngine(
                 })
             }
         )
-
         for (m in history) {
             val role = if (m.role == "assistant") "model" else "user"
             contents.put(
@@ -274,12 +255,9 @@ class SentenceTurnEngine(
         return contents
     }
 
-    // ---- Parsing helpers ----
-
     private fun extractGeminiText(payload: String): String {
         return try {
             val root = JSONObject(payload)
-            // safety block?
             root.optJSONObject("promptFeedback")?.optString("blockReason")?.let { br ->
                 if (!br.isNullOrBlank()) return "The model blocked this request ($br)."
             }
@@ -300,16 +278,10 @@ class SentenceTurnEngine(
     }
 
     private fun parseError(body: String): String? {
-        return try {
-            val err = JSONObject(body).optJSONObject("error")
-            err?.optString("message")
-        } catch (_: Exception) {
-            null
-        }
+        return try { JSONObject(body).optJSONObject("error")?.optString("message") } catch (_: Exception) { null }
     }
 
     private fun parseSentenceJsonOrFirstSentence(text: String): String {
-        // Try parse JSON object containing sentence + is_final_sentence
         val json = firstJsonObject(text)
         if (json != null) {
             val sentence = json.optString("sentence", "").trim()
@@ -317,9 +289,7 @@ class SentenceTurnEngine(
             hasMore = !isFinal && sentencesThisTurn < maxSentencesPerTurn
             return sentence
         }
-        // Fallback: take first sentence heuristically
         val first = firstSentence(text)
-        // Without schema we set is_final_sentence=true (no more unless user asks)
         hasMore = false
         return first
     }
@@ -329,7 +299,6 @@ class SentenceTurnEngine(
         if (s.startsWith("{") && s.endsWith("}")) {
             return try { JSONObject(s) } catch (_: Exception) { null }
         }
-        // try to locate the first {...}
         val start = s.indexOf('{')
         if (start == -1) return null
         var depth = 0

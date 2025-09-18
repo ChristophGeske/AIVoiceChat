@@ -40,8 +40,6 @@ import java.net.UnknownHostException
 import java.util.Locale
 import java.util.UUID
 import java.util.concurrent.TimeUnit
-import kotlin.math.min
-import kotlin.random.Random
 
 class FirstFragment : Fragment(), TextToSpeech.OnInitListener {
 
@@ -159,7 +157,7 @@ class FirstFragment : Fragment(), TextToSpeech.OnInitListener {
 
         binding.stopButton.setOnClickListener { stopConversation() }
 
-        // Since we no longer use a single RadioGroup, enforce single-selection manually
+        // Manual single-selection (2 rows UI in layout)
         val radios = listOf(
             binding.radioGeminiFlash to "gemini-2.5-flash",
             binding.radioGeminiPro to "gemini-2.5-pro",
@@ -284,12 +282,17 @@ class FirstFragment : Fragment(), TextToSpeech.OnInitListener {
 
         maybeTruncateAndAddUserTurn(userInputRaw)
 
+        // Single-attempt only (no auto-retry) to avoid extra credits/calls
         viewLifecycleOwner.lifecycleScope.launch {
             try {
-                val aiResponse = withContext(Dispatchers.IO) { generateWithRetries(currentModelName) }
-                appendToConversation("Assistant", aiResponse)
-                addAssistantTurn(aiResponse)
-                speak(aiResponse)
+                val aiResponse = withContext(Dispatchers.IO) { generateOnce(currentModelName) }
+                if (aiResponse.isBlank()) {
+                    appendToConversation("System", "No content received from the model.")
+                } else {
+                    appendToConversation("Assistant", aiResponse)
+                    addAssistantTurn(aiResponse)
+                    speak(aiResponse)
+                }
             } catch (e: Exception) {
                 Log.e("LLM_API_ERROR", "API call failed", e)
                 when (e) {
@@ -318,7 +321,7 @@ class FirstFragment : Fragment(), TextToSpeech.OnInitListener {
                     }
                     else -> {
                         val msg = e.message.orEmpty()
-                        showGenericErrorDialog("Unexpected error", msg.take(600))
+                        showGenericErrorDialog("Unexpected error", msg.ifBlank { "Unknown runtime error." })
                         appendToConversation("Error", msg.ifBlank { getString(R.string.error_gemini) })
                     }
                 }
@@ -326,6 +329,15 @@ class FirstFragment : Fragment(), TextToSpeech.OnInitListener {
                 setLoading(false)
                 binding.speakButton.text = getString(R.string.status_ready)
             }
+        }
+    }
+
+    // Single attempt generator (no retry)
+    private fun generateOnce(modelName: String): String {
+        return if (modelName.startsWith("gpt-", true)) {
+            generateWithOpenAI(modelName)
+        } else {
+            generateWithGemini(modelName)
         }
     }
 
@@ -396,44 +408,7 @@ class FirstFragment : Fragment(), TextToSpeech.OnInitListener {
         return messages
     }
 
-    // ====== Retry wrapper for transient errors ======
-
-    private fun parseRetryAfterSeconds(retryAfterHeader: String?): Long? {
-        if (retryAfterHeader.isNullOrBlank()) return null
-        return retryAfterHeader.trim().toLongOrNull()
-    }
-
-    private suspend fun generateWithRetries(modelName: String): String {
-        val maxRetries = 3
-        var attempt = 0
-        var backoffMs = 800L
-        while (true) {
-            try {
-                return if (modelName.startsWith("gpt-", true)) {
-                    generateWithOpenAI(modelName)
-                } else {
-                    generateWithGemini(modelName)
-                }
-            } catch (e: Exception) {
-                val transient = when (e) {
-                    is ApiHttpException -> e.code in listOf(408, 429, 500, 502, 503, 504)
-                    is ApiNetworkException -> true
-                    else -> false
-                }
-                if (!transient || attempt >= maxRetries) throw e
-
-                val retryAfter = (e as? ApiHttpException)?.retryAfterSeconds?.let { it * 1000 }
-                val jitter = Random.nextLong(0, 300)
-                val delayMs = (retryAfter ?: backoffMs) + jitter
-                Log.w("LLM_RETRY", "Transient error (${e.javaClass.simpleName}). Retrying in ${delayMs}ms (attempt ${attempt + 1}/$maxRetries)")
-                delay(delayMs)
-                attempt++
-                backoffMs = min(backoffMs * 2, 8000)
-            }
-        }
-    }
-
-    // ====== Model calls with detailed error surfacing ======
+    // ====== Model calls (one-shot) ======
 
     private fun generateWithGemini(modelName: String): String {
         val apiKey = getGeminiApiKey()
@@ -468,6 +443,7 @@ class FirstFragment : Fragment(), TextToSpeech.OnInitListener {
                         retryAfterSeconds = retryAfter
                     )
                 }
+                if (bodyStr.isBlank()) return ""
                 val root = JSONObject(bodyStr)
                 root.optJSONObject("promptFeedback")?.optString("blockReason")?.let { br ->
                     if (br.isNotBlank()) return "The model blocked this request ($br). Try rephrasing."
@@ -480,7 +456,8 @@ class FirstFragment : Fragment(), TextToSpeech.OnInitListener {
                         if (text.isNotBlank()) return text
                     }
                 }
-                return "No response from model."
+                Log.w("GEMINI_PARSE", "No text found. Raw: ${bodyStr.take(300)}")
+                return ""
             }
         } catch (io: IOException) {
             throw ApiNetworkException("Gemini", url, io)
@@ -532,18 +509,22 @@ class FirstFragment : Fragment(), TextToSpeech.OnInitListener {
                         retryAfterSeconds = retryAfter
                     )
                 }
+                if (bodyStr.isBlank()) return ""
                 val root = JSONObject(bodyStr)
                 val choices = root.optJSONArray("choices")
                 if (choices != null && choices.length() > 0) {
                     val content = choices.getJSONObject(0).optJSONObject("message")?.optString("content").orEmpty()
                     if (content.isNotBlank()) return content
                 }
-                return "No response from model."
+                Log.w("OPENAI_PARSE", "No text found. Raw: ${bodyStr.take(300)}")
+                return ""
             }
         } catch (io: IOException) {
             throw ApiNetworkException("OpenAI", url, io)
         }
     }
+
+    // ====== Utils ======
 
     private data class ParsedError(val status: String?, val message: String?)
     private fun safeParseError(body: String): ParsedError {
@@ -564,6 +545,11 @@ class FirstFragment : Fragment(), TextToSpeech.OnInitListener {
         } catch (_: Exception) {
             ParsedError(status = null, message = body.take(300))
         }
+    }
+
+    private fun parseRetryAfterSeconds(retryAfterHeader: String?): Long? {
+        if (retryAfterHeader.isNullOrBlank()) return null
+        return retryAfterHeader.trim().toLongOrNull()
     }
 
     // ====== Error dialogs ======
@@ -665,7 +651,6 @@ class FirstFragment : Fragment(), TextToSpeech.OnInitListener {
             else -> "#212121"
         }
         val safeText = text.replace("<", "&lt;").replace(">", "&gt;")
-        // Add extra blank line between messages for better separation
         val entry = "<b><font color='$color'>$speaker</font>:</b> $safeText<br/><br/><br/>"
         val current: Spanned = binding.conversationLog.text as? Spanned
             ?: Html.fromHtml("", Html.FROM_HTML_MODE_COMPACT)
@@ -679,7 +664,6 @@ class FirstFragment : Fragment(), TextToSpeech.OnInitListener {
         binding.progressBar.visibility = if (isLoading) View.VISIBLE else View.GONE
         binding.speakButton.isEnabled = enableInputs
 
-        // Enable/disable model radios
         binding.radioGeminiFlash.isEnabled = !isLoading
         binding.radioGeminiPro.isEnabled = !isLoading
         binding.radioGpt5.isEnabled = !isLoading

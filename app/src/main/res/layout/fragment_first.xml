@@ -70,7 +70,7 @@
                     android:importantForAutofill="yes" />
             </LinearLayout>
 
-            <!-- Models: 2 per row (no horizontal scrolling) -->
+            <!-- Models: 2 per row -->
             <LinearLayout
                 android:id="@+id/modelsContainer"
                 android:layout_width="match_parent"
@@ -141,7 +141,7 @@
                     android:padding="12dp" />
 
                 <View
-                    android:layout_width="8dp"
+                    android:layout_width="6dp"
                     android:layout_height="0dp" />
 
                 <Button
@@ -150,6 +150,19 @@
                     android:layout_height="wrap_content"
                     android:layout_weight="1"
                     android:text="@string/stop_conversation"
+                    android:padding="12dp" />
+
+                <View
+                    android:layout_width="6dp"
+                    android:layout_height="0dp" />
+
+                <Button
+                    android:id="@+id/askAgainButton"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:visibility="gone"
+                    android:text="Ask again"
                     android:padding="12dp" />
             </LinearLayout>
 

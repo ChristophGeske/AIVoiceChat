@@ -3,11 +3,11 @@
 
 ## 💡 What is AIVoiceChat?
 
-When you ever tried OpenAIs "AdvancedVoice" or Googles "Gemini Live" you might have noticed that the quality of the answears is not as good as the Thinking models Gemini 2.5 Pro and GPT‑5 Thinking high. 
+When you have tried OpenAI's "AdvancedVoice" or Google's "Gemini Live" you might have noticed that the quality of the answers is not as good as the thinking models Gemini 2.5 Pro and GPT‑5 which booth have higher thinking capabilities than the current voice models. 
 
-The reason for that is that when you use the voice option from these companies they use a different model that is optimized for low‑latency streaming rather than using the long “thinking” mode which gives better answears but can take up to minutes. 
+The reason for that is that when you use the voice option from these companies they use a different model that is optimized for low‑latency streaming rather than using the long “thinking” mode which gives better answers but can take up to minutes. 
 
-AIVoiceChat talks directly to the stronger text models (Gemini 2.5 Pro and GPT‑5 high) so you get the highest possible quality answers with the disadventage of sometimes much slower responses.
+AIVoiceChat talks directly to the stronger text models (Gemini 2.5 Pro and GPT‑5) so you get the highest possible quality answers with the disadvantage of sometimes much slower responses.
 
 
 ## 🚀 Get Started (Early Alpha)
@@ -18,7 +18,7 @@ AIVoiceChat talks directly to the stronger text models (Gemini 2.5 Pro and GPT�
 
 2. Get your free Gemini API key  
    - Google AI Studio: https://aistudio.google.com/apikey  
-   - Sign in → Create API key → Copy it in your phones Clipboard
+   - Sign in → Create API key → Copy it to your phone's clipboard
 
 3. (Optional) Get an OpenAI API key  
    - OpenAI: https://platform.openai.com/  
@@ -28,7 +28,7 @@ AIVoiceChat talks directly to the stronger text models (Gemini 2.5 Pro and GPT�
    - Install the APK and grant microphone permission  
    - Open the app and paste your API key under "Show Settings"  
    - Pick your model (Gemini 2.5 Pro, Gemini 2.5 Flash, GPT‑5, or GPT‑5 mini)  
-   - Tap “Tap to Speak,” to talk to the model
+   - Tap “Tap to Speak” to talk to the model
 
 5. Check back for updates  
    - Improvements ship frequently. Star the repo and watch the releases page!
@@ -37,22 +37,22 @@ AIVoiceChat talks directly to the stronger text models (Gemini 2.5 Pro and GPT�
 ## 🛠️ How It Works (Under the Hood)
 
 - Speech‑to‑Text (STT): Uses Android’s built‑in SpeechRecognizer (US English can be set by you in your phone settings) 
-- LLM calls: Use Google and OpenAI servers for generating responses (Should adjust automatically to your spoken language)
+- LLM calls: Uses Google and OpenAI servers for generating responses (Should adjust automatically to your spoken language)
 - TTS: Android TextToSpeech (US English can be set by you in your phone settings)
 
 SentenceTurnEngine:  
    - Sends a strict instruction so the model returns exactly one sentence in JSON:  
      `{"sentence":"<one concise sentence>","is_final_sentence":true|false}`  
-   - Requests the next sentence when the previous one finishes TTS this keeps conversation fast
+   - Requests the next sentence when the previous one finishes TTS, this keeps conversation fast
 
 
 - STT and TTS quality can vary by device/network settings but might run locally which would make it super fast
-- Early alpha: occasional hiccups with streaming, pacing, or rate limits. The choosen sentence-by-sentence generation used is low on tokens but high on requests which for Gemini free tier might be less ideal since Gemini free tier is counting requests and not tokens.
+- Early alpha: occasional hiccups with streaming, pacing, or rate limits. The chosen sentence-by-sentence generation used is low on tokens but high on requests which for Gemini free tier might be less ideal since Gemini free tier is counting requests and not tokens.
 
 
 ## 🤝 Contributing
 
-Issues and PRs are welcome. If you have ideas for better streaming, pacing, or UX, please open an issue to discuss. The app is still in Alpha so many improvements are already planed.
+Issues and PRs are welcome. If you have ideas for better streaming, pacing, or UX, please open an issue to discuss. The app is still in Alpha so many improvements are already planned.
 
 
 ## 📜 License (MIT)

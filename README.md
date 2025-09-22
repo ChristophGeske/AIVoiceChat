@@ -1,4 +1,4 @@
-# 🎙️ AIVoiceChat — Real‑time Voice Chat with Gemini 2.5 Pro and GPT‑5 high (Android)
+# 🎙️ AIVoiceChat — Real‑time Voice Chat with Gemini 2.5 Pro and GPT‑5 (Android)
 
 
 ## 💡 What is AIVoiceChat?

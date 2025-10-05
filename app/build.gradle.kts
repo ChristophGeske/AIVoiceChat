@@ -38,6 +38,22 @@ android {
         viewBinding = true
         buildConfig = true
     }
+
+    testOptions {
+        unitTests {
+            isIncludeAndroidResources = true
+            isReturnDefaultValues = true
+        }
+        unitTests.all {
+            it.testLogging {
+                events("passed", "skipped", "failed", "standardOut", "standardError")
+                showStandardStreams = true
+                showExceptions = true
+                showCauses = true
+                showStackTraces = true
+            }
+        }
+    }
 }
 
 dependencies {
@@ -51,15 +67,26 @@ dependencies {
     // OkHttp for REST calls (Gemini + OpenAI)
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
 
-    // Coroutines for background tasks
-    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.7.3")
-    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")
+    // Coroutines (align versions across core/android/test)
+    val coroutinesVersion = "1.8.1"
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:$coroutinesVersion")
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:$coroutinesVersion")
+    testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:$coroutinesVersion")
+    androidTestImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:$coroutinesVersion")
 
     // Lifecycle runtime (for lifecycleScope)
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.7.0")
     implementation("androidx.lifecycle:lifecycle-viewmodel-ktx:2.7.0")
 
-    testImplementation(libs.junit)
+    // Tests
+    testImplementation(libs.junit) // JUnit 4
+    testImplementation("org.jetbrains.kotlin:kotlin-test:1.9.22")
+    testImplementation("org.jetbrains.kotlin:kotlin-test-junit:1.9.22")
+    testImplementation("io.mockk:mockk:1.13.8")
+
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)
+    // Optional helpful test utilities (instrumented and unit tests)
+    androidTestImplementation("androidx.test:core-ktx:1.5.0")
+    testImplementation("androidx.test:core-ktx:1.5.0")
 }

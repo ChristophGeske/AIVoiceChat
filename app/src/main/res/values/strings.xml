@@ -43,7 +43,10 @@
     <string name="error_stt">Speech recognition failed. Please try again.</string>
     <string name="error_gemini">Error communicating with the AI. Please check your connection and API key.</string>
 
-    <!-- Template strings used by fragment_second.xml -->
+    <!-- Template strings used by fragment layout previews -->
     <string name="previous">Previous</string>
     <string name="lorem_ipsum">Lorem ipsum dolor sit amet, consectetur adipiscing elit.</string>
+
+    <string name="faster_first_label">Faster First Response</string>
+    <string name="faster_first_desc">To speed up the initial response, the first sentence uses a non‑thinking pass and the rest uses deeper thinking. This helps balance speed and quality.</string>
 </resources>

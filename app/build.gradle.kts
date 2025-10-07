@@ -1,6 +1,6 @@
 plugins {
-    alias(libs.plugins.android.application)
-    alias(libs.plugins.kotlin.android)
+    id("com.android.application")
+    id("org.jetbrains.kotlin.android")
 }
 
 android {
@@ -54,6 +54,11 @@ android {
             }
         }
     }
+
+    packaging {
+        resources.excludes.add("META-INF/AL2.0")
+        resources.excludes.add("META-INF/LGPL2.1")
+    }
 }
 
 dependencies {
@@ -64,29 +69,27 @@ dependencies {
     implementation(libs.androidx.navigation.fragment.ktx)
     implementation(libs.androidx.navigation.ui.ktx)
 
-    // OkHttp for REST calls (Gemini + OpenAI)
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
 
-    // Coroutines (align versions across core/android/test)
     val coroutinesVersion = "1.8.1"
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:$coroutinesVersion")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:$coroutinesVersion")
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:$coroutinesVersion")
     androidTestImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:$coroutinesVersion")
 
-    // Lifecycle runtime (for lifecycleScope)
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.7.0")
     implementation("androidx.lifecycle:lifecycle-viewmodel-ktx:2.7.0")
 
-    // Tests
-    testImplementation(libs.junit) // JUnit 4
+    testImplementation(libs.junit)
     testImplementation("org.jetbrains.kotlin:kotlin-test:1.9.22")
     testImplementation("org.jetbrains.kotlin:kotlin-test-junit:1.9.22")
     testImplementation("io.mockk:mockk:1.13.8")
 
+    // REMOVED: The mockwebserver dependency is now gone.
+    // testImplementation("com.squareup.okhttp3:mockwebserver:4.12.0")
+
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)
-    // Optional helpful test utilities (instrumented and unit tests)
     androidTestImplementation("androidx.test:core-ktx:1.5.0")
     testImplementation("androidx.test:core-ktx:1.5.0")
 }

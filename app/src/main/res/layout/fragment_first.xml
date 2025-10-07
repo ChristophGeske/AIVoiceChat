@@ -232,6 +232,25 @@
                             android:minLines="3" />
                     </com.google.android.material.textfield.TextInputLayout>
 
+                    <!-- NEW: System prompt extension field -->
+                    <com.google.android.material.textfield.TextInputLayout
+                        android:id="@+id/systemPromptExtensionLayout"
+                        style="@style/Widget.MaterialComponents.TextInputLayout.OutlinedBox"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="8dp"
+                        android:hint="System prompt extension">
+
+                        <com.google.android.material.textfield.TextInputEditText
+                            android:id="@+id/systemPromptExtensionInput"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:gravity="top"
+                            android:inputType="textMultiLine"
+                            android:minLines="2"
+                            android:maxLines="8" />
+                    </com.google.android.material.textfield.TextInputLayout>
+
                     <com.google.android.material.button.MaterialButton
                         android:id="@+id/resetSystemPromptButton"
                         style="@style/Widget.MaterialComponents.Button.TextButton"

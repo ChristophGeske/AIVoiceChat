@@ -3,11 +3,11 @@
 
 ## 💡 What is AIVoiceChat?
 
-When you have tried OpenAI's "AdvancedVoice" or Google's "Gemini Live" you might have noticed that the quality of the answers is not as good as the thinking models Gemini 2.5 Pro and GPT‑5 which booth have higher thinking capabilities than the current voice models. 
+When you have tried OpenAI's "Advanced Voice" or Google's "Gemini Live," you might have noticed that the quality of the answers is not as good as the thinking models Gemini 2.5 Pro and GPT-5, which both have higher thinking capabilities than the current voice models.
 
-The reason for that is that when you use the voice option from these companies they use a different model that is optimized for low‑latency streaming rather than using the long “thinking” mode which gives better answers but can take up to minutes. 
+The reason for that is that when you use the voice option from these companies, they use a different model that is optimized for low-latency streaming rather than using the long “thinking” mode, which gives better answers but can take up to minutes.
 
-AIVoiceChat talks directly to the stronger text models (Gemini 2.5 Pro and GPT‑5) so you get the highest possible quality answers with the disadvantage of sometimes much slower responses.
+AIVoiceChat wants to fix that and allows you to talk directly to the stronger text models (Gemini 2.5 Pro and GPT-5) so you get the highest possible quality answers, with the disadvantage of slower response times. Also, you need to speak very clearly for the speech-to-text model used in your phone to work well. Another disadvantage is that all tone or emotion in your voice is lost and can't be picked up by this voice chat. The advantage is that you get much higher quality answers, and you can modify how the system should respond by simply changing the system prompt and adjusting the settings.
 
 
 ## 🚀 Get Started (Early Alpha)

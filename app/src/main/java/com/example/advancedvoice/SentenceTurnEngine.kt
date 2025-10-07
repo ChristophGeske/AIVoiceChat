@@ -21,6 +21,7 @@ open class SentenceTurnEngine(
     private val http: OkHttpClient,
     private val geminiKeyProvider: () -> String,
     private val openAiKeyProvider: () -> String,
+    private val systemPromptProvider: () -> String,
     private val onStreamDelta: (String) -> Unit,
     private val onStreamSentence: (String) -> Unit,
     private val onFirstSentence: (String) -> Unit,
@@ -43,7 +44,7 @@ open class SentenceTurnEngine(
 
     private val history = ArrayList<Msg>()
     private var maxSentencesPerTurn = 4
-    private var model = "gemini-pro-latest"  // UI-friendly default; normalized per request
+    private var model = "gemini-pro-latest"
     private var active = false
     private var lastRequestTimeMs = 0L
     private val full = StringBuilder()
@@ -52,8 +53,8 @@ open class SentenceTurnEngine(
     private var receivedAny = false
     private var emitCursor = 0
     private var deliveredSentences = 0
-    @Volatile private var stopStreamingEarly = false  // still used for user abort
-    private var sentenceCapReached = false            // decouple TTS cap from network stream
+    @Volatile private var stopStreamingEarly = false
+    private var sentenceCapReached = false
     private var streamStartMs = 0L
     private var firstDeltaAtMs = -1L
     private var deltaCount = 0
@@ -62,14 +63,9 @@ open class SentenceTurnEngine(
     private var progressJob: Job? = null
     private var fasterFirst: Boolean = false
 
-    // diagnostics / behavior flags
     private var geminiNonStreamFallbackUsed = false
     private var geminiSingleChunkStreamDetected = false
-    // If true, when Gemini falls back to non-stream (or single-chunk stream), we override the cap
-    // at end and deliver remaining sentences so the entire answer is spoken.
     private val overrideCapOnGeminiFallback = true
-
-    // Apply cap hint to the prompt this turn (non-fast mode only)
     private var applyCapToPromptThisTurn = false
 
     fun setFasterFirst(enabled: Boolean) {
@@ -132,7 +128,6 @@ open class SentenceTurnEngine(
         val isGemini = model.startsWith("gemini-", ignoreCase = true) || model.contains("gemini", ignoreCase = true)
 
         val useTwoPhase = fasterFirst && isGemini
-        // Append cap to last user only when NOT using two-phase (i.e., non-fast mode)
         applyCapToPromptThisTurn = !useTwoPhase
         if (applyCapToPromptThisTurn) {
             Log.i(TAG, "[CAP-PROMPT] Non-fast mode: will append cap to last user message (max=$maxSentencesPerTurn).")
@@ -140,10 +135,7 @@ open class SentenceTurnEngine(
 
         Log.d(TAG, "[STRATEGY-SELECT] model=$model isGpt=$isGpt isGemini=$isGemini fasterFirst=$fasterFirst → useTwoPhase=$useTwoPhase")
 
-        val systemPrompt = """
-        You are a helpful assistant. Answer the user's request in clear, complete sentences.
-        Return plain text only. Do not use JSON or code fences unless explicitly requested.
-    """.trimIndent()
+        val systemPrompt = systemPromptProvider()
 
         while (attempt <= MAX_RETRIES && active) {
             try {
@@ -181,7 +173,6 @@ open class SentenceTurnEngine(
                         }
                         if (text.isNotBlank()) onChunk(text)
                     } else if (isGemini && deltaCount == 1) {
-                        // Heuristic: Gemini streamed but only one big chunk arrived
                         geminiSingleChunkStreamDetected = true
                         Log.i(TAG, "[DIAG] Gemini stream delivered a single large chunk. Treat as 'single-chunk stream'.")
                     }
@@ -224,6 +215,7 @@ open class SentenceTurnEngine(
     private fun geminiTwoPhasePromptOnly() {
         val userMsg = lastUserMessage()
         val effModel = effectiveGeminiModel(model)
+        val systemPrompt = systemPromptProvider() // FIXED: Get the system prompt
         Log.i(TAG, "[GEMINI-2PHASE] START (model=$model → $effModel) user='${userMsg.take(120)}...'")
         Log.i(TAG, "[GEMINI-2PHASE] ---> PHASE 1: Requesting first sentence...")
 
@@ -233,16 +225,15 @@ open class SentenceTurnEngine(
         Plain text only. No JSON. No extra text.
     """.trimIndent()
 
-        val response1 = geminiGenerateWithHistory(effModel, simpleInstr, temperature = 0.4)
+        // FIXED: Pass the system prompt to the API call
+        val response1 = geminiGenerateWithHistory(effModel, systemPrompt, simpleInstr, temperature = 0.4)
         Log.d(TAG, "[GEMINI-2PHASE] Phase 1 raw response: '${response1?.first?.take(200)}'")
 
         var first: String? = null
-
         val finishReason = response1?.second
         if (finishReason == "MAX_TOKENS") {
             Log.e(TAG, "[GEMINI-2PHASE] Phase 1 hit MAX_TOKENS!")
         }
-
         val text1 = response1?.first
         if (!text1.isNullOrBlank()) {
             first = SentenceSplitter.extractFirstSentence(text1).first.takeIf { it.isNotBlank() }
@@ -257,14 +248,13 @@ open class SentenceTurnEngine(
             - "first_sentence" must be exactly one complete sentence (ends with ., !, or ?)
             - Do not include any other text, keys, or explanation.
         """.trimIndent()
-
-            val response2 = geminiGenerateWithHistory(effModel, jsonInstr, temperature = 0.4)
+            // FIXED: Pass the system prompt to the API call
+            val response2 = geminiGenerateWithHistory(effModel, systemPrompt, jsonInstr, temperature = 0.4)
             Log.d(TAG, "[GEMINI-2PHASE] JSON fallback raw response: '${response2?.first?.take(200)}'")
 
             if (response2?.second == "MAX_TOKENS") {
                 Log.e(TAG, "[GEMINI-2PHASE] JSON fallback also hit MAX_TOKENS!")
             }
-
             val text2 = response2?.first
             if (!text2.isNullOrBlank()) {
                 first = parseFirstSentenceFromJson(text2)
@@ -308,7 +298,8 @@ open class SentenceTurnEngine(
         - Do not include any other text, keys, or explanation.
     """.trimIndent()
 
-        val response3 = geminiGenerateWithHistory(effModel, contInstr, temperature = 0.8)
+        // FIXED: Pass the system prompt to the API call
+        val response3 = geminiGenerateWithHistory(effModel, systemPrompt, contInstr, temperature = 0.8)
         Log.d(TAG, "[GEMINI-2PHASE] Phase 2 raw response: '${response3?.first?.take(200)}'")
 
         if (response3?.second == "MAX_TOKENS") {
@@ -345,9 +336,10 @@ open class SentenceTurnEngine(
         finishTurn()
     }
 
-    // No maxTokens parameter - uses default model limits
+    // FIXED: The method now accepts the system prompt.
     protected open fun geminiGenerateWithHistory(
         modelName: String,
+        systemPrompt: String,
         instruction: String,
         temperature: Double
     ): Pair<String, String?>? {
@@ -356,11 +348,23 @@ open class SentenceTurnEngine(
             Log.e(TAG, "[GEMINI-REQ] API key is blank.")
             return null
         }
-
-        // v1 generateContent
         val url = "https://generativelanguage.googleapis.com/v1/models/$modelName:generateContent?key=$apiKey"
 
         val contents = JSONArray().apply {
+            // FIXED: Inject the system prompt at the beginning of the conversation.
+            // This is the standard way to provide system instructions to Gemini models.
+            if (systemPrompt.isNotBlank()) {
+                Log.d(TAG, "[GEMINI-REQ] Injecting system prompt.")
+                put(JSONObject().apply {
+                    put("role", "user")
+                    put("parts", JSONArray().apply { put(JSONObject().apply { put("text", systemPrompt) }) })
+                })
+                put(JSONObject().apply {
+                    put("role", "model")
+                    put("parts", JSONArray().apply { put(JSONObject().apply { put("text", "Understood. I will follow your instructions.") }) })
+                })
+            }
+
             for (m in history) {
                 val role = if (m.role == "assistant") "model" else "user"
                 put(JSONObject().apply {
@@ -462,7 +466,6 @@ open class SentenceTurnEngine(
         return null
     }
 
-    // Append sentence-cap hint to the last user message only for this request snapshot (non-fast mode).
     private fun snapshotHistoryForSend(): List<Msg> {
         if (!applyCapToPromptThisTurn) return ArrayList(history)
         val idx = history.indexOfLast { it.role == "user" }
@@ -553,7 +556,6 @@ open class SentenceTurnEngine(
     private fun emitMoreCompletedSentences() {
         if (sentenceCapReached) return
         while (!stopStreamingEarly && emitCursor < full.length && deliveredSentences < maxSentencesPerTurn) {
-            // Skip punctuation/whitespace before next sentence
             while (emitCursor < full.length &&
                 (full[emitCursor].isWhitespace() || full[emitCursor] == '.' || full[emitCursor] == '!' || full[emitCursor] == '?')
             ) emitCursor++
@@ -567,7 +569,6 @@ open class SentenceTurnEngine(
             val terminated = s.endsWith('.') || s.endsWith('!') || s.endsWith('?')
 
             if (s.length >= MIN_SENTENCE_CHARS && terminated) {
-                // Find a stable end in original text
                 val terminator = s.last()
                 var endIdx = -1
                 for (i in (MIN_SENTENCE_CHARS - 1).coerceAtMost(remaining.lastIndex)..remaining.lastIndex) {
@@ -776,7 +777,6 @@ open class SentenceTurnEngine(
         val effModel = effectiveGeminiModel(model)
         val url = "https://generativelanguage.googleapis.com/v1beta/models/$effModel:streamGenerateContent?key=$apiKey"
         val contents = JSONArray().apply {
-            // Include system prompt as a "user" content (kept for compatibility)
             put(JSONObject().apply {
                 put("role", "user")
                 put("parts", JSONArray().apply { put(JSONObject().apply { put("text", systemPrompt) }) })
@@ -837,7 +837,6 @@ open class SentenceTurnEngine(
         val effModel = effectiveGeminiModel(model)
         val url = "https://generativelanguage.googleapis.com/v1/models/$effModel:generateContent?key=$apiKey"
         val contents = JSONArray().apply {
-            // system prompt as "user"
             put(JSONObject().apply {
                 put("role", "user")
                 put("parts", JSONArray().apply { put(JSONObject().apply { put("text", systemPrompt) }) })
@@ -887,13 +886,12 @@ open class SentenceTurnEngine(
         }
     }
 
-    // Normalize UI-friendly Gemini aliases to concrete model IDs supported by API v1/v1beta.
     private fun effectiveGeminiModel(name: String): String {
         val n = name.lowercase()
         val mapped = when (n) {
             "gemini-pro-latest", "gemini-2.5-pro-latest" -> "gemini-2.5-pro"
             "gemini-flash-latest", "gemini-2.5-flash-latest" -> "gemini-2.5-flash"
-            else -> name // pass through other explicit model names (e.g., gemini-2.5-pro)
+            else -> name
         }
         if (mapped != name) Log.i(TAG, "[MODEL-MAP] '$name' → '$mapped' for Google API compatibility")
         return mapped

@@ -26,6 +26,7 @@ class SentenceTurnEnginePipelineTest {
         http = OkHttpClient(),
         geminiKeyProvider = { "fake" },
         openAiKeyProvider = { "fake" },
+        systemPromptProvider = { "You are a fake assistant." }, // FIXED: Added missing parameter
         onStreamDelta = { /* Not used in this test */ },
         onStreamSentence = { /* Not used in this test */ },
         onFirstSentence = onFirst,
@@ -38,10 +39,16 @@ class SentenceTurnEnginePipelineTest {
         var calls = 0
             private set
 
-        // Override the actual network call method used by the two-phase logic
-        override fun geminiGeneratePlain(modelName: String, prompt: String, maxTokens: Int, temperature: Double): String? {
+        // FIXED: The method to override is now geminiGenerateWithHistory
+        override fun geminiGenerateWithHistory(
+            modelName: String,
+            instruction: String,
+            temperature: Double
+        ): Pair<String, String?>? {
             calls++
-            return queue.pollFirst()
+            val response = queue.pollFirst()
+            // FIXED: Match the new return type Pair<String, String?>?
+            return response?.let { it to "OK" }
         }
     }
 
@@ -68,6 +75,8 @@ class SentenceTurnEnginePipelineTest {
         )
 
         engine.setMaxSentences(5) // 1 + 4
+        // MODIFIED: enable fasterFirst to trigger two-phase logic
+        engine.setFasterFirst(true)
         engine.startTurn("tell me about Obama", "gemini-2.5-flash")
 
         assertTrue("Timed out waiting for finish", finished.await(5, TimeUnit.SECONDS))
@@ -102,6 +111,7 @@ class SentenceTurnEnginePipelineTest {
         )
 
         engine.setMaxSentences(3)
+        engine.setFasterFirst(true) // MODIFIED: enable fasterFirst to trigger two-phase logic
         engine.startTurn("topic", "gemini-2.5-flash")
 
         assertTrue("Timed out waiting for finish", finished.await(5, TimeUnit.SECONDS))
@@ -120,8 +130,8 @@ class SentenceTurnEnginePipelineTest {
 
         // Multiple blanks to simulate retries failing for Phase 1
         val q = ArrayDeque<String?>().apply {
-            add("") // Fails initial prompt
-            add("") // Fails retry prompt
+            add(null) // Fails initial simple prompt
+            add(null) // Fails fallback JSON prompt
             add("{\"sentences\":[\"This is from phase two.\"]}") // Phase 2 succeeds
         }
 
@@ -136,6 +146,7 @@ class SentenceTurnEnginePipelineTest {
         )
 
         engine.setMaxSentences(3)
+        engine.setFasterFirst(true) // MODIFIED: enable fasterFirst to trigger two-phase logic
         engine.startTurn("topic", "gemini-2.5-flash")
 
         assertTrue("Timed out waiting for finish", finished.await(5, TimeUnit.SECONDS))
@@ -143,6 +154,7 @@ class SentenceTurnEnginePipelineTest {
         assertEquals("Remaining sentences should have one entry", 1, remainingOut.size)
         assertEquals("Should get the sentence from phase 2", "This is from phase two.", remainingOut[0][0])
         assertTrue("No error should be reported for failed Phase 1", errors.isEmpty())
-        assertEquals(3, engine.calls) // Phase 1 initial + Phase 1 retry + Phase 2
+        // Phase 1 (simple), Phase 1 (json), Phase 2
+        assertEquals(3, engine.calls)
     }
 }

@@ -49,4 +49,11 @@
 
     <string name="faster_first_label">Faster First Response</string>
     <string name="faster_first_desc">To speed up the initial response, the first sentence uses a non‑thinking pass and the rest uses deeper thinking. This helps balance speed and quality.</string>
+
+    <!-- NEW: System Prompt Strings -->
+    <string name="system_prompt_label">System Prompt</string>
+    <string name="system_prompt_hint">Custom instructions for the assistant...</string>
+    <string name="reset_prompt">Reset to Default</string>
+
+    <string name="conversation_history_description">Conversation History</string>
 </resources>

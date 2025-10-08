@@ -34,14 +34,13 @@ class FirstFragment : Fragment() {
 
     private val PREFS = "ai_prefs"
     private val PREF_SYSTEM_PROMPT_KEY = "system_prompt"
-    private val PREF_SYSTEM_PROMPT_EXT_KEY = "system_prompt_extension"
     private val PREF_MAX_SENTENCES_KEY = "max_sentences"
     private val PREF_FASTER_FIRST = "faster_first"
     private val PREF_LISTEN_SECONDS_KEY = "listen_seconds"
     private val PREF_SELECTED_MODEL = "selected_model"
     private val DEFAULT_SYSTEM_PROMPT = """
         You are a helpful assistant. Answer the user's request in clear, complete sentences.
-        Return plain text only. Do not use JSON or code fences unless explicitly requested.
+        Avoid code blocks and JSON unless explicitly requested by the user.
     """.trimIndent()
 
     private val prefs by lazy { requireContext().getSharedPreferences(PREFS, Context.MODE_PRIVATE) }
@@ -60,7 +59,7 @@ class FirstFragment : Fragment() {
     // A short grace period to prevent STT from starting while TTS audio might still be finalizing.
     private val STT_GRACE_MS_AFTER_TTS = 500L
 
-    // NEW: listen window tracking for post-TTS listening duration
+    // Listen window tracking for post-TTS listening duration
     private var listenWindowDeadlineMs: Long = 0L
     private var listenRestartCount: Int = 0
 
@@ -78,16 +77,33 @@ class FirstFragment : Fragment() {
         setupPrefsBackedInputs()
         observeViewModel()
 
-        val restoredModel = prefs.getString(PREF_SELECTED_MODEL, "gemini-2.5-pro") ?: "gemini-2.5-pro"
+        var restoredModel = prefs.getString(PREF_SELECTED_MODEL, "gemini-2.5-pro") ?: "gemini-2.5-pro"
+        // Migrate legacy OpenAI selections (gpt-5-*) to widely available models
+        restoredModel = migrateLegacyOpenAiModelName(restoredModel)
+        if (restoredModel != prefs.getString(PREF_SELECTED_MODEL, restoredModel)) {
+            prefs.edit().putString(PREF_SELECTED_MODEL, restoredModel).apply()
+        }
+
         currentModelName = restoredModel
         viewModel.setCurrentModel(restoredModel)
-        when (restoredModel) {
+
+        // Initial radio selection (may be hidden later if key missing)
+        when (restoredModel.lowercase()) {
             "gemini-2.5-flash" -> binding.radioGeminiFlash.isChecked = true
             "gemini-2.5-pro" -> binding.radioGeminiPro.isChecked = true
-            "gpt-5-turbo" -> binding.radioGpt5.isChecked = true
-            "gpt-5-mini" -> binding.radioGpt5Mini.isChecked = true
-            else -> binding.radioGeminiPro.isChecked = true
+            "gpt-4o" -> binding.radioGpt5.isChecked = true          // UI label may still say GPT-5 Turbo; underlying value is gpt-4o
+            "gpt-4o-mini" -> binding.radioGpt5Mini.isChecked = true  // UI label may still say GPT-5 Mini; underlying value is gpt-4o-mini
+            else -> { /* we'll sync after visibility update */ }
         }
+
+        // Ensure visibility matches available keys and selection remains valid
+        updateModelOptionsVisibility()
+        // Ensure radios reflect current model after visibility changes
+        binding.root.post {
+            syncRadioSelectionToCurrentModel()
+            ensureRadioSelectedIfVisible()
+        }
+
         Log.i(TAG, "[MODEL] Restored selection: $currentModelName")
         Log.i(TAG, "[STATE] Conversation entries: ${viewModel.conversation.value?.size ?: 0}")
         Log.i(TAG, "[STATE] Is speaking: ${viewModel.isSpeaking.value}")
@@ -112,29 +128,48 @@ class FirstFragment : Fragment() {
     }
 
     private fun setupPrefsBackedInputs() {
+        // Use string resources for hints
+        binding.geminiApiKeyInput.hint = getString(R.string.gemini_api_key_hint)
+        binding.openaiApiKeyInput.hint = getString(R.string.openai_api_key_hint)
+
         binding.geminiApiKeyInput.setText(prefs.getString("gemini_key", "") ?: "")
         binding.openaiApiKeyInput.setText(prefs.getString("openai_key", "") ?: "")
+
         binding.geminiApiKeyInput.doAfterTextChanged { editable ->
             prefs.edit().putString("gemini_key", editable?.toString()?.trim()).apply()
+            updateModelOptionsVisibility()
+            // Post to ensure visibility/layout settled before checking
+            binding.root.post {
+                syncRadioSelectionToCurrentModel()
+                ensureRadioSelectedIfVisible()
+            }
         }
         binding.openaiApiKeyInput.doAfterTextChanged { editable ->
             prefs.edit().putString("openai_key", editable?.toString()?.trim()).apply()
+            // If user just added OpenAI key and an old gpt-5-* is stored, migrate it now
+            val migrated = migrateLegacyOpenAiModelName(currentModelName)
+            if (migrated != currentModelName) {
+                currentModelName = migrated
+                viewModel.setCurrentModel(migrated)
+                prefs.edit().putString(PREF_SELECTED_MODEL, migrated).apply()
+                Log.i(TAG, "[MODEL] Migrated selection to $migrated after OpenAI key entry")
+            }
+            updateModelOptionsVisibility()
+            binding.root.post {
+                syncRadioSelectionToCurrentModel()
+                ensureRadioSelectedIfVisible()
+            }
         }
 
+        // Only one system prompt (extension removed). The effective prompt is dynamic based on settings.
         val savedPrompt = prefs.getString(PREF_SYSTEM_PROMPT_KEY, DEFAULT_SYSTEM_PROMPT)
         binding.systemPromptInput.setText(savedPrompt)
-        val savedExt = prefs.getString(PREF_SYSTEM_PROMPT_EXT_KEY, "") ?: ""
-        binding.systemPromptExtensionInput.setText(savedExt)
         binding.systemPromptInput.doAfterTextChanged { editable ->
             prefs.edit().putString(PREF_SYSTEM_PROMPT_KEY, editable?.toString().orEmpty()).apply()
         }
-        binding.systemPromptExtensionInput.doAfterTextChanged { editable ->
-            prefs.edit().putString(PREF_SYSTEM_PROMPT_EXT_KEY, editable?.toString().orEmpty()).apply()
-        }
-        binding.resetSystemPromptButton.setOnClickListener {
-            binding.systemPromptInput.setText(DEFAULT_SYSTEM_PROMPT)
-            Toast.makeText(context, "System prompt reset to default", Toast.LENGTH_SHORT).show()
-        }
+
+        // Hide the legacy "system prompt extension" field completely
+        binding.systemPromptExtensionInput.visibility = View.GONE
 
         val savedMax = prefs.getInt(PREF_MAX_SENTENCES_KEY, 4).coerceIn(1, 10)
         binding.maxSentencesInput.setText(savedMax.toString())
@@ -151,9 +186,9 @@ class FirstFragment : Fragment() {
         binding.switchFasterFirst.setOnCheckedChangeListener { _, isChecked ->
             prefs.edit().putBoolean(PREF_FASTER_FIRST, isChecked).apply()
             viewModel.applyEngineConfigFromPrefs(prefs)
+            // Effective prompt is recomputed on turn via ViewModel provider.
         }
 
-        // CHANGED default to 5s to match ViewModel and behavior
         val savedListen = prefs.getInt(PREF_LISTEN_SECONDS_KEY, 5).coerceIn(1, 120)
         binding.listenSecondsInput?.setText(savedListen.toString())
         binding.listenSecondsInput?.doAfterTextChanged { editable ->
@@ -171,7 +206,6 @@ class FirstFragment : Fragment() {
             val adapter = binding.conversationRecyclerView.adapter as ConversationAdapter
             val prev = adapter.currentSpeaking?.entryIndex
             adapter.currentSpeaking = speaking
-            // Notify both the previously highlighted and newly highlighted items to update
             if (prev != null) adapter.notifyItemChanged(prev)
             val now = speaking?.entryIndex
             if (now != null) adapter.notifyItemChanged(now)
@@ -180,7 +214,6 @@ class FirstFragment : Fragment() {
             updateButtonStates()
         }
 
-        // [FIX] This observer now ONLY handles the loading state. Auto-listening is moved.
         viewModel.turnFinishedEvent.observe(viewLifecycleOwner) { event ->
             event.getContentIfNotHandled()?.let {
                 Log.d(TAG, "[LIFECYCLE] Turn finished event received. Unlocking UI.")
@@ -188,7 +221,6 @@ class FirstFragment : Fragment() {
             }
         }
 
-        // NEW: correctly trigger auto-listening and start listen window.
         viewModel.ttsQueueFinishedEvent.observe(viewLifecycleOwner) { event ->
             event.getContentIfNotHandled()?.let {
                 Log.d(TAG, "[AutoContinue] TTS Queue finished event received. autoContinue=$autoContinue")
@@ -199,7 +231,7 @@ class FirstFragment : Fragment() {
             }
         }
 
-        // NEW: Restart STT quickly when NO_MATCH occurs within the listen window
+        // Restart STT quickly if NO_MATCH occurs within the listen window
         viewModel.sttNoMatch.observe(viewLifecycleOwner) { event ->
             event.getContentIfNotHandled()?.let {
                 val remain = remainingListenWindowMs()
@@ -229,7 +261,7 @@ class FirstFragment : Fragment() {
             } else {
                 getString(R.string.status_ready)
             }
-            if(isListening) {
+            if (isListening) {
                 maybeAutoCollapseSettings()
             }
             setLoading(false)
@@ -262,7 +294,6 @@ class FirstFragment : Fragment() {
             autoContinue = true
             startListenWindow("New Recording")
             viewModel.stopTts()
-            // Post-delay to allow TTS to fully stop before listening starts
             view?.postDelayed({ handleStartListeningRequest(delayMs = 0L) }, 250)
         }
         binding.stopButton.setOnClickListener {
@@ -273,11 +304,12 @@ class FirstFragment : Fragment() {
             setLoading(false)
         }
 
+        // UPDATED: Map OpenAI radios to gpt-4o (quality) and gpt-4o-mini (fast)
         val radios = listOf(
             binding.radioGeminiFlash to "gemini-2.5-flash",
             binding.radioGeminiPro to "gemini-2.5-pro",
-            binding.radioGpt5 to "gpt-5-turbo",
-            binding.radioGpt5Mini to "gpt-5-mini"
+            binding.radioGpt5 to "gpt-4o",
+            binding.radioGpt5Mini to "gpt-4o-mini"
         )
         val selectRadio: (RadioButton) -> Unit = { selected ->
             radios.forEach { (rb, _) -> rb.isChecked = (rb === selected) }
@@ -314,7 +346,6 @@ class FirstFragment : Fragment() {
      * Contains the actual logic to start listening, called after any necessary permissions or delays.
      */
     private fun startListeningNow() {
-        // This check is still important to prevent race conditions or starting while another process is active.
         if (viewModel.sttIsListening.value == true || viewModel.isEngineActive() || viewModel.isSpeaking.value == true) {
             Log.w(TAG, "[AutoContinue] Skipping startListeningNow: isListening=${viewModel.sttIsListening.value}, isEngineActive=${viewModel.isEngineActive()}, isSpeaking=${viewModel.isSpeaking.value}")
             return
@@ -347,6 +378,147 @@ class FirstFragment : Fragment() {
         }
     }
 
+    private fun updateModelOptionsVisibility() {
+        val geminiKey = prefs.getString("gemini_key", "").orEmpty().isNotBlank()
+        val openaiKey = prefs.getString("openai_key", "").orEmpty().isNotBlank()
+
+        // Show Gemini radios only if Gemini key present
+        binding.radioGeminiFlash.visibility = if (geminiKey) View.VISIBLE else View.GONE
+        binding.radioGeminiPro.visibility = if (geminiKey) View.VISIBLE else View.GONE
+
+        // Show OpenAI radios only if OpenAI key present
+        binding.radioGpt5.visibility = if (openaiKey) View.VISIBLE else View.GONE
+        binding.radioGpt5Mini.visibility = if (openaiKey) View.VISIBLE else View.GONE
+
+        // Ensure current selection is valid given available providers
+        val currentIsOpenAI = currentModelName.startsWith("gpt-", ignoreCase = true)
+        val currentIsGemini = currentModelName.startsWith("gemini", ignoreCase = true)
+
+        // Migrate legacy OpenAI names if needed
+        if (currentIsOpenAI) {
+            val migrated = migrateLegacyOpenAiModelName(currentModelName)
+            if (migrated != currentModelName) {
+                Log.i(TAG, "[MODEL] Migrated selection to $migrated")
+                currentModelName = migrated
+                viewModel.setCurrentModel(migrated)
+                prefs.edit().putString(PREF_SELECTED_MODEL, migrated).apply()
+            }
+        }
+
+        val selectionInvalid = (currentIsOpenAI && !openaiKey) || (currentIsGemini && !geminiKey)
+
+        if (selectionInvalid) {
+            val newModel = when {
+                geminiKey -> "gemini-2.5-pro"
+                openaiKey -> "gpt-4o" // UPDATED default OpenAI quality model
+                else -> null
+            }
+            if (newModel != null) {
+                Log.i(TAG, "[MODEL] Adjusting selection to $newModel due to key availability")
+                currentModelName = newModel
+                viewModel.setCurrentModel(newModel)
+                prefs.edit().putString(PREF_SELECTED_MODEL, currentModelName).apply()
+            } else {
+                Log.w(TAG, "[MODEL] No API keys available. Hiding all model options.")
+                // Uncheck all radios if neither key is present
+                binding.radioGeminiFlash.isChecked = false
+                binding.radioGeminiPro.isChecked = false
+                binding.radioGpt5.isChecked = false
+                binding.radioGpt5Mini.isChecked = false
+            }
+        }
+
+        // Always sync radio buttons with the currently active model
+        syncRadioSelectionToCurrentModel()
+        // If none is checked but radios are visible and the current model is available, ensure it's checked
+        ensureRadioSelectedIfVisible()
+
+        updateButtonStates()
+    }
+
+    // Ensure the appropriate radio button reflects the current model if visible
+    private fun syncRadioSelectionToCurrentModel() {
+        val model = currentModelName.lowercase()
+        val geminiKeyPresent = prefs.getString("gemini_key", "").orEmpty().isNotBlank()
+        val openaiKeyPresent = prefs.getString("openai_key", "").orEmpty().isNotBlank()
+
+        // Clear checks first
+        binding.radioGeminiFlash.isChecked = false
+        binding.radioGeminiPro.isChecked = false
+        binding.radioGpt5.isChecked = false
+        binding.radioGpt5Mini.isChecked = false
+
+        when {
+            model.startsWith("gemini") && geminiKeyPresent -> {
+                if (model.startsWith("gemini-2.5-flash")) {
+                    if (binding.radioGeminiFlash.visibility == View.VISIBLE) {
+                        binding.radioGeminiFlash.isChecked = true
+                        Log.i(TAG, "[MODEL] Synced radio to Gemini Flash (currentModel=$model)")
+                    }
+                } else {
+                    if (binding.radioGeminiPro.visibility == View.VISIBLE) {
+                        binding.radioGeminiPro.isChecked = true
+                        Log.i(TAG, "[MODEL] Synced radio to Gemini Pro (currentModel=$model)")
+                    }
+                }
+            }
+            model.startsWith("gpt-4o") && openaiKeyPresent -> {
+                if (model.startsWith("gpt-4o-mini")) {
+                    if (binding.radioGpt5Mini.visibility == View.VISIBLE) {
+                        binding.radioGpt5Mini.isChecked = true
+                        Log.i(TAG, "[MODEL] Synced radio to GPT-4o Mini (currentModel=$model)")
+                    }
+                } else {
+                    if (binding.radioGpt5.visibility == View.VISIBLE) {
+                        binding.radioGpt5.isChecked = true
+                        Log.i(TAG, "[MODEL] Synced radio to GPT-4o (currentModel=$model)")
+                    }
+                }
+            }
+            else -> {
+                Log.d(TAG, "[MODEL] No matching radio to sync (model=$model)")
+            }
+        }
+    }
+
+    // If no radio is currently checked but the current model has a visible radio, check it
+    private fun ensureRadioSelectedIfVisible() {
+        val anyChecked = listOf(
+            binding.radioGeminiFlash,
+            binding.radioGeminiPro,
+            binding.radioGpt5,
+            binding.radioGpt5Mini
+        ).any { it.visibility == View.VISIBLE && it.isChecked }
+
+        if (anyChecked) return
+
+        when {
+            currentModelName.equals("gemini-2.5-flash", true)
+                    && binding.radioGeminiFlash.visibility == View.VISIBLE -> {
+                binding.radioGeminiFlash.isChecked = true
+                Log.i(TAG, "[MODEL] Auto-checked Gemini Flash as no radio was selected")
+            }
+            currentModelName.startsWith("gemini", true)
+                    && binding.radioGeminiPro.visibility == View.VISIBLE -> {
+                binding.radioGeminiPro.isChecked = true
+                Log.i(TAG, "[MODEL] Auto-checked Gemini Pro as no radio was selected")
+            }
+            currentModelName.equals("gpt-4o-mini", true)
+                    && binding.radioGpt5Mini.visibility == View.VISIBLE -> {
+                binding.radioGpt5Mini.isChecked = true
+                Log.i(TAG, "[MODEL] Auto-checked GPT-4o Mini as no radio was selected")
+            }
+            currentModelName.equals("gpt-4o", true)
+                    && binding.radioGpt5.visibility == View.VISIBLE -> {
+                binding.radioGpt5.isChecked = true
+                Log.i(TAG, "[MODEL] Auto-checked GPT-4o as no radio was selected")
+            }
+            else -> {
+                // Nothing to auto-check
+            }
+        }
+    }
+
     private fun updateButtonStates() {
         val engineActive = viewModel.isEngineActive()
         val isSpeaking = viewModel.isSpeaking.value == true
@@ -375,7 +547,6 @@ class FirstFragment : Fragment() {
     override fun onResume() {
         super.onResume()
         Log.i(TAG, "[LIFECYCLE] onResume - checking TTS resume")
-        // Check TTS resume after a slight delay to ensure TTS is fully ready
         view?.postDelayed({
             viewModel.checkAndResumeTts()
         }, 300)
@@ -387,7 +558,7 @@ class FirstFragment : Fragment() {
         _binding = null
     }
 
-    // NEW: Listen window helpers
+    // Listen window helpers
     private fun startListenWindow(reason: String) {
         val secs = prefs.getInt(PREF_LISTEN_SECONDS_KEY, 5).coerceIn(1, 120)
         val now = SystemClock.elapsedRealtime()
@@ -402,4 +573,14 @@ class FirstFragment : Fragment() {
     }
 
     private fun isListenWindowActive(): Boolean = SystemClock.elapsedRealtime() < listenWindowDeadlineMs
+
+    // Map legacy OpenAI names (gpt-5-*) to broadly available ones
+    private fun migrateLegacyOpenAiModelName(name: String): String {
+        val lower = name.lowercase()
+        return when {
+            lower == "gpt-5-turbo" -> "gpt-4o"
+            lower == "gpt-5-mini" -> "gpt-4o-mini"
+            else -> name
+        }
+    }
 }

@@ -21,8 +21,6 @@ import java.util.ArrayDeque
 import java.util.Locale
 import java.util.UUID
 import java.util.concurrent.TimeUnit
-import kotlin.math.max
-import kotlin.math.min
 
 class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpeech.OnInitListener {
     private val TAG = "ConversationVM"
@@ -67,7 +65,7 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
     private val _sttError = MutableLiveData<Event<String>>()
     val sttError: LiveData<Event<String>> = _sttError
 
-    // NEW: one-shot event for NO_MATCH (no speech before platform timeout)
+    // One-shot event for NO_MATCH (no speech before platform timeout)
     private val _sttNoMatch = MutableLiveData<Event<Unit>>()
     val sttNoMatch: LiveData<Event<Unit>> = _sttNoMatch
 
@@ -199,13 +197,30 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
             },
             onFinalResponse = { fullText ->
                 Log.i(TAG, "[ENGINE] onFinalResponse called: length=${fullText.length}")
-                val idx = currentAssistantEntryIndex ?: return@Callbacks
-                val current = entries.getOrNull(idx) ?: return@Callbacks
-                entries[idx] = current.copy(
-                    sentences = SentenceSplitter.splitIntoSentences(fullText),
-                    streamingText = null
-                )
-                postList()
+
+                // NEW: handle both cases
+                // Case A (FastFirst): assistant entry already exists -> just finalize text (no extra TTS).
+                // Case B (RegularStrategy / fasterFirst=false): no entry yet -> create it and queue TTS for all sentences.
+                val sentences = SentenceSplitter.splitIntoSentences(fullText)
+                val idx = currentAssistantEntryIndex
+                if (idx == null || entries.getOrNull(idx)?.isAssistant != true) {
+                    // No prior first sentence: create entry and queue TTS for all
+                    val newEntry = ConversationEntry("Assistant", sentences, isAssistant = true)
+                    entries.add(newEntry)
+                    currentAssistantEntryIndex = entries.lastIndex
+                    sentences.forEachIndexed { i, s ->
+                        queueTts(SpokenSentence(s, currentAssistantEntryIndex!!, i))
+                    }
+                    postList()
+                } else {
+                    // Entry exists: update finalized text, do not re-queue to avoid duplicates
+                    val current = entries[idx]
+                    entries[idx] = current.copy(
+                        sentences = sentences,
+                        streamingText = null
+                    )
+                    postList()
+                }
             },
             onTurnFinish = {
                 Log.i(TAG, "[ENGINE] onTurnFinish called")
@@ -222,7 +237,7 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
             http = httpClient,
             geminiKeyProvider = { prefs.getString("gemini_key", "").orEmpty() },
             openAiKeyProvider = { prefs.getString("openai_key", "").orEmpty() },
-            systemPromptProvider = { getCombinedSystemPromptFromPrefs() },
+            systemPromptProvider = { getEffectiveSystemPromptFromPrefs() },
             callbacks = cb
         )
     }
@@ -238,7 +253,6 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
     private fun setupSpeechRecognizer() {
         if (!SpeechRecognizer.isRecognitionAvailable(getApplication())) {
             Log.e(TAG, "[STT] Recognition not available")
-            // [FIX] Corrected the typo from _stтError to _sttError
             _sttError.postValue(Event("Speech recognition not available on this device."))
             return
         }
@@ -307,7 +321,6 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
             putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, silenceMs)
             putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, silenceMs)
             putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS, minLengthMs)
-            // Optional extras to improve behavior/diagnostics
             putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
             putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
         }
@@ -526,10 +539,19 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
         tts.speak(next.text, TextToSpeech.QUEUE_ADD, null, id)
     }
 
-    private fun getCombinedSystemPromptFromPrefs(): String {
+    // Single effective system prompt with dynamic guidance reflecting settings
+    private fun getEffectiveSystemPromptFromPrefs(): String {
         val base = prefs.getString("system_prompt", "").orEmpty().ifBlank { DEFAULT_BASE_PROMPT }
-        val ext = prefs.getString("system_prompt_extension", "").orEmpty()
-        return if (ext.isBlank()) base else "$base\n\n$ext"
+        val maxSent = prefs.getInt("max_sentences", 4).coerceIn(1, 10)
+        val faster = prefs.getBoolean("faster_first", true)
+
+        val extras = buildList {
+            add("Return plain text only.")
+            if (maxSent >= 1) add("When appropriate, keep answers to at most $maxSent complete sentences.")
+            if (faster) add("Begin with a complete first sentence promptly, then continue.")
+        }.joinToString(" ")
+
+        return if (extras.isBlank()) base else "$base\n\n$extras"
     }
 
     private fun buildAssistantDraft(): String? {
@@ -543,7 +565,7 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
     companion object {
         private val DEFAULT_BASE_PROMPT = """
             You are a helpful assistant. Answer the user's request in clear, complete sentences.
-            Return plain text only. Do not use JSON or code fences unless explicitly requested.
+            Do not use JSON or code fences unless explicitly requested.
         """.trimIndent()
     }
 }

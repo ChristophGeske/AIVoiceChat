@@ -17,8 +17,8 @@
     <string name="gpt5_mini">GPT-5 Mini</string>
 
     <!-- API keys -->
-    <string name="gemini_api_key_hint">Gemini API key</string>
-    <string name="openai_api_key_hint">OpenAI API key</string>
+    <string name="gemini_api_key_hint">Add Gemini API key to see models</string>
+    <string name="openai_api_key_hint">Add OpenAI API key to see models</string>
 
     <!-- Settings / max sentences -->
     <string name="settings_title">Settings</string>

@@ -8,7 +8,6 @@
     android:padding="12dp"
     tools:context=".FirstFragment">
 
-    <!-- MOVED: Settings Header is now at the top of the layout -->
     <com.google.android.material.card.MaterialCardView
         android:id="@+id/settingsHeaderCard"
         android:layout_width="match_parent"
@@ -33,7 +32,6 @@
             android:textStyle="bold" />
     </com.google.android.material.card.MaterialCardView>
 
-    <!-- MOVED: Scrollable Settings Container is now below the header -->
     <ScrollView
         android:id="@+id/settingsContainerScrollView"
         android:layout_width="match_parent"
@@ -182,7 +180,37 @@
                     </com.google.android.material.textfield.TextInputLayout>
                 </LinearLayout>
 
-                <!-- Faster First Response toggle -->
+                <!-- Listening time -->
+                <LinearLayout
+                    android:id="@+id/listenSecondsGroup"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginBottom="8dp"
+                    android:orientation="vertical">
+
+                    <TextView
+                        android:id="@+id/listenSecondsLabel"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="Listening time (seconds)"
+                        android:textColor="#FFFFFF" />
+
+                    <com.google.android.material.textfield.TextInputLayout
+                        style="@style/Widget.MaterialComponents.TextInputLayout.OutlinedBox"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:hint="e.g., 3, 10, 30">
+
+                        <com.google.android.material.textfield.TextInputEditText
+                            android:id="@+id/listenSecondsInput"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:inputType="number"
+                            android:maxLength="3" />
+                    </com.google.android.material.textfield.TextInputLayout>
+                </LinearLayout>
+
+                <!-- Faster First Response -->
                 <LinearLayout
                     android:id="@+id/fasterFirstGroup"
                     android:layout_width="match_parent"
@@ -232,7 +260,6 @@
                             android:minLines="3" />
                     </com.google.android.material.textfield.TextInputLayout>
 
-                    <!-- NEW: System prompt extension field -->
                     <com.google.android.material.textfield.TextInputLayout
                         android:id="@+id/systemPromptExtensionLayout"
                         style="@style/Widget.MaterialComponents.TextInputLayout.OutlinedBox"
@@ -264,8 +291,6 @@
         </com.google.android.material.card.MaterialCardView>
     </ScrollView>
 
-
-    <!-- Conversation list -->
     <androidx.recyclerview.widget.RecyclerView
         android:id="@+id/conversationRecyclerView"
         android:layout_width="0dp"
@@ -280,7 +305,6 @@
         app:layout_constraintTop_toBottomOf="@+id/settingsContainerScrollView"
         tools:listitem="@layout/item_conversation_entry" />
 
-    <!-- Bottom bar is now pinned to the screen bottom -->
     <LinearLayout
         android:id="@+id/bottomBar"
         android:layout_width="0dp"
@@ -308,9 +332,7 @@
                 android:textAllCaps="false"
                 android:visibility="gone" />
 
-            <View
-                android:layout_width="6dp"
-                android:layout_height="0dp" />
+            <View android:layout_width="6dp" android:layout_height="0dp" />
 
             <com.google.android.material.button.MaterialButton
                 android:id="@+id/stopButton"
@@ -322,9 +344,7 @@
                 android:text="@string/stop_conversation"
                 android:textAllCaps="false" />
 
-            <View
-                android:layout_width="6dp"
-                android:layout_height="0dp" />
+            <View android:layout_width="6dp" android:layout_height="0dp" />
 
             <com.google.android.material.button.MaterialButton
                 android:id="@+id/clearButton"
@@ -347,7 +367,6 @@
             android:textAllCaps="false" />
     </LinearLayout>
 
-    <!-- Center overlay progress -->
     <ProgressBar
         android:id="@+id/progressBar"
         style="?android:attr/progressBarStyle"

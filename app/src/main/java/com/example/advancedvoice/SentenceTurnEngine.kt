@@ -58,7 +58,6 @@ class SentenceTurnEngine(
         Log.i(TAG, "Abort requested.")
         active = false
         currentStrategy?.abort()
-        // Ensure UI is unlocked and messaged on the main thread
         uiScope.launch {
             callbacks.onSystem("Generation interrupted.")
             callbacks.onTurnFinish()
@@ -66,8 +65,21 @@ class SentenceTurnEngine(
     }
 
     /**
+     * Seed an external history (e.g., after rotation restore).
+     */
+    fun seedHistory(seed: List<Msg>) {
+        history.clear()
+        history.addAll(seed)
+        Log.i(TAG, "Seeded history size=${history.size}")
+    }
+
+    /**
+     * Snapshot the current history (for saving/restoring across rotation).
+     */
+    fun getHistorySnapshot(): List<Msg> = ArrayList(history)
+
+    /**
      * Inject a partial assistant draft into history (used on user barge-in).
-     * If the last message is already from the assistant, it will be replaced with the draft.
      */
     fun injectAssistantDraft(text: String) {
         addAssistant(text)
@@ -90,7 +102,7 @@ class SentenceTurnEngine(
             RegularGenerationStrategy(http, geminiKeyProvider, openAiKeyProvider)
         }
 
-        // Wrap ALL callbacks to guarantee main-thread UI access and add trace logs
+        // Wrap callbacks to ensure main-thread UI updates
         val strategyCallbacks = Callbacks(
             onStreamDelta = { delta ->
                 uiScope.launch {
@@ -107,7 +119,7 @@ class SentenceTurnEngine(
             onFirstSentence = { firstSentence ->
                 uiScope.launch {
                     Log.d(TAG, "onFirstSentence: '${firstSentence.take(80)}...'")
-                    addAssistant(firstSentence) // Add placeholder to history
+                    addAssistant(firstSentence)
                     callbacks.onFirstSentence(firstSentence)
                 }
             },
@@ -120,7 +132,7 @@ class SentenceTurnEngine(
             onFinalResponse = { fullText ->
                 uiScope.launch {
                     Log.d(TAG, "onFinalResponse(len=${fullText.length})")
-                    addAssistant(fullText) // Update history with final full text
+                    addAssistant(fullText)
                     callbacks.onFinalResponse(fullText)
                 }
             },
@@ -151,7 +163,7 @@ class SentenceTurnEngine(
 
         currentStrategy?.execute(
             scope = uiScope,
-            history = ArrayList(history), // Pass a defensive copy
+            history = ArrayList(history), // defensive copy
             modelName = modelName,
             systemPrompt = systemPromptProvider(),
             maxSentences = maxSentencesPerTurn,

@@ -1,3 +1,4 @@
+// ConversationAdapter.kt
 package com.example.advancedvoice
 
 import android.text.Html
@@ -10,8 +11,6 @@ import android.widget.TextView
 import androidx.recyclerview.widget.DiffUtil
 import androidx.recyclerview.widget.ListAdapter
 import androidx.recyclerview.widget.RecyclerView
-import com.example.advancedvoice.FirstFragment.ConversationEntry
-import com.example.advancedvoice.FirstFragment.SpokenSentence
 import java.util.Locale
 
 class ConversationAdapter(
@@ -40,7 +39,7 @@ class ConversationAdapter(
         private val replayButton: ImageButton = itemView.findViewById(R.id.replayButton)
 
         fun bind(entry: ConversationEntry, entryIndex: Int, currentSpeaking: SpokenSentence?) {
-            // ADDED: Better logging
+            // Logging
             val speakingLog = if (currentSpeaking?.entryIndex == entryIndex) {
                 "highlighting sentence ${currentSpeaking.sentenceIndex}"
             } else {
@@ -79,7 +78,10 @@ class ConversationAdapter(
         ) {
             val colorSpeaking = "#D32F2F"
             val colorContent = "#FFFFFF"
-            fun escapeHtml(s: String): String = s.replace("<", "&lt;").replace(">", "&gt;").replace("\n", "<br/>")
+            fun escapeHtml(s: String): String = s
+                .replace("<", "&lt;")
+                .replace(">", "&gt;")
+                .replace("\n", "<br/>")
 
             val sb = StringBuilder()
             val speaking = currentSpeaking?.takeIf { it.entryIndex == entryIndex }
@@ -87,8 +89,7 @@ class ConversationAdapter(
             entry.sentences.forEachIndexed { sentenceIndex, sentence ->
                 val isSpeaking = (speaking?.sentenceIndex == sentenceIndex)
                 val color = if (isSpeaking) colorSpeaking else colorContent
-                sb.append("<font color='$color'>${escapeHtml(sentence)}</font>")
-                sb.append(" ")
+                sb.append("<font color='$color'>${escapeHtml(sentence)}</font> ")
             }
 
             val inStream = entry.streamingText
@@ -107,12 +108,9 @@ class ConversationAdapter(
 
 class ConversationDiffCallback : DiffUtil.ItemCallback<ConversationEntry>() {
     override fun areItemsTheSame(oldItem: ConversationEntry, newItem: ConversationEntry): Boolean {
-        // Use a unique ID if available, otherwise object reference is a fallback
         return oldItem === newItem
     }
-
     override fun areContentsTheSame(oldItem: ConversationEntry, newItem: ConversationEntry): Boolean {
-        // This is crucial for DiffUtil to detect changes and rebind the view holder
         return oldItem == newItem
     }
 }

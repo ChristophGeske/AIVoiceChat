@@ -44,6 +44,10 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
     private val _turnFinishedEvent = MutableLiveData<Event<Unit>>()
     val turnFinishedEvent: LiveData<Event<Unit>> = _turnFinishedEvent
 
+    // Event for when the TTS queue is fully processed. This is the new trigger for auto-listening.
+    private val _ttsQueueFinishedEvent = MutableLiveData<Event<Unit>>()
+    val ttsQueueFinishedEvent: LiveData<Event<Unit>> = _ttsQueueFinishedEvent
+
     // Error messages
     private val _errorMessage = MutableLiveData<String?>()
     val errorMessage: LiveData<String?> = _errorMessage
@@ -63,6 +67,10 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
     private val _sttError = MutableLiveData<Event<String>>()
     val sttError: LiveData<Event<String>> = _sttError
 
+    // NEW: one-shot event for NO_MATCH (no speech before platform timeout)
+    private val _sttNoMatch = MutableLiveData<Event<Unit>>()
+    val sttNoMatch: LiveData<Event<Unit>> = _sttNoMatch
+
     // SpeechRecognizer is managed by the ViewModel
     private lateinit var speechRecognizer: SpeechRecognizer
     private var currentModelName: String = "gemini-2.5-pro"
@@ -79,56 +87,67 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
     }
     private val prefs by lazy { app.getSharedPreferences("ai_prefs", Application.MODE_PRIVATE) }
 
-    // Stable UtteranceProgressListener
+    // Stable UtteranceProgressListener with crash protection
     private val utteranceListener = object : UtteranceProgressListener() {
         override fun onStart(utteranceId: String?) {
-            val prevId = currentUtteranceId
-            currentUtteranceId = utteranceId
-            _isSpeaking.postValue(true)
-            val current = _currentSpeaking.value
-            Log.i(TAG, "[TTS] onStart id=$utteranceId (prev=$prevId) queueSize=${ttsQueue.size} currentSpeaking=${current?.let { "${it.entryIndex}:${it.sentenceIndex}" }}")
+            try {
+                val prevId = currentUtteranceId
+                currentUtteranceId = utteranceId
+                _isSpeaking.postValue(true)
+                val current = _currentSpeaking.value
+                Log.i(TAG, "[TTS] onStart id=$utteranceId (prev=$prevId) queueSize=${ttsQueue.size} currentSpeaking=${current?.let { "${it.entryIndex}:${it.sentenceIndex}" }}")
+            } catch (e: Exception) {
+                Log.e(TAG, "[TTS] onStart crashed: ${e.message}", e)
+            }
         }
 
         override fun onDone(utteranceId: String?) {
-            viewModelScope.launch {
-                Log.i(TAG, "[TTS] onDone id=$utteranceId currentId=$currentUtteranceId queueSize=${ttsQueue.size}")
+            try {
+                viewModelScope.launch {
+                    Log.i(TAG, "[TTS] onDone id=$utteranceId currentId=$currentUtteranceId queueSize=${ttsQueue.size}")
 
-                // For backwards compatibility: if utteranceId doesn't match, check if queue's first item matches
-                val shouldProcess = if (utteranceId == currentUtteranceId) {
-                    true
-                } else {
-                    // The utterance might be from the previous item that just finished
-                    // Process it if we're not already speaking something else
-                    val canProcess = currentUtteranceId == null || currentUtteranceId == utteranceId
-                    if (!canProcess) {
-                        Log.w(TAG, "[TTS] onDone skipped - utteranceId mismatch (expected=$currentUtteranceId, got=$utteranceId)")
+                    val shouldProcess = if (utteranceId == currentUtteranceId) {
+                        true
+                    } else {
+                        val canProcess = currentUtteranceId == null || currentUtteranceId == utteranceId
+                        if (!canProcess) {
+                            Log.w(TAG, "[TTS] onDone skipped - utteranceId mismatch (expected=$currentUtteranceId, got=$utteranceId)")
+                        }
+                        canProcess
                     }
-                    canProcess
+
+                    if (!shouldProcess) return@launch
+
+                    lastTtsDoneAt = SystemClock.elapsedRealtime()
+                    Log.i(TAG, "[TTS] Setting lastTtsDoneAt=${lastTtsDoneAt}")
+                    val completed = ttsQueue.pollFirst()
+                    _currentSpeaking.postValue(null)
+                    currentUtteranceId = null
+
+                    Log.i(TAG, "[TTS] Processed done: completed=${completed?.let { "${it.entryIndex}:${it.sentenceIndex}" }} queueRemaining=${ttsQueue.size}")
+
+                    if (ttsQueue.isNotEmpty()) {
+                        Log.d(TAG, "[TTS] More items in queue, calling speakNext")
+                        speakNext()
+                    } else {
+                        _isSpeaking.postValue(false)
+                        Log.i(TAG, "[TTS] Queue empty; speaking=false. Firing queue finished event.")
+                        _ttsQueueFinishedEvent.postValue(Event(Unit))
+                    }
                 }
-
-                if (!shouldProcess) return@launch
-
-                lastTtsDoneAt = SystemClock.elapsedRealtime()
-                val completed = ttsQueue.pollFirst()
-                _currentSpeaking.postValue(null)
-                currentUtteranceId = null
-
-                Log.i(TAG, "[TTS] Processed done: completed=${completed?.let { "${it.entryIndex}:${it.sentenceIndex}" }} queueRemaining=${ttsQueue.size}")
-
-                if (ttsQueue.isNotEmpty()) {
-                    Log.d(TAG, "[TTS] More items in queue, calling speakNext")
-                    speakNext()
-                } else {
-                    _isSpeaking.postValue(false)
-                    Log.i(TAG, "[TTS] Queue empty; speaking=false")
-                }
+            } catch (e: Exception) {
+                Log.e(TAG, "[TTS] onDone crashed: ${e.message}", e)
             }
         }
 
         @Deprecated("Deprecated in Java")
         override fun onError(utteranceId: String?) {
-            Log.e(TAG, "[TTS] onError id=$utteranceId")
-            onDone(utteranceId)
+            try {
+                Log.e(TAG, "[TTS] onError id=$utteranceId")
+                onDone(utteranceId)
+            } catch (e: Exception) {
+                Log.e(TAG, "[TTS] onError crashed: ${e.message}", e)
+            }
         }
     }
 
@@ -219,6 +238,7 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
     private fun setupSpeechRecognizer() {
         if (!SpeechRecognizer.isRecognitionAvailable(getApplication())) {
             Log.e(TAG, "[STT] Recognition not available")
+            // [FIX] Corrected the typo from _stтError to _sttError
             _sttError.postValue(Event("Speech recognition not available on this device."))
             return
         }
@@ -244,7 +264,10 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
             override fun onError(error: Int) {
                 Log.e(TAG, "[STT] onError code=$error")
                 _sttIsListening.postValue(false)
-                if (error != SpeechRecognizer.ERROR_NO_MATCH) {
+                if (error == SpeechRecognizer.ERROR_NO_MATCH) {
+                    Log.w(TAG, "[STT] NO_MATCH (code=7) - no speech detected before platform timeout")
+                    _sttNoMatch.postValue(Event(Unit))
+                } else {
                     _sttError.postValue(Event("STT Error (code:$error)"))
                 }
             }
@@ -264,23 +287,33 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
     fun startListening() {
         Log.i(TAG, "[STT] startListening requested")
         if (engine.isActive()) {
-            Log.i(TAG, "[STT] Engine active, injecting draft and aborting")
+            Log.w(TAG, "[STT] Engine active, injecting draft and aborting")
             injectDraftIfActive()
             abortEngine()
         }
-        val listenSeconds = prefs.getInt("listen_seconds", 3).coerceIn(1, 120)
-        val minLenMs = (listenSeconds * 1000L).coerceIn(1000L, 60000L)
-        val silenceMs = max(500L, min(10000L, (listenSeconds * 1000L / 2)))
+        if (_isSpeaking.value == true) {
+            Log.w(TAG, "[STT] Blocked startListening because TTS is active.")
+            return
+        }
+
+        val listenSeconds = prefs.getInt("listen_seconds", 5).coerceIn(1, 120)
+        val silenceMs = (listenSeconds * 1000L).coerceIn(1000L, 30000L)
+        val minLengthMs = 2000L
+
         val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
             putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
             putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.getDefault())
             putExtra(RecognizerIntent.EXTRA_PROMPT, "Listening...")
-            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS, minLenMs)
             putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, silenceMs)
             putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, silenceMs)
+            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS, minLengthMs)
+            // Optional extras to improve behavior/diagnostics
+            putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
+            putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
         }
+
+        Log.i(TAG, "[STT] Starting listener with config: silenceMs=$silenceMs (from $listenSeconds seconds setting), minLengthMs=$minLengthMs")
         speechRecognizer.startListening(intent)
-        Log.i(TAG, "[STT] Listening started")
     }
 
     fun stopListening() {
@@ -350,6 +383,7 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
         if (!entry.isAssistant) return
         Log.i(TAG, "[REPLAY] Entry $entryIndex with ${entry.sentences.size} sentences")
         stopTts()
+        lastTtsDoneAt = 0L // Reset timer for replay
         clearDedupForEntry(entryIndex)
         entry.sentences.forEachIndexed { idx, s ->
             queueTts(SpokenSentence(s, entryIndex, idx), force = true)
@@ -371,6 +405,8 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
         queuedKeys.clear()
         _currentSpeaking.postValue(null)
         currentUtteranceId = null
+        lastTtsDoneAt = 0L
+        Log.i(TAG, "[TTS] State reset. lastTtsDoneAt is now 0.")
     }
 
     fun injectDraftIfActive() {
@@ -403,7 +439,6 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
     override fun onInit(status: Int) {
         Log.i(TAG, "[TTS] onInit called: status=$status, ttsInitialized=$ttsInitialized")
 
-        // Prevent re-initialization on rotation
         if (ttsInitialized) {
             Log.w(TAG, "[TTS] Already initialized, skipping setup")
             return
@@ -452,7 +487,6 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
         ttsQueue.addLast(spoken)
         Log.i(TAG, "[TTS] Queued: $key, text='${spoken.text.take(60)}...', queueSize=${ttsQueue.size}, speaking=${isSpeaking.value}, currentUtteranceId=$currentUtteranceId")
 
-        // Only start speaking if nothing is currently being spoken AND no current utterance is active
         if (isSpeaking.value != true && currentUtteranceId == null) {
             Log.d(TAG, "[TTS] Queue not active, starting speakNext")
             speakNext()
@@ -468,12 +502,15 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
 
     private fun speakNext() {
         if (!ttsReady || ttsQueue.isEmpty()) {
-            Log.d(TAG, "[TTS] speakNext skipped: ttsReady=$ttsReady, queueEmpty=${ttsQueue.isEmpty()}")
-            _isSpeaking.postValue(false)
+            Log.w(TAG, "[TTS] speakNext skipped: ttsReady=$ttsReady, queueEmpty=${ttsQueue.isEmpty()}")
+            if (ttsQueue.isEmpty()) {
+                _isSpeaking.postValue(false)
+                Log.i(TAG, "[TTS] Queue confirmed empty in speakNext. Firing queue finished event.")
+                _ttsQueueFinishedEvent.postValue(Event(Unit))
+            }
             return
         }
 
-        // Safety check: don't start new speech if already speaking
         if (currentUtteranceId != null) {
             Log.w(TAG, "[TTS] speakNext skipped: already have active utterance $currentUtteranceId")
             return

@@ -4,6 +4,7 @@ import android.Manifest
 import android.content.Context
 import android.content.pm.PackageManager
 import android.os.Bundle
+import android.os.SystemClock
 import android.util.Log
 import android.view.*
 import android.widget.RadioButton
@@ -26,7 +27,6 @@ class FirstFragment : Fragment() {
     private val viewModel: ConversationViewModel by viewModels()
 
     private var autoContinue = true
-    private var pendingAutoListen = false
     private var pendingStartAfterPermission = false
 
     private var currentModelName = "gemini-2.5-pro"
@@ -57,7 +57,12 @@ class FirstFragment : Fragment() {
             }
         }
 
+    // A short grace period to prevent STT from starting while TTS audio might still be finalizing.
     private val STT_GRACE_MS_AFTER_TTS = 500L
+
+    // NEW: listen window tracking for post-TTS listening duration
+    private var listenWindowDeadlineMs: Long = 0L
+    private var listenRestartCount: Int = 0
 
     override fun onCreateView(inflater: LayoutInflater, container: ViewGroup?, savedInstanceState: Bundle?): View {
         _binding = FragmentFirstBinding.inflate(inflater, container, false)
@@ -148,7 +153,8 @@ class FirstFragment : Fragment() {
             viewModel.applyEngineConfigFromPrefs(prefs)
         }
 
-        val savedListen = prefs.getInt(PREF_LISTEN_SECONDS_KEY, 3).coerceIn(1, 120)
+        // CHANGED default to 5s to match ViewModel and behavior
+        val savedListen = prefs.getInt(PREF_LISTEN_SECONDS_KEY, 5).coerceIn(1, 120)
         binding.listenSecondsInput?.setText(savedListen.toString())
         binding.listenSecondsInput?.doAfterTextChanged { editable ->
             val sec = editable?.toString()?.trim()?.toIntOrNull()?.coerceIn(1, 120)
@@ -165,29 +171,45 @@ class FirstFragment : Fragment() {
             val adapter = binding.conversationRecyclerView.adapter as ConversationAdapter
             val prev = adapter.currentSpeaking?.entryIndex
             adapter.currentSpeaking = speaking
+            // Notify both the previously highlighted and newly highlighted items to update
             if (prev != null) adapter.notifyItemChanged(prev)
             val now = speaking?.entryIndex
             if (now != null) adapter.notifyItemChanged(now)
 
             binding.newRecordingButton.visibility = if (speaking != null) View.VISIBLE else View.GONE
             updateButtonStates()
+        }
 
-            if (pendingAutoListen && speaking == null) {
-                pendingAutoListen = false
-                binding.conversationRecyclerView.postDelayed({ handleStartListeningRequest() }, STT_GRACE_MS_AFTER_TTS)
+        // [FIX] This observer now ONLY handles the loading state. Auto-listening is moved.
+        viewModel.turnFinishedEvent.observe(viewLifecycleOwner) { event ->
+            event.getContentIfNotHandled()?.let {
+                Log.d(TAG, "[LIFECYCLE] Turn finished event received. Unlocking UI.")
+                setLoading(false)
             }
         }
 
-        viewModel.turnFinishedEvent.observe(viewLifecycleOwner) { event ->
+        // NEW: correctly trigger auto-listening and start listen window.
+        viewModel.ttsQueueFinishedEvent.observe(viewLifecycleOwner) { event ->
             event.getContentIfNotHandled()?.let {
+                Log.d(TAG, "[AutoContinue] TTS Queue finished event received. autoContinue=$autoContinue")
                 if (autoContinue) {
-                    if (viewModel.isSpeaking.value == true) {
-                        pendingAutoListen = true
-                    } else {
-                        handleStartListeningRequest()
-                    }
+                    startListenWindow("TTS")
+                    handleStartListeningRequest(delayMs = STT_GRACE_MS_AFTER_TTS)
                 }
-                setLoading(false)
+            }
+        }
+
+        // NEW: Restart STT quickly when NO_MATCH occurs within the listen window
+        viewModel.sttNoMatch.observe(viewLifecycleOwner) { event ->
+            event.getContentIfNotHandled()?.let {
+                val remain = remainingListenWindowMs()
+                if (autoContinue && isListenWindowActive()) {
+                    listenRestartCount += 1
+                    Log.w(TAG, "[ListenWindow] NO_MATCH within window. Restarting STT. restartCount=$listenRestartCount remaining=${remain}ms")
+                    handleStartListeningRequest(delayMs = 50L)
+                } else {
+                    Log.i(TAG, "[ListenWindow] NO_MATCH but window expired or autoContinue=false. remaining=${remain}ms autoContinue=$autoContinue")
+                }
             }
         }
 
@@ -211,6 +233,7 @@ class FirstFragment : Fragment() {
                 maybeAutoCollapseSettings()
             }
             setLoading(false)
+            updateButtonStates()
         }
 
         viewModel.sttError.observe(viewLifecycleOwner) { event ->
@@ -232,16 +255,20 @@ class FirstFragment : Fragment() {
         }
         binding.speakButton.setOnClickListener {
             autoContinue = true
-            handleStartListeningRequest()
+            startListenWindow("Manual Speak")
+            handleStartListeningRequest(delayMs = 0L)
         }
         binding.newRecordingButton.setOnClickListener {
             autoContinue = true
+            startListenWindow("New Recording")
             viewModel.stopTts()
-            view?.postDelayed({ handleStartListeningRequest() }, 250)
+            // Post-delay to allow TTS to fully stop before listening starts
+            view?.postDelayed({ handleStartListeningRequest(delayMs = 0L) }, 250)
         }
         binding.stopButton.setOnClickListener {
             autoContinue = false
-            pendingAutoListen = false
+            listenWindowDeadlineMs = 0L
+            listenRestartCount = 0
             viewModel.stopAll()
             setLoading(false)
         }
@@ -271,29 +298,32 @@ class FirstFragment : Fragment() {
         }
     }
 
-    private fun handleStartListeningRequest() {
+    private fun handleStartListeningRequest(delayMs: Long = STT_GRACE_MS_AFTER_TTS) {
         if (ContextCompat.checkSelfPermission(requireContext(), Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
             pendingStartAfterPermission = true
             requestPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
             return
         }
 
-        if (viewModel.isSpeaking.value == true) {
-            pendingAutoListen = true
-            return
-        }
-        val elapsed = viewModel.elapsedSinceTtsDone()
-        if (elapsed < STT_GRACE_MS_AFTER_TTS) {
-            pendingAutoListen = true
-            view?.postDelayed({ handleStartListeningRequest() }, STT_GRACE_MS_AFTER_TTS - elapsed)
-            return
-        }
+        val remain = remainingListenWindowMs()
+        Log.d(TAG, "[AutoContinue] Handling start listening request. Delay=${delayMs}ms, listenWindowRemaining=${remain}ms, autoContinue=$autoContinue")
+        view?.postDelayed({ startListeningNow() }, delayMs)
+    }
 
-        pendingAutoListen = false
-        if (viewModel.sttIsListening.value == false) {
-            if (!ensureKeyAvailableForModelOrShow(currentModelName)) return
-            viewModel.startListening()
+    /**
+     * Contains the actual logic to start listening, called after any necessary permissions or delays.
+     */
+    private fun startListeningNow() {
+        // This check is still important to prevent race conditions or starting while another process is active.
+        if (viewModel.sttIsListening.value == true || viewModel.isEngineActive() || viewModel.isSpeaking.value == true) {
+            Log.w(TAG, "[AutoContinue] Skipping startListeningNow: isListening=${viewModel.sttIsListening.value}, isEngineActive=${viewModel.isEngineActive()}, isSpeaking=${viewModel.isSpeaking.value}")
+            return
         }
+        if (!ensureKeyAvailableForModelOrShow(currentModelName)) return
+
+        val remain = remainingListenWindowMs()
+        Log.i(TAG, "[AutoContinue] Starting listening. listenWindowRemaining=${remain}ms (deadline=$listenWindowDeadlineMs)")
+        viewModel.startListening()
     }
 
     private fun ensureKeyAvailableForModelOrShow(modelName: String): Boolean {
@@ -320,27 +350,25 @@ class FirstFragment : Fragment() {
     private fun updateButtonStates() {
         val engineActive = viewModel.isEngineActive()
         val isSpeaking = viewModel.isSpeaking.value == true
-        val isListening = viewModel.sttIsListening.value ?: false
+        val isListening = viewModel.sttIsListening.value == true
         binding.stopButton.isEnabled = isSpeaking || isListening || engineActive
         binding.newRecordingButton.isEnabled = isSpeaking
-        binding.speakButton.isEnabled = !isListening && !engineActive
+        binding.speakButton.isEnabled = !isListening && !engineActive && !isSpeaking
+        binding.clearButton.isEnabled = !isListening && !engineActive
     }
 
     private fun setLoading(isLoading: Boolean) {
-        val isListening = viewModel.sttIsListening.value ?: false
-        binding.progressBar.visibility = if (isLoading) View.VISIBLE else View.GONE
-        binding.speakButton.isEnabled = !isLoading && !isListening
-        binding.radioGeminiFlash.isEnabled = !isLoading
-        binding.radioGeminiPro.isEnabled = !isLoading
-        binding.radioGpt5.isEnabled = !isLoading
-        binding.radioGpt5Mini.isEnabled = !isLoading
-        binding.geminiApiKeyInput.isEnabled = !isLoading && !isListening
-        binding.openaiApiKeyInput.isEnabled = !isLoading && !isListening
-        // Keep settings enabled
-        binding.maxSentencesInput.isEnabled = true
-        binding.systemPromptInput.isEnabled = true
-        binding.systemPromptExtensionInput.isEnabled = true
-        binding.listenSecondsInput?.isEnabled = true
+        val engineActive = isLoading || viewModel.isEngineActive()
+        val isListening = viewModel.sttIsListening.value == true
+        binding.progressBar.visibility = if (engineActive && !isListening) View.VISIBLE else View.GONE
+
+        // Disable model/key inputs when the engine is running
+        binding.radioGeminiFlash.isEnabled = !engineActive
+        binding.radioGeminiPro.isEnabled = !engineActive
+        binding.radioGpt5.isEnabled = !engineActive
+        binding.radioGpt5Mini.isEnabled = !engineActive
+        binding.geminiApiKeyInput.isEnabled = !engineActive
+        binding.openaiApiKeyInput.isEnabled = !engineActive
         updateButtonStates()
     }
 
@@ -353,14 +381,25 @@ class FirstFragment : Fragment() {
         }, 300)
     }
 
-    override fun onPause() {
-        super.onPause()
-        Log.i(TAG, "[LIFECYCLE] onPause")
-    }
-
     override fun onDestroyView() {
         super.onDestroyView()
         Log.i(TAG, "[LIFECYCLE] onDestroyView")
         _binding = null
     }
+
+    // NEW: Listen window helpers
+    private fun startListenWindow(reason: String) {
+        val secs = prefs.getInt(PREF_LISTEN_SECONDS_KEY, 5).coerceIn(1, 120)
+        val now = SystemClock.elapsedRealtime()
+        listenWindowDeadlineMs = now + secs * 1000L
+        listenRestartCount = 0
+        Log.i(TAG, "[ListenWindow] Started ($reason): seconds=$secs, deadline=$listenWindowDeadlineMs now=$now")
+    }
+
+    private fun remainingListenWindowMs(): Long {
+        val now = SystemClock.elapsedRealtime()
+        return (listenWindowDeadlineMs - now).coerceAtLeast(0L)
+    }
+
+    private fun isListenWindowActive(): Boolean = SystemClock.elapsedRealtime() < listenWindowDeadlineMs
 }

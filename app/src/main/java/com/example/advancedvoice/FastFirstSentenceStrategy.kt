@@ -9,9 +9,29 @@ import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
+import java.util.Locale
 import java.util.UUID
+import java.util.regex.Pattern
 import kotlin.random.Random
 
+// More informative exception used by retries and UI messaging
+class ModelServiceException(
+    val httpCode: Int,
+    val service: String,
+    val model: String,
+    val retryAfterSec: Double?,
+    val rawBody: String,
+    message: String
+) : RuntimeException(message)
+
+/**
+ * Fast-first strategy: get a quick first sentence, then complete with the quality model.
+ * Changes:
+ * - No fallback to "Flash" when Pro returns 429/503 (as requested).
+ * - Adds clearer error/system messages with retry-after when available.
+ * - Adds extra logs; key logs also under tag "FastFirst" for easy filtering.
+ * - First sentence prompt updated to avoid chatty/greeting openings and reduce repetition.
+ */
 class FastFirstSentenceStrategy(
     private val http: OkHttpClient,
     private val geminiKeyProvider: () -> String,
@@ -22,8 +42,10 @@ class FastFirstSentenceStrategy(
     @Volatile private var active = false
 
     companion object {
-        // Use the same tag you filter on
+        // Existing engine tag you already filter on
         private const val TAG = "SentenceTurnEngine"
+        // NEW: dedicated tag for this strategy if you prefer finer filtering
+        private const val FAST_TAG = "FastFirst"
     }
 
     override fun execute(
@@ -40,27 +62,32 @@ class FastFirstSentenceStrategy(
         scope.launch(ioDispatcher) {
             try {
                 Log.i(TAG, "[FastFirst:$turnId] Start execute model=$modelName maxSentences=$maxSentences")
+                Log.i(FAST_TAG, "Start execute turn=$turnId model=$modelName maxSentences=$maxSentences")
 
-                // Phase 1: fast first sentence (prefer 'flash' when original is gemini 2.5 pro)
+                // Phase 1: fast first sentence
                 Log.d(TAG, "[FastFirst:$turnId] Phase 1 begin")
+                Log.d(FAST_TAG, "Phase 1 begin turn=$turnId")
                 val t1 = System.currentTimeMillis()
                 val firstSentenceText = getFastFirstSentence(turnId, history, modelName, systemPrompt, callbacks)
                 if (!active) throw CancellationException("Aborted during Phase 1")
                 val t1Dur = System.currentTimeMillis() - t1
                 Log.i(TAG, "[FastFirst:$turnId] Phase 1 complete in ${t1Dur}ms")
+                Log.i(FAST_TAG, "Phase 1 complete turn=$turnId durMs=$t1Dur")
 
                 if (firstSentenceText.isNullOrBlank()) {
                     throw RuntimeException("Phase 1 failed to generate a first sentence.")
                 }
                 callbacks.onFirstSentence(firstSentenceText)
 
-                // Phase 2: quality remainder
+                // Phase 2: quality remainder (no fallback)
                 Log.d(TAG, "[FastFirst:$turnId] Phase 2 begin")
+                Log.d(FAST_TAG, "Phase 2 begin turn=$turnId")
                 val t2 = System.currentTimeMillis()
                 val remainingSentences = getRemainingSentences(turnId, history, modelName, systemPrompt, maxSentences, firstSentenceText, callbacks)
                 if (!active) throw CancellationException("Aborted during Phase 2")
                 val t2Dur = System.currentTimeMillis() - t2
                 Log.i(TAG, "[FastFirst:$turnId] Phase 2 complete in ${t2Dur}ms sentences=${remainingSentences.size}")
+                Log.i(FAST_TAG, "Phase 2 complete turn=$turnId durMs=$t2Dur sentences=${remainingSentences.size}")
 
                 if (remainingSentences.isNotEmpty()) {
                     callbacks.onRemainingSentences(remainingSentences)
@@ -71,6 +98,7 @@ class FastFirstSentenceStrategy(
             } catch (e: Exception) {
                 if (active && e !is CancellationException) {
                     Log.e(TAG, "[FastFirst:$turnId] Request failed: ${e.message}", e)
+                    Log.e(FAST_TAG, "Request failed turn=$turnId: ${e.message}")
                     scope.launch { callbacks.onError(e.message ?: "Request failed") }
                 }
             } finally {
@@ -85,6 +113,7 @@ class FastFirstSentenceStrategy(
     override fun abort() {
         if (active) {
             Log.d(TAG, "[FastFirst] Aborted.")
+            Log.d(FAST_TAG, "Aborted.")
             active = false
         }
     }
@@ -100,9 +129,17 @@ class FastFirstSentenceStrategy(
         val isGemini = originalModel.contains("gemini", ignoreCase = true)
         val fastModel = chooseFastModel(originalModel) // flash for gemini-pro, mini for gpt-5
         val temp = 0.2
-        val prompt = "Answer the user's previous question with ONLY the first sentence of your response. The sentence must be complete and contain useful information, not just an acknowledgement. Plain text only."
+        // Tuned to reduce greetings/slang and encourage variety across turns
+        val prompt = """
+            Answer the user's previous question with ONLY the first sentence of your response.
+            The sentence must be complete and contain useful information (not just an acknowledgement).
+            Use a neutral, concise, professional tone. Do not include greetings or slang.
+            Avoid repeating the exact opening sentence you used earlier in this conversation.
+            Plain text only.
+        """.trimIndent()
 
         Log.i(TAG, "[FastFirst:$turnId] Phase1 model=$fastModel (from $originalModel) temp=$temp")
+        Log.i(FAST_TAG, "Phase1 turn=$turnId model=$fastModel from=$originalModel temp=$temp")
 
         val response = withRetries("phase1-$fastModel", maxAttempts = 3) {
             if (isGemini) {
@@ -116,7 +153,7 @@ class FastFirstSentenceStrategy(
         return first.ifBlank { null }
     }
 
-    // Phase 2: try quality model with retries; if Gemini Pro still fails with 503/429, fall back to Flash once
+    // Phase 2: try quality model with retries; NO fallback when Gemini Pro returns 429/503
     private fun getRemainingSentences(
         turnId: String,
         history: List<Msg>,
@@ -134,32 +171,36 @@ class FastFirstSentenceStrategy(
         val updatedHistory = history + Msg("assistant", firstSentence) + Msg("user", prompt)
 
         Log.i(TAG, "[FastFirst:$turnId] Phase2 model=$qualityModel temp=$temp")
+        Log.i(FAST_TAG, "Phase2 turn=$turnId model=$qualityModel temp=$temp")
 
-        val fullResponse = try {
-            withRetries("phase2-$qualityModel", maxAttempts = 3) {
+        return try {
+            val fullResponse = withRetries("phase2-$qualityModel", maxAttempts = 3) {
                 if (isGemini) {
                     callGeminiNonStream(systemPrompt, updatedHistory, qualityModel, temp)
                 } else {
                     callOpenAiNonStream(systemPrompt, updatedHistory, qualityModel, temp)
                 }
             }
+            if (fullResponse.isNotBlank()) SentenceSplitter.splitIntoSentences(fullResponse) else emptyList()
         } catch (e: Exception) {
-            val msg = e.message.orEmpty()
-            val shouldFallbackToFlash = isGemini && isGeminiPro(qualityModel) &&
-                    (msg.contains("503") || msg.contains("429") || msg.contains("temporarily overloaded", ignoreCase = true))
-            if (shouldFallbackToFlash) {
-                val fallbackModel = "gemini-2.5-flash"
-                Log.w(TAG, "[FastFirst:$turnId] Phase2 fallback to $fallbackModel due to: ${msg.take(140)}")
-                callbacks.onSystem("Gemini Pro was overloaded; fell back to Gemini Flash for remainder.")
-                withRetries("phase2-$fallbackModel", maxAttempts = 2) {
-                    callGeminiNonStream(systemPrompt, updatedHistory, fallbackModel, temp)
+            // Provide a system message with more detail; do NOT fallback to a lower model
+            val sysMsg = when (e) {
+                is ModelServiceException -> {
+                    val reason = when (e.httpCode) {
+                        429 -> "rate limit/quota exceeded"
+                        503 -> "service temporarily overloaded/unavailable"
+                        else -> "service error"
+                    }
+                    val retryStr = e.retryAfterSec?.let { String.format(Locale.US, "%.1f", it) }?.let { " Retry after ~${it}s." } ?: ""
+                    "Model error from ${e.service} (${e.model}): $reason. Fallback is disabled.$retryStr"
                 }
-            } else {
-                throw e
+                else -> "Model error: ${e.message ?: "unknown error"}. Fallback is disabled."
             }
+            Log.w(TAG, "[FastFirst:$turnId] Phase2 error (no fallback): $sysMsg")
+            Log.w(FAST_TAG, "Phase2 error turn=$turnId noFallback msg=$sysMsg")
+            callbacks.onSystem(sysMsg)
+            throw e
         }
-
-        return if (fullResponse.isNotBlank()) SentenceSplitter.splitIntoSentences(fullResponse) else emptyList()
     }
 
     private fun chooseFastModel(originalModel: String): String {
@@ -176,7 +217,7 @@ class FastFirstSentenceStrategy(
         return m.startsWith("gemini-2.5-pro") || m == "gemini-pro-latest" || m == "gemini-2.5-pro-latest"
     }
 
-    // Generic retries with exp backoff and jitter
+    // Generic retries with exponential backoff and jitter; treats 429/503 as retriable
     private fun <T> withRetries(
         description: String,
         maxAttempts: Int = 3,
@@ -190,14 +231,21 @@ class FastFirstSentenceStrategy(
         while (attempt <= maxAttempts) {
             try {
                 Log.d(TAG, "[FastFirst] $description attempt=$attempt")
+                Log.d(FAST_TAG, "$description attempt=$attempt")
                 return block()
             } catch (e: Exception) {
                 last = e
-                val msg = e.message.orEmpty()
-                val retriable = msg.contains("503") || msg.contains("429") || msg.contains("temporarily overloaded", ignoreCase = true)
+                val (retriable, codeStr) = when (e) {
+                    is ModelServiceException -> ((e.httpCode == 503 || e.httpCode == 429) to e.httpCode.toString())
+                    else -> {
+                        val msg = e.message.orEmpty()
+                        ((msg.contains("503") || msg.contains("429") || msg.contains("temporarily overloaded", ignoreCase = true)) to "unknown")
+                    }
+                }
                 if (!retriable || attempt == maxAttempts) break
                 val jitter = Random.nextLong(0, 250)
-                Log.w(TAG, "[FastFirst] $description failed: ${msg.take(180)}. Retrying in ${delayMs + jitter}ms")
+                Log.w(TAG, "[FastFirst] $description failed(code=$codeStr): ${e.message?.take(180)}. Retrying in ${delayMs + jitter}ms")
+                Log.w(FAST_TAG, "$description failed(code=$codeStr): ${e.message?.take(180)} retryInMs=${delayMs + jitter}")
                 try { Thread.sleep(delayMs + jitter) } catch (_: InterruptedException) {}
                 delayMs = (delayMs * backoffFactor).toLong().coerceAtMost(8000)
                 attempt++
@@ -222,15 +270,33 @@ class FastFirstSentenceStrategy(
         } catch (e: Exception) { Log.e(TAG, "[FastFirst] Error extracting Gemini text", e); "" }
     }
 
-    private fun throwDescriptiveError(code: Int, body: String, service: String) {
-        val userMessage = when (code) {
-            503 -> "The model is temporarily overloaded. Please try again in a moment. (Error: 503)"
-            429 -> "You have exceeded your API quota. Please check your plan and billing details. (Error: 429)"
-            401 -> "Invalid API Key. Please check your credentials. (Error: 401)"
-            else -> "A model error occurred. (Error: $code)"
+    private fun parseRetryAfterHeaderSeconds(headerValue: String?): Double? {
+        if (headerValue.isNullOrBlank()) return null
+        return headerValue.toDoubleOrNull() ?: headerValue.toLongOrNull()?.toDouble()
+    }
+
+    private fun parseGeminiRetryAfterFromBodySeconds(body: String): Double? {
+        // Looks for: "Please retry in 30.439591457s."
+        val p = Pattern.compile("retry in\\s+([0-9]+(?:\\.[0-9]+)?)s", Pattern.CASE_INSENSITIVE)
+        val m = p.matcher(body)
+        return if (m.find()) m.group(1)?.toDoubleOrNull() else null
+    }
+
+    private fun buildUserMessage(code: Int, service: String, model: String, retryAfterSec: Double?, raw: String): String {
+        val retryStr = retryAfterSec?.let { " Retry after ~${String.format(Locale.US, "%.1f", it)}s." } ?: ""
+        return when (code) {
+            503 -> "$service is temporarily overloaded/unavailable for $model. Please try again in a moment. [HTTP 503].$retryStr"
+            429 -> "You have exceeded your API quota or hit a rate limit on $service for $model. Please check your plan/billing or slow down requests. [HTTP 429].$retryStr"
+            401 -> "Invalid API Key for $service. Please check your credentials. [HTTP 401]."
+            else -> "A $service error occurred for $model. [HTTP $code]."
         }
-        Log.e(TAG, "[FastFirst] $service Error - Code: $code, Body: ${body.take(500)}")
-        throw RuntimeException(userMessage)
+    }
+
+    private fun throwDescriptiveError(code: Int, body: String, service: String, model: String, retryAfterSec: Double?): Nothing {
+        val userMessage = buildUserMessage(code, service, model, retryAfterSec, body)
+        Log.e(TAG, "[FastFirst] $service Error - Code: $code, Model: $model, RetryAfter=${retryAfterSec ?: "-"}, Body: ${body.take(500)}")
+        Log.e(FAST_TAG, "$service error code=$code model=$model retryAfter=${retryAfterSec ?: "-"}")
+        throw ModelServiceException(code, service, model, retryAfterSec, body, userMessage)
     }
 
     private fun callOpenAiNonStream(systemPrompt: String, history: List<Msg>, modelName: String, temperature: Double): String {
@@ -250,7 +316,10 @@ class FastFirstSentenceStrategy(
 
         http.newCall(req).execute().use { resp ->
             val payload = resp.body?.string().orEmpty()
-            if (!resp.isSuccessful) throwDescriptiveError(resp.code, payload, "OpenAI")
+            if (!resp.isSuccessful) {
+                val retryAfter = parseRetryAfterHeaderSeconds(resp.header("Retry-After"))
+                throwDescriptiveError(resp.code, payload, "OpenAI", modelName, retryAfter)
+            }
             return JSONObject(payload).optJSONArray("choices")?.optJSONObject(0)?.optJSONObject("message")?.optString("content", "").orEmpty().trim()
         }
     }
@@ -274,7 +343,10 @@ class FastFirstSentenceStrategy(
         val req = Request.Builder().url(url).post(body).build()
         http.newCall(req).execute().use { resp ->
             val payload = resp.body?.string().orEmpty()
-            if (!resp.isSuccessful) throwDescriptiveError(resp.code, payload, "Gemini")
+            if (!resp.isSuccessful) {
+                val retryAfter = parseGeminiRetryAfterFromBodySeconds(payload)
+                throwDescriptiveError(resp.code, payload, "Gemini", effModel, retryAfter)
+            }
             return extractGeminiText(payload)
         }
     }

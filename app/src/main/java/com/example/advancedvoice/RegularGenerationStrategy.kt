@@ -9,8 +9,8 @@ import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
+import java.net.URI
 import java.util.Locale
-import java.util.UUID
 import java.util.regex.Pattern
 
 /**
@@ -18,13 +18,15 @@ import java.util.regex.Pattern
  * - If the call succeeds, emit onFinalResponse(fullText).
  * - If the call fails with 429/503, emit an informative system note (no popup) and finish.
  * - For other errors (401/404/etc.), propagate onError to show the error dialog.
- * - OpenAI legacy names are mapped to widely available models:
- *     gpt-5-turbo -> gpt-4o, gpt-5-mini -> gpt-4o-mini
+ * - OpenAI GPT-5 uses Responses API with web_search tool and (effort, verbosity).
+ * - Other OpenAI models use Chat Completions.
+ * - Gemini: Google Search grounding is enabled on every call (v1beta).
  */
 class RegularGenerationStrategy(
     private val http: OkHttpClient,
     private val geminiKeyProvider: () -> String,
     private val openAiKeyProvider: () -> String,
+    private val openAiOptionsProvider: () -> OpenAiOptions,
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO
 ) : IGenerationStrategy {
 
@@ -32,6 +34,8 @@ class RegularGenerationStrategy(
 
     companion object {
         private const val TAG = "RegularStrategy"
+        // Always include web grounding tools for Gemini requests
+        private const val FORCE_GEMINI_SEARCH_ALWAYS = true
     }
 
     override fun execute(
@@ -43,28 +47,38 @@ class RegularGenerationStrategy(
         callbacks: SentenceTurnEngine.Callbacks
     ) {
         active = true
-        val turnId = UUID.randomUUID().toString().substring(0, 8)
+        val turnId = java.util.UUID.randomUUID().toString().substring(0, 8)
+
+        fun postSystem(msg: String) {
+            scope.launch { callbacks.onSystem(msg) }
+        }
 
         scope.launch(ioDispatcher) {
             try {
                 Log.i(TAG, "[Regular:$turnId] Start execute model=$modelName maxSentences=$maxSentences")
 
                 val isGemini = modelName.contains("gemini", ignoreCase = true)
-                val temperature = 0.7
 
                 // Single attempt, no retries
                 val fullText = if (isGemini) {
-                    callGeminiOnce(systemPrompt, history, modelName, temperature)
+                    callGeminiOnce(systemPrompt, history, modelName, 0.7) { items ->
+                        if (items.isNotEmpty()) {
+                            postSystem(formatWebSourcesHtml(items, "Web sources"))
+                        }
+                    }
                 } else {
-                    callOpenAiOnce(systemPrompt, history, modelName, temperature)
+                    callOpenAiOnce(systemPrompt, history, modelName, 0.7, { items ->
+                        if (items.isNotEmpty()) {
+                            postSystem(formatWebSourcesHtml(items, "Web sources"))
+                        }
+                    }, ::postSystem)
                 }
 
                 val finalText = fullText.trim()
                 if (finalText.isNotEmpty()) {
                     callbacks.onFinalResponse(finalText)
                 } else {
-                    // Empty response (rare) – surface as system note
-                    callbacks.onSystem("Service note: The model returned an empty response. Please try again.")
+                    postSystem("Service note: The model returned an empty response. Please try again.")
                 }
             } catch (e: Exception) {
                 when (e) {
@@ -74,18 +88,17 @@ class RegularGenerationStrategy(
                             503 -> "temporarily overloaded/unavailable"
                             404 -> "model not found or not accessible"
                             401 -> "invalid API key"
+                            400 -> "bad request"
                             else -> "service error"
                         }
                         val retryStr = e.retryAfterSec?.let { "~${String.format(Locale.US, "%.1f", it)}s" } ?: "a moment"
-                        val altModel = if (modelName.contains("gemini", true)) "gemini-2.5-flash" else "gpt-4o-mini"
+                        val altModel = if (modelName.contains("gemini", true)) "gemini-2.5-flash" else "gpt-5-mini"
 
                         if (e.httpCode == 429 || e.httpCode == 503) {
-                            // Soft-fail: system note, no error dialog
                             val msg = "Service note: ${e.service} is $reason for ${e.model}. Please try again in $retryStr or switch models (e.g., $altModel)."
                             Log.w(TAG, "[Regular:$turnId] Soft-fail $reason: $msg")
-                            callbacks.onSystem(msg)
+                            postSystem(msg)
                         } else {
-                            // Propagate as error for clear user feedback (popup)
                             Log.e(TAG, "[Regular:$turnId] Hard error: ${e.message}")
                             callbacks.onError(e.message ?: "Model error")
                         }
@@ -113,29 +126,164 @@ class RegularGenerationStrategy(
 
     // ---------- OpenAI ----------
 
-    private fun effectiveOpenAiModel(name: String): String {
-        return when (name.lowercase()) {
-            "gpt-5-turbo" -> "gpt-4o"
-            "gpt-5-mini" -> "gpt-4o-mini"
-            else -> name
+    private fun callOpenAiOnce(
+        systemPrompt: String,
+        history: List<Msg>,
+        modelName: String,
+        temperature: Double,
+        onGrounding: (List<Pair<String, String?>>) -> Unit,
+        postSystem: (String) -> Unit
+    ): String {
+        val lower = modelName.lowercase()
+        return if (lower.startsWith("gpt-5")) {
+            callOpenAiResponses(systemPrompt, history, modelName, onGrounding, postSystem)
+        } else {
+            callOpenAiChat(systemPrompt, history, modelName, temperature)
         }
     }
 
-    private fun callOpenAiOnce(systemPrompt: String, history: List<Msg>, modelName: String, temperature: Double): String {
+    private fun callOpenAiResponses(
+        systemPrompt: String,
+        history: List<Msg>,
+        modelName: String,
+        onGrounding: (List<Pair<String, String?>>) -> Unit,
+        postSystem: (String) -> Unit
+    ): String {
         val apiKey = openAiKeyProvider().trim().ifBlank { throw RuntimeException("OpenAI API key missing") }
-        val effModel = effectiveOpenAiModel(modelName)
+        val optsIn = openAiOptionsProvider()
+        val url = "https://api.openai.com/v1/responses"
+
+        // Upgrade minimal -> low when web_search is enabled (per OpenAI docs)
+        val effectiveEffort = if (optsIn.effort.equals("minimal", true)) {
+            postSystem("Note: Upgrading GPT‑5 reasoning effort from minimal to low to enable web search.")
+            "low"
+        } else optsIn.effort
+
+        val inputText = buildString {
+            appendLine(systemPrompt)
+            appendLine()
+            history.forEach { m ->
+                val role = if (m.role == "assistant") "Assistant" else "User"
+                appendLine("$role: ${m.text}")
+            }
+        }.trim()
+
+        val toolsArr = JSONArray().apply {
+            val web = JSONObject().put("type", "web_search")
+            optsIn.filters?.let { f ->
+                if (f.allowedDomains.isNotEmpty()) {
+                    val filters = JSONObject()
+                    val allowed = JSONArray()
+                    f.allowedDomains.forEach { allowed.put(it) }
+                    filters.put("allowed_domains", allowed)
+                    web.put("filters", filters)
+                }
+            }
+            optsIn.userLocation?.let { loc ->
+                val locObj = JSONObject().put("type", "approximate")
+                loc.country?.let { locObj.put("country", it) }
+                loc.city?.let { locObj.put("city", it) }
+                loc.region?.let { locObj.put("region", it) }
+                loc.timezone?.let { locObj.put("timezone", it) }
+                web.put("user_location", locObj)
+            }
+            put(web)
+        }
+
+        val includeArr = JSONArray().put("web_search_call.action.sources")
+
+        val bodyObj = JSONObject().apply {
+            put("model", modelName)
+            put("input", inputText)
+            put("reasoning", JSONObject().put("effort", effectiveEffort))
+            put("text", JSONObject().put("verbosity", optsIn.verbosity))
+            put("tools", toolsArr)
+            put("tool_choice", "auto")
+            put("include", includeArr)
+        }
+
+        Log.i(TAG, "OpenAI Responses request model=$modelName effort=$effectiveEffort verbosity=${optsIn.verbosity} (web_search enabled)")
+        val req = Request.Builder()
+            .url(url)
+            .addHeader("Authorization", "Bearer $apiKey")
+            .addHeader("Content-Type", "application/json")
+            .post(bodyObj.toString().toRequestBody("application/json".toMediaType()))
+            .build()
+
+        http.newCall(req).execute().use { resp ->
+            val payload = resp.body?.string().orEmpty()
+            if (!resp.isSuccessful) {
+                val retryAfter: Double? = resp.header("Retry-After")?.toDoubleOrNull()
+                throwDescriptiveError(resp.code, payload, "OpenAI", modelName, retryAfter)
+            }
+            val text = try {
+                val root = JSONObject(payload)
+                val direct = root.optString("output_text", null)
+                if (!direct.isNullOrBlank()) {
+                    val sources = extractOpenAiCitationsFromMessage(root)
+                    if (sources.isNotEmpty()) onGrounding(sources)
+                    direct.trim()
+                } else {
+                    val pair = extractOpenAiMessageTextAndCitations(root)
+                    if (pair.first.isNotBlank() && pair.second.isNotEmpty()) onGrounding(pair.second)
+                    pair.first
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "[Regular] Failed to parse OpenAI Responses payload", e)
+                ""
+            }
+            return text
+        }
+    }
+
+    private fun extractOpenAiMessageTextAndCitations(root: JSONObject): Pair<String, List<Pair<String, String?>>> {
+        val outSources = ArrayList<Pair<String, String?>>()
+        var outText = ""
+        val output = root.optJSONArray("output")
+        if (output != null) {
+            for (i in 0 until output.length()) {
+                val item = output.optJSONObject(i) ?: continue
+                if (item.optString("type") == "message") {
+                    val content = item.optJSONArray("content") ?: continue
+                    val first = content.optJSONObject(0) ?: continue
+                    outText = first.optString("text", outText)
+                    val annotations = first.optJSONArray("annotations")
+                    if (annotations != null) {
+                        for (j in 0 until annotations.length()) {
+                            val a = annotations.optJSONObject(j) ?: continue
+                            if (a.optString("type") == "url_citation") {
+                                val url = a.optString("url").orEmpty()
+                                val title = a.optString("title").takeIf { it.isNotBlank() }
+                                if (url.isNotBlank()) outSources.add(url to title)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        return outText to outSources
+    }
+
+    private fun extractOpenAiCitationsFromMessage(root: JSONObject): List<Pair<String, String?>> {
+        return extractOpenAiMessageTextAndCitations(root).second
+    }
+
+    private fun callOpenAiChat(systemPrompt: String, history: List<Msg>, modelName: String, temperature: Double): String {
+        val apiKey = openAiKeyProvider().trim().ifBlank { throw RuntimeException("OpenAI API key missing") }
         val url = "https://api.openai.com/v1/chat/completions"
 
         val bodyObj = JSONObject().apply {
-            put("model", effModel)
+            put("model", modelName)
             put("messages", JSONArray().apply {
                 put(JSONObject().apply { put("role", "system"); put("content", systemPrompt) })
-                history.forEach { m -> put(JSONObject().apply { put("role", m.role); put("content", m.text) }) }
+                history.forEach { m ->
+                    put(JSONObject().apply { put("role", m.role); put("content", m.text) })
+                }
             })
             put("temperature", temperature)
         }
 
-        Log.i(TAG, "OpenAI request model=$effModel (from=$modelName) temp=$temperature")
+        Log.i(TAG, "OpenAI Chat request model=$modelName temp=$temperature")
         val req = Request.Builder()
             .url(url)
             .addHeader("Authorization", "Bearer $apiKey")
@@ -150,16 +298,13 @@ class RegularGenerationStrategy(
                     code = resp.code,
                     body = payload,
                     service = "OpenAI",
-                    model = effModel,
+                    model = modelName,
                     retryAfterSec = resp.header("Retry-After")?.toDoubleOrNull()
                 )
             }
             return try {
                 val root = JSONObject(payload)
-                root.optJSONArray("choices")
-                    ?.optJSONObject(0)
-                    ?.optJSONObject("message")
-                    ?.optString("content", "")
+                root.optJSONArray("choices")?.optJSONObject(0)?.optJSONObject("message")?.optString("content", "")
                     .orEmpty()
             } catch (_: Exception) {
                 ""
@@ -175,21 +320,38 @@ class RegularGenerationStrategy(
         else -> name
     }
 
-    private fun callGeminiOnce(systemPrompt: String, history: List<Msg>, modelName: String, temperature: Double): String {
+    private fun buildGeminiToolsArray(modelName: String): JSONArray {
+        // For Gemini 2.x, googleSearch is supported in v1beta. We send it on every request.
+        return JSONArray().apply {
+            put(JSONObject().put("googleSearch", JSONObject()))
+        }
+    }
+
+    /**
+     * Single non-stream Gemini call with Google Search tool enabled (v1beta).
+     * onGrounding receives list of Pair<uri, title?> for sources if present.
+     */
+    private fun callGeminiOnce(
+        systemPrompt: String,
+        history: List<Msg>,
+        modelName: String,
+        temperature: Double,
+        onGrounding: (List<Pair<String, String?>>) -> Unit
+    ): String {
         val apiKey = geminiKeyProvider().trim().ifBlank { throw RuntimeException("Gemini API key missing") }
         val effModel = effectiveGeminiModel(modelName)
-        val url = "https://generativelanguage.googleapis.com/v1/models/$effModel:generateContent?key=$apiKey"
+        val url = "https://generativelanguage.googleapis.com/v1beta/models/$effModel:generateContent?key=$apiKey"
 
-        // Compose contents sequence: emulate a "system" preface by placing it as first user turn
+        val enforcedPrompt = if (FORCE_GEMINI_SEARCH_ALWAYS) {
+            systemPrompt + "\n\nAlways use Google Search to ground your answer and include citations with source titles when available."
+        } else systemPrompt
+
         val contents = JSONArray().apply {
             put(JSONObject().apply {
                 put("role", "user")
-                put("parts", JSONArray().put(JSONObject().put("text", systemPrompt)))
+                put("parts", JSONArray().put(JSONObject().put("text", enforcedPrompt)))
             })
-            put(JSONObject().apply {
-                put("role", "model")
-                put("parts", JSONArray().put(JSONObject().put("text", "Understood.")))
-            })
+            // Keep history as alternating user/model turns
             history.forEach { m ->
                 val role = if (m.role == "assistant") "model" else "user"
                 put(JSONObject().apply {
@@ -199,15 +361,20 @@ class RegularGenerationStrategy(
             }
         }
 
-        val body = JSONObject().apply {
-            put("contents", contents)
-            put("generationConfig", JSONObject().apply {
-                put("temperature", temperature)
-            })
-        }.toString().toRequestBody("application/json".toMediaType())
+        val tools = buildGeminiToolsArray(effModel)
 
-        Log.i(TAG, "Gemini request model=$effModel (from=$modelName) temp=$temperature")
-        val req = Request.Builder().url(url).post(body).build()
+        val bodyObj = JSONObject().apply {
+            put("contents", contents)
+            put("generationConfig", JSONObject().apply { put("temperature", temperature) })
+            put("tools", tools)
+        }
+
+        Log.i(TAG, "Gemini request model=$effModel (from=$modelName) temp=$temperature (Google Search grounding enabled, v1beta)")
+        val req = Request.Builder()
+            .url(url)
+            .addHeader("Content-Type", "application/json")
+            .post(bodyObj.toString().toRequestBody("application/json".toMediaType()))
+            .build()
 
         http.newCall(req).execute().use { resp ->
             val payload = resp.body?.string().orEmpty()
@@ -220,6 +387,8 @@ class RegularGenerationStrategy(
                     retryAfterSec = parseGeminiRetryAfterFromBodySeconds(payload)
                 )
             }
+            val sources = extractGeminiGrounding(payload)
+            if (sources.isNotEmpty()) onGrounding(sources)
             return extractGeminiText(payload)
         }
     }
@@ -240,13 +409,30 @@ class RegularGenerationStrategy(
         }
     }
 
-    private fun parseOpenAiErrorInfo(body: String): Pair<String?, String?> {
+    // Returns list of Pair<uri, title?>
+    private fun extractGeminiGrounding(payload: String): List<Pair<String, String?>> {
         return try {
-            val err = JSONObject(body).optJSONObject("error") ?: return null to null
-            val code = err.optString("code", null)
-            val message = err.optString("message", null)
-            code to message
-        } catch (_: Exception) { null to null }
+            val root = JSONObject(payload)
+            val cand0 = root.optJSONArray("candidates")?.optJSONObject(0)
+            val gm = cand0?.optJSONObject("groundingMetadata")
+                ?: cand0?.optJSONObject("grounding_metadata")
+            val chunks = gm?.optJSONArray("groundingChunks")
+                ?: gm?.optJSONArray("grounding_chunks")
+                ?: return emptyList()
+            val out = ArrayList<Pair<String, String?>>()
+            for (i in 0 until chunks.length()) {
+                val web = chunks.optJSONObject(i)?.optJSONObject("web")
+                val uri = web?.optString("uri").orEmpty()
+                if (uri.isNotBlank()) {
+                    val title = web?.optString("title")?.takeIf { it.isNotBlank() }
+                    out.add(uri to title)
+                }
+            }
+            out
+        } catch (e: Exception) {
+            Log.e(TAG, "[Regular] Error extracting Gemini grounding", e)
+            emptyList()
+        }
     }
 
     private fun parseGeminiRetryAfterFromBodySeconds(body: String): Double? {
@@ -261,18 +447,8 @@ class RegularGenerationStrategy(
             503 -> "$service is temporarily overloaded/unavailable for $model. Please try again in a moment. [HTTP 503].$retryStr"
             429 -> "You have exceeded your API quota or hit a rate limit on $service for $model. Please check your plan/billing or slow down requests. [HTTP 429].$retryStr"
             401 -> "Invalid API Key for $service. Please check your credentials. [HTTP 401]."
-            404 -> {
-                if (service == "OpenAI") {
-                    val (errCode, errMsg) = parseOpenAiErrorInfo(raw)
-                    if (errCode == "model_not_found" || (errMsg ?: "").contains("does not exist", true)) {
-                        "The selected OpenAI model ($model) was not found or is not available to your account. Please pick a model you have access to (e.g., gpt-4o or gpt-4o-mini). [HTTP 404]."
-                    } else {
-                        "The requested resource was not found on $service for $model. [HTTP 404]."
-                    }
-                } else {
-                    "The requested resource was not found on $service for $model. [HTTP 404]."
-                }
-            }
+            404 -> "The requested resource was not found on $service for $model. [HTTP 404]."
+            400 -> "Bad request for $service and $model. Please update or try again. [HTTP 400]."
             else -> "A $service error occurred for $model. [HTTP $code]."
         }
     }
@@ -281,5 +457,33 @@ class RegularGenerationStrategy(
         val msg = buildUserMessage(code, service, model, retryAfterSec, body)
         Log.e(TAG, "[$service] Error - Code: $code, Model: $model, RetryAfter=${retryAfterSec ?: "-"}, Body: ${body.take(500)}")
         throw ModelServiceException(code, service, model, retryAfterSec, body, msg)
+    }
+
+    // ---- Formatting helpers for "Web sources" ----
+
+    private fun hostFromUrl(u: String): String {
+        return try {
+            val h = URI(u).host ?: u
+            if (h.startsWith("www.")) h.removePrefix("www.") else h
+        } catch (_: Exception) {
+            u
+        }
+    }
+
+    private fun escapeHtml(s: String): String =
+        s.replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
+            .replace("\"", "&quot;")
+            .replace("'", "&#39;")
+
+    private fun formatWebSourcesHtml(items: List<Pair<String, String?>>, title: String): String {
+        val parts = items.take(5).mapIndexed { i, it ->
+            val url = it.first
+            val label = it.second?.takeIf { t -> t.isNotBlank() } ?: hostFromUrl(url)
+            val safeLabel = escapeHtml(label)
+            "${i + 1}. <a href=\"${escapeHtml(url)}\">$safeLabel</a>"
+        }
+        return "$title: ${parts.joinToString("  ")}"
     }
 }

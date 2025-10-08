@@ -1,4 +1,3 @@
-// SentenceTurnEngine.kt
 package com.example.advancedvoice
 
 import android.util.Log
@@ -7,8 +6,8 @@ import kotlinx.coroutines.launch
 import okhttp3.OkHttpClient
 
 /**
- * Orchestrates the conversation turn, deciding which generation strategy to use
- * based on user settings. It manages conversation history and state.
+ * Orchestrates a conversation turn. Picks a generation strategy based on settings,
+ * forwards callbacks, and maintains the conversation history to supply to models.
  */
 class SentenceTurnEngine(
     private val uiScope: CoroutineScope,
@@ -16,8 +15,10 @@ class SentenceTurnEngine(
     private val geminiKeyProvider: () -> String,
     private val openAiKeyProvider: () -> String,
     private val systemPromptProvider: () -> String,
+    private val openAiOptionsProvider: () -> OpenAiOptions,
     val callbacks: Callbacks
 ) {
+
     companion object {
         private const val TAG = "SentenceTurnEngine"
     }
@@ -64,22 +65,16 @@ class SentenceTurnEngine(
         }
     }
 
-    /**
-     * Seed an external history (e.g., after rotation restore).
-     */
     fun seedHistory(seed: List<Msg>) {
         history.clear()
         history.addAll(seed)
         Log.i(TAG, "Seeded history size=${history.size}")
     }
 
-    /**
-     * Snapshot the current history (for saving/restoring across rotation).
-     */
     fun getHistorySnapshot(): List<Msg> = ArrayList(history)
 
     /**
-     * Inject a partial assistant draft into history (used on user barge-in).
+     * Inject partial assistant text into history (for barge-in/draft preservation).
      */
     fun injectAssistantDraft(text: String) {
         addAssistant(text)
@@ -99,16 +94,23 @@ class SentenceTurnEngine(
 
         currentStrategy = if (fasterFirst) {
             Log.i(TAG, "Strategy=FastFirstSentenceStrategy")
-            FastFirstSentenceStrategy(http, geminiKeyProvider, openAiKeyProvider)
+            FastFirstSentenceStrategy(
+                http = http,
+                geminiKeyProvider = geminiKeyProvider,
+                openAiKeyProvider = openAiKeyProvider,
+                openAiOptionsProvider = openAiOptionsProvider
+            )
         } else {
             Log.i(TAG, "Strategy=RegularGenerationStrategy")
-            RegularGenerationStrategy(http, geminiKeyProvider, openAiKeyProvider)
+            RegularGenerationStrategy(
+                http = http,
+                geminiKeyProvider = geminiKeyProvider,
+                openAiKeyProvider = openAiKeyProvider,
+                openAiOptionsProvider = openAiOptionsProvider
+            )
         }
 
-        // Track if first sentence has been called to prevent duplicates
-        var firstSentenceCalled = false
-
-        // Wrap callbacks to ensure main-thread UI updates and prevent duplicates
+        // Wrap callbacks so all UI updates happen on uiScope and only while active.
         val strategyCallbacks = Callbacks(
             onStreamDelta = { delta ->
                 if (active) {
@@ -127,15 +129,12 @@ class SentenceTurnEngine(
                 }
             },
             onFirstSentence = { firstSentence ->
-                if (active && !firstSentenceCalled) {
-                    firstSentenceCalled = true
+                if (active) {
                     uiScope.launch {
                         Log.i(TAG, "→ onFirstSentence: '${firstSentence.take(80)}...'")
                         addAssistant(firstSentence)
                         callbacks.onFirstSentence(firstSentence)
                     }
-                } else if (firstSentenceCalled) {
-                    Log.w(TAG, "→ onFirstSentence SKIPPED (already called)")
                 }
             },
             onRemainingSentences = { sentences ->

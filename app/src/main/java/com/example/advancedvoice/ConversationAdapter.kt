@@ -1,7 +1,7 @@
-// ConversationAdapter.kt
 package com.example.advancedvoice
 
 import android.text.Html
+import android.text.method.LinkMovementMethod
 import android.util.Log
 import android.view.LayoutInflater
 import android.view.View
@@ -65,8 +65,23 @@ class ConversationAdapter(
                 renderAssistantMessage(entry, entryIndex, currentSpeaking)
                 replayButton.visibility = View.VISIBLE
                 replayButton.setOnClickListener { onReplayClicked(entryIndex) }
+                // Assistant content usually doesn't contain links; keep default movement method
+                messageContent.movementMethod = null
+                messageContent.linksClickable = false
             } else {
-                messageContent.text = entry.sentences.firstOrNull().orEmpty()
+                // Non-assistant entries (You/System/Error/…)
+                if (entry.speaker.equals("System", ignoreCase = true)) {
+                    // Render System messages (e.g., "Web sources") as HTML with clickable links
+                    val html = entry.sentences.joinToString(" ")
+                    messageContent.text = Html.fromHtml(html, Html.FROM_HTML_MODE_COMPACT)
+                    messageContent.movementMethod = LinkMovementMethod.getInstance()
+                    messageContent.linksClickable = true
+                } else {
+                    // Plain text for user/error or other roles
+                    messageContent.text = entry.sentences.firstOrNull().orEmpty()
+                    messageContent.movementMethod = null
+                    messageContent.linksClickable = false
+                }
                 replayButton.visibility = View.GONE
             }
         }

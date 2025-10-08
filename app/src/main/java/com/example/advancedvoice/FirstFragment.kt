@@ -5,6 +5,8 @@ import android.content.Context
 import android.content.pm.PackageManager
 import android.os.Bundle
 import android.os.SystemClock
+import android.text.Html
+import android.text.method.LinkMovementMethod
 import android.util.Log
 import android.view.*
 import android.widget.RadioButton
@@ -16,6 +18,7 @@ import androidx.fragment.app.Fragment
 import androidx.fragment.app.viewModels
 import com.example.advancedvoice.databinding.FragmentFirstBinding
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
+import java.util.Locale
 
 class FirstFragment : Fragment() {
 
@@ -135,9 +138,14 @@ class FirstFragment : Fragment() {
         binding.geminiApiKeyInput.setText(prefs.getString("gemini_key", "") ?: "")
         binding.openaiApiKeyInput.setText(prefs.getString("openai_key", "") ?: "")
 
+        // Prepare Gemini help link (clickable HTML)
+        setupGeminiKeyHelpLink()
+        refreshGeminiKeyHelpLinkVisibility()
+
         binding.geminiApiKeyInput.doAfterTextChanged { editable ->
             prefs.edit().putString("gemini_key", editable?.toString()?.trim()).apply()
             updateModelOptionsVisibility()
+            refreshGeminiKeyHelpLinkVisibility()
             // Post to ensure visibility/layout settled before checking
             binding.root.post {
                 syncRadioSelectionToCurrentModel()
@@ -266,12 +274,6 @@ class FirstFragment : Fragment() {
             }
             setLoading(false)
             updateButtonStates()
-        }
-
-        viewModel.sttError.observe(viewLifecycleOwner) { event ->
-            event.getContentIfNotHandled()?.let { errorMessage ->
-                Toast.makeText(context, errorMessage, Toast.LENGTH_SHORT).show()
-            }
         }
     }
 
@@ -433,6 +435,9 @@ class FirstFragment : Fragment() {
         // If none is checked but radios are visible and the current model is available, ensure it's checked
         ensureRadioSelectedIfVisible()
 
+        // Update the Gemini help link visibility when model options may change
+        refreshGeminiKeyHelpLinkVisibility()
+
         updateButtonStates()
     }
 
@@ -582,5 +587,19 @@ class FirstFragment : Fragment() {
             lower == "gpt-5-mini" -> "gpt-4o-mini"
             else -> name
         }
+    }
+
+    // ---- Gemini API Key helper link ----
+
+    private fun setupGeminiKeyHelpLink() {
+        val html = "<a href=\"https://aistudio.google.com/api-keys\">Get free Gemini API Key here</a>"
+        binding.geminiApiKeyHelpLink.text = Html.fromHtml(html, Html.FROM_HTML_MODE_COMPACT)
+        binding.geminiApiKeyHelpLink.movementMethod = LinkMovementMethod.getInstance()
+        binding.geminiApiKeyHelpLink.linksClickable = true
+    }
+
+    private fun refreshGeminiKeyHelpLinkVisibility() {
+        val empty = binding.geminiApiKeyInput.text?.toString()?.trim().isNullOrEmpty()
+        binding.geminiApiKeyHelpLink.visibility = if (empty) View.VISIBLE else View.GONE
     }
 }

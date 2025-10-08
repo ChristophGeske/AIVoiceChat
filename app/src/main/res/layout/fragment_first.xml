@@ -79,6 +79,17 @@
                             android:inputType="textPassword" />
                     </com.google.android.material.textfield.TextInputLayout>
 
+                    <!-- Help link: only visible when Gemini key is empty -->
+                    <TextView
+                        android:id="@+id/geminiApiKeyHelpLink"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="6dp"
+                        android:textColor="#64B5F6"
+                        android:linksClickable="true"
+                        android:visibility="gone"
+                        tools:text="Get free Gemini API Key here" />
+
                     <com.google.android.material.textfield.TextInputLayout
                         style="@style/Widget.MaterialComponents.TextInputLayout.OutlinedBox"
                         android:layout_width="match_parent"

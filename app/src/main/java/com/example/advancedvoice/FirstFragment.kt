@@ -66,6 +66,7 @@ class FirstFragment : Fragment() {
 
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)
+        Log.i(TAG, "[LIFECYCLE] onViewCreated (savedInstanceState=${savedInstanceState != null})")
 
         setupRecyclerView()
         setupUI()
@@ -82,11 +83,10 @@ class FirstFragment : Fragment() {
             "gpt-5-mini" -> binding.radioGpt5Mini.isChecked = true
             else -> binding.radioGeminiPro.isChecked = true
         }
-        Log.i(TAG, "[MODEL] Restored selection $currentModelName")
-        Log.i(TAG, "[STATE] Restored conversation size=${viewModel.conversation.value?.size ?: 0}")
-
-        // [FIX] After rotation, check if TTS was interrupted and needs to be resumed.
-        viewModel.checkAndResumeTts()
+        Log.i(TAG, "[MODEL] Restored selection: $currentModelName")
+        Log.i(TAG, "[STATE] Conversation entries: ${viewModel.conversation.value?.size ?: 0}")
+        Log.i(TAG, "[STATE] Is speaking: ${viewModel.isSpeaking.value}")
+        Log.i(TAG, "[STATE] Engine active: ${viewModel.isEngineActive()}")
     }
 
     private fun setupRecyclerView() {
@@ -344,8 +344,23 @@ class FirstFragment : Fragment() {
         updateButtonStates()
     }
 
+    override fun onResume() {
+        super.onResume()
+        Log.i(TAG, "[LIFECYCLE] onResume - checking TTS resume")
+        // Check TTS resume after a slight delay to ensure TTS is fully ready
+        view?.postDelayed({
+            viewModel.checkAndResumeTts()
+        }, 300)
+    }
+
+    override fun onPause() {
+        super.onPause()
+        Log.i(TAG, "[LIFECYCLE] onPause")
+    }
+
     override fun onDestroyView() {
         super.onDestroyView()
+        Log.i(TAG, "[LIFECYCLE] onDestroyView")
         _binding = null
     }
 }

@@ -88,11 +88,14 @@ class SentenceTurnEngine(
 
     fun startTurn(userText: String, modelName: String) {
         if (userText.isBlank()) return
-        if (active) abort()
+        if (active) {
+            Log.w(TAG, "startTurn called while already active - aborting previous turn")
+            abort()
+        }
 
         active = true
         addUser(userText)
-        Log.i(TAG, "Start turn: model=$modelName fasterFirst=$fasterFirst historySize=${history.size} maxSentences=$maxSentencesPerTurn")
+        Log.i(TAG, "=== TURN START === model=$modelName fasterFirst=$fasterFirst historySize=${history.size} maxSentences=$maxSentencesPerTurn")
 
         currentStrategy = if (fasterFirst) {
             Log.i(TAG, "Strategy=FastFirstSentenceStrategy")
@@ -102,44 +105,60 @@ class SentenceTurnEngine(
             RegularGenerationStrategy(http, geminiKeyProvider, openAiKeyProvider)
         }
 
-        // Wrap callbacks to ensure main-thread UI updates
+        // Track if first sentence has been called to prevent duplicates
+        var firstSentenceCalled = false
+
+        // Wrap callbacks to ensure main-thread UI updates and prevent duplicates
         val strategyCallbacks = Callbacks(
             onStreamDelta = { delta ->
-                uiScope.launch {
-                    Log.d(TAG, "onStreamDelta(len=${delta.length})")
-                    callbacks.onStreamDelta(delta)
+                if (active) {
+                    uiScope.launch {
+                        Log.d(TAG, "→ onStreamDelta(len=${delta.length})")
+                        callbacks.onStreamDelta(delta)
+                    }
                 }
             },
             onStreamSentence = { sentence ->
-                uiScope.launch {
-                    Log.d(TAG, "onStreamSentence: '${sentence.take(60)}...'")
-                    callbacks.onStreamSentence(sentence)
+                if (active) {
+                    uiScope.launch {
+                        Log.d(TAG, "→ onStreamSentence: '${sentence.take(60)}...'")
+                        callbacks.onStreamSentence(sentence)
+                    }
                 }
             },
             onFirstSentence = { firstSentence ->
-                uiScope.launch {
-                    Log.d(TAG, "onFirstSentence: '${firstSentence.take(80)}...'")
-                    addAssistant(firstSentence)
-                    callbacks.onFirstSentence(firstSentence)
+                if (active && !firstSentenceCalled) {
+                    firstSentenceCalled = true
+                    uiScope.launch {
+                        Log.i(TAG, "→ onFirstSentence: '${firstSentence.take(80)}...'")
+                        addAssistant(firstSentence)
+                        callbacks.onFirstSentence(firstSentence)
+                    }
+                } else if (firstSentenceCalled) {
+                    Log.w(TAG, "→ onFirstSentence SKIPPED (already called)")
                 }
             },
             onRemainingSentences = { sentences ->
-                uiScope.launch {
-                    Log.d(TAG, "onRemainingSentences: count=${sentences.size}")
-                    callbacks.onRemainingSentences(sentences)
+                if (active) {
+                    uiScope.launch {
+                        Log.i(TAG, "→ onRemainingSentences: count=${sentences.size}")
+                        callbacks.onRemainingSentences(sentences)
+                    }
                 }
             },
             onFinalResponse = { fullText ->
-                uiScope.launch {
-                    Log.d(TAG, "onFinalResponse(len=${fullText.length})")
-                    addAssistant(fullText)
-                    callbacks.onFinalResponse(fullText)
+                if (active) {
+                    uiScope.launch {
+                        Log.i(TAG, "→ onFinalResponse(len=${fullText.length})")
+                        addAssistant(fullText)
+                        callbacks.onFinalResponse(fullText)
+                    }
                 }
             },
             onTurnFinish = {
                 uiScope.launch {
                     if (active) {
-                        Log.d(TAG, "onTurnFinish (marking inactive)")
+                        Log.i(TAG, "=== TURN FINISH === (marking inactive)")
                         active = false
                         callbacks.onTurnFinish()
                     } else {
@@ -149,13 +168,13 @@ class SentenceTurnEngine(
             },
             onSystem = { msg ->
                 uiScope.launch {
-                    Log.d(TAG, "onSystem: ${msg.take(120)}")
+                    Log.i(TAG, "→ onSystem: ${msg.take(120)}")
                     callbacks.onSystem(msg)
                 }
             },
             onError = { msg ->
                 uiScope.launch {
-                    Log.e(TAG, "onError: ${msg.take(200)}")
+                    Log.e(TAG, "→ onError: ${msg.take(200)}")
                     callbacks.onError(msg)
                 }
             }

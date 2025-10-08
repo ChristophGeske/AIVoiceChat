@@ -53,6 +53,8 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
     private var ttsReady = false
     private val ttsQueue = ArrayDeque<SpokenSentence>()
     private var lastTtsDoneAt = 0L
+    private var ttsInitialized = false
+    private var currentUtteranceId: String? = null
 
     // STT (Speech-To-Text) State LiveData
     private val _sttIsListening = MutableLiveData(false)
@@ -77,25 +79,48 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
     }
     private val prefs by lazy { app.getSharedPreferences("ai_prefs", Application.MODE_PRIVATE) }
 
-    // [FIX] Make the UtteranceProgressListener a stable property of the ViewModel.
-    // This prevents losing callbacks during configuration changes if onInit is called again.
+    // Stable UtteranceProgressListener
     private val utteranceListener = object : UtteranceProgressListener() {
         override fun onStart(utteranceId: String?) {
+            val prevId = currentUtteranceId
+            currentUtteranceId = utteranceId
             _isSpeaking.postValue(true)
-            Log.d(TAG, "[TTS] onStart id=$utteranceId speaking=true queueSize=${ttsQueue.size}")
+            val current = _currentSpeaking.value
+            Log.i(TAG, "[TTS] onStart id=$utteranceId (prev=$prevId) queueSize=${ttsQueue.size} currentSpeaking=${current?.let { "${it.entryIndex}:${it.sentenceIndex}" }}")
         }
 
         override fun onDone(utteranceId: String?) {
             viewModelScope.launch {
+                Log.i(TAG, "[TTS] onDone id=$utteranceId currentId=$currentUtteranceId queueSize=${ttsQueue.size}")
+
+                // For backwards compatibility: if utteranceId doesn't match, check if queue's first item matches
+                val shouldProcess = if (utteranceId == currentUtteranceId) {
+                    true
+                } else {
+                    // The utterance might be from the previous item that just finished
+                    // Process it if we're not already speaking something else
+                    val canProcess = currentUtteranceId == null || currentUtteranceId == utteranceId
+                    if (!canProcess) {
+                        Log.w(TAG, "[TTS] onDone skipped - utteranceId mismatch (expected=$currentUtteranceId, got=$utteranceId)")
+                    }
+                    canProcess
+                }
+
+                if (!shouldProcess) return@launch
+
                 lastTtsDoneAt = SystemClock.elapsedRealtime()
                 val completed = ttsQueue.pollFirst()
                 _currentSpeaking.postValue(null)
-                Log.d(TAG, "[TTS] onDone id=$utteranceId completed=${completed != null} queueSize=${ttsQueue.size}")
+                currentUtteranceId = null
+
+                Log.i(TAG, "[TTS] Processed done: completed=${completed?.let { "${it.entryIndex}:${it.sentenceIndex}" }} queueRemaining=${ttsQueue.size}")
+
                 if (ttsQueue.isNotEmpty()) {
+                    Log.d(TAG, "[TTS] More items in queue, calling speakNext")
                     speakNext()
                 } else {
                     _isSpeaking.postValue(false)
-                    Log.d(TAG, "[TTS] queue empty; speaking=false")
+                    Log.i(TAG, "[TTS] Queue empty; speaking=false")
                 }
             }
         }
@@ -103,7 +128,7 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
         @Deprecated("Deprecated in Java")
         override fun onError(utteranceId: String?) {
             Log.e(TAG, "[TTS] onError id=$utteranceId")
-            onDone(utteranceId) // Treat error as done to advance the queue
+            onDone(utteranceId)
         }
     }
 
@@ -127,6 +152,7 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
                 }
             },
             onFirstSentence = { sentence ->
+                Log.i(TAG, "[ENGINE] onFirstSentence called: '${sentence.take(80)}...'")
                 val newEntry = ConversationEntry("Assistant", listOf(sentence), isAssistant = true)
                 entries.add(newEntry)
                 currentAssistantEntryIndex = entries.lastIndex
@@ -134,6 +160,7 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
                 postList()
             },
             onRemainingSentences = { sentences ->
+                Log.i(TAG, "[ENGINE] onRemainingSentences called: count=${sentences.size}")
                 val idx = currentAssistantEntryIndex ?: return@Callbacks
                 val current = entries.getOrNull(idx) ?: return@Callbacks
                 val ns = current.sentences.toMutableList()
@@ -152,6 +179,7 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
                 }
             },
             onFinalResponse = { fullText ->
+                Log.i(TAG, "[ENGINE] onFinalResponse called: length=${fullText.length}")
                 val idx = currentAssistantEntryIndex ?: return@Callbacks
                 val current = entries.getOrNull(idx) ?: return@Callbacks
                 entries[idx] = current.copy(
@@ -161,6 +189,7 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
                 postList()
             },
             onTurnFinish = {
+                Log.i(TAG, "[ENGINE] onTurnFinish called")
                 _turnFinishedEvent.postValue(Event(Unit))
             },
             onSystem = { msg -> addSystemEntry(msg) },
@@ -182,26 +211,30 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
     private var currentAssistantEntryIndex: Int? = null
 
     init {
+        Log.i(TAG, "[INIT] ViewModel created (hashCode=${this.hashCode()})")
         tts = TextToSpeech(getApplication(), this)
         setupSpeechRecognizer()
     }
 
     private fun setupSpeechRecognizer() {
         if (!SpeechRecognizer.isRecognitionAvailable(getApplication())) {
-            Log.e(TAG, "[STT_VM] Recognition not available")
+            Log.e(TAG, "[STT] Recognition not available")
             _sttError.postValue(Event("Speech recognition not available on this device."))
             return
         }
         speechRecognizer = SpeechRecognizer.createSpeechRecognizer(getApplication())
         speechRecognizer.setRecognitionListener(object : RecognitionListener {
             override fun onReadyForSpeech(params: Bundle?) {
+                Log.i(TAG, "[STT] onReadyForSpeech")
                 _sttIsListening.postValue(true)
             }
             override fun onResults(results: Bundle?) {
+                Log.i(TAG, "[STT] onResults")
                 _sttIsListening.postValue(false)
                 val matches = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
                 if (!matches.isNullOrEmpty()) {
                     val spokenText = matches[0]
+                    Log.i(TAG, "[STT] Recognized: '$spokenText'")
                     if (spokenText.isNotBlank()) {
                         addUserEntry(spokenText)
                         startTurn(spokenText, currentModelName)
@@ -209,22 +242,29 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
                 }
             }
             override fun onError(error: Int) {
+                Log.e(TAG, "[STT] onError code=$error")
                 _sttIsListening.postValue(false)
                 if (error != SpeechRecognizer.ERROR_NO_MATCH) {
                     _sttError.postValue(Event("STT Error (code:$error)"))
                 }
             }
-            override fun onBeginningOfSpeech() {}
+            override fun onBeginningOfSpeech() {
+                Log.d(TAG, "[STT] onBeginningOfSpeech")
+            }
             override fun onRmsChanged(rmsdB: Float) {}
             override fun onBufferReceived(buffer: ByteArray?) {}
-            override fun onEndOfSpeech() {}
+            override fun onEndOfSpeech() {
+                Log.d(TAG, "[STT] onEndOfSpeech")
+            }
             override fun onPartialResults(partialResults: Bundle?) {}
             override fun onEvent(eventType: Int, params: Bundle?) {}
         })
     }
 
     fun startListening() {
+        Log.i(TAG, "[STT] startListening requested")
         if (engine.isActive()) {
+            Log.i(TAG, "[STT] Engine active, injecting draft and aborting")
             injectDraftIfActive()
             abortEngine()
         }
@@ -240,45 +280,63 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
             putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, silenceMs)
         }
         speechRecognizer.startListening(intent)
+        Log.i(TAG, "[STT] Listening started")
     }
 
     fun stopListening() {
         if (_sttIsListening.value == true) {
+            Log.i(TAG, "[STT] Stopping listening")
             speechRecognizer.stopListening()
             _sttIsListening.postValue(false)
         }
     }
 
     fun setCurrentModel(modelName: String) {
+        Log.i(TAG, "[MODEL] Set to: $modelName")
         this.currentModelName = modelName
     }
 
     fun applyEngineConfigFromPrefs(prefs: SharedPreferences) {
-        engine.setMaxSentences(prefs.getInt("max_sentences", 4).coerceIn(1, 10))
-        engine.setFasterFirst(prefs.getBoolean("faster_first", true))
+        val maxSent = prefs.getInt("max_sentences", 4).coerceIn(1, 10)
+        val faster = prefs.getBoolean("faster_first", true)
+        Log.i(TAG, "[CONFIG] Applying: maxSentences=$maxSent, fasterFirst=$faster")
+        engine.setMaxSentences(maxSent)
+        engine.setFasterFirst(faster)
     }
 
     fun startTurn(userInput: String, modelName: String) {
+        Log.i(TAG, "[TURN] Starting: model=$modelName, input='${userInput.take(80)}...'")
         currentAssistantEntryIndex = null
         engine.startTurn(userInput, modelName)
     }
 
     fun isEngineActive(): Boolean = engine.isActive()
-    fun abortEngine() { engine.abort() }
+
+    fun abortEngine() {
+        Log.i(TAG, "[ENGINE] Abort requested")
+        engine.abort()
+    }
+
     fun addUserEntry(text: String) {
+        Log.i(TAG, "[ENTRY] Adding user entry: '${text.take(80)}...'")
         entries.add(ConversationEntry("You", listOf(text), isAssistant = false))
         postList()
     }
+
     fun addSystemEntry(text: String) {
+        Log.i(TAG, "[ENTRY] Adding system entry: '${text.take(80)}...'")
         entries.add(ConversationEntry("System", listOf(text), isAssistant = false))
         postList()
     }
+
     fun addErrorEntry(text: String) {
+        Log.e(TAG, "[ENTRY] Adding error entry: '${text.take(80)}...'")
         entries.add(ConversationEntry("Error", listOf(text), isAssistant = false))
         postList()
     }
 
     fun clearConversation() {
+        Log.i(TAG, "[CLEAR] Clearing conversation")
         stopAll()
         entries.clear()
         engine.clearHistory()
@@ -290,7 +348,8 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
     fun replayEntry(entryIndex: Int) {
         val entry = entries.getOrNull(entryIndex) ?: return
         if (!entry.isAssistant) return
-        stopTts() // Stop current speech before replaying
+        Log.i(TAG, "[REPLAY] Entry $entryIndex with ${entry.sentences.size} sentences")
+        stopTts()
         clearDedupForEntry(entryIndex)
         entry.sentences.forEachIndexed { idx, s ->
             queueTts(SpokenSentence(s, entryIndex, idx), force = true)
@@ -298,21 +357,28 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
     }
 
     fun stopAll() {
+        Log.i(TAG, "[STOP] Stopping all (engine, TTS, STT)")
         abortEngine()
         stopTts()
         stopListening()
     }
 
     fun stopTts() {
+        Log.i(TAG, "[TTS] Stopping: queueSize=${ttsQueue.size}, currentUtteranceId=$currentUtteranceId")
         try { tts.stop() } catch (_: Exception) {}
         _isSpeaking.postValue(false)
         ttsQueue.clear()
+        queuedKeys.clear()
         _currentSpeaking.postValue(null)
+        currentUtteranceId = null
     }
 
     fun injectDraftIfActive() {
         if (!engine.isActive()) return
-        buildAssistantDraft()?.let { engine.injectAssistantDraft(it) }
+        buildAssistantDraft()?.let {
+            Log.i(TAG, "[INJECT] Injecting draft: length=${it.length}")
+            engine.injectAssistantDraft(it)
+        }
     }
 
     fun elapsedSinceTtsDone(): Long {
@@ -320,33 +386,48 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
         return SystemClock.elapsedRealtime() - lastTtsDoneAt
     }
 
-    // [FIX] New function called by the Fragment after rotation to resume TTS if it was interrupted.
     fun checkAndResumeTts() {
-        if (ttsQueue.isNotEmpty() && isSpeaking.value == false) {
-            Log.d(TAG, "[TTS] Resuming interrupted TTS queue.")
+        if (!ttsInitialized) {
+            Log.d(TAG, "[TTS] checkAndResumeTts skipped - TTS not yet initialized")
+            return
+        }
+
+        if (ttsQueue.isNotEmpty() && isSpeaking.value == false && currentUtteranceId == null) {
+            Log.i(TAG, "[TTS] Resuming interrupted queue: queueSize=${ttsQueue.size}")
             speakNext()
+        } else {
+            Log.d(TAG, "[TTS] checkAndResumeTts: queueSize=${ttsQueue.size}, speaking=${isSpeaking.value}, currentUtteranceId=$currentUtteranceId")
         }
     }
 
     override fun onInit(status: Int) {
+        Log.i(TAG, "[TTS] onInit called: status=$status, ttsInitialized=$ttsInitialized")
+
+        // Prevent re-initialization on rotation
+        if (ttsInitialized) {
+            Log.w(TAG, "[TTS] Already initialized, skipping setup")
+            return
+        }
+
         if (status == TextToSpeech.SUCCESS) {
             ttsReady = true
+            ttsInitialized = true
             val locale = Locale.getDefault()
             val result = tts.setLanguage(locale)
             if (result == TextToSpeech.LANG_MISSING_DATA || result == TextToSpeech.LANG_NOT_SUPPORTED) {
                 tts.setLanguage(Locale.US)
             }
-            // [FIX] Set the stable listener instance.
             tts.setOnUtteranceProgressListener(utteranceListener)
-            Log.i(TAG, "[TTS] Ready with language $locale")
+            Log.i(TAG, "[TTS] Initialized successfully with language $locale")
         } else {
             ttsReady = false
-            Log.e(TAG, "[TTS] Init failed status=$status")
+            Log.e(TAG, "[TTS] Initialization failed: status=$status")
         }
     }
 
     override fun onCleared() {
         super.onCleared()
+        Log.i(TAG, "[LIFECYCLE] ViewModel onCleared")
         try {
             tts.stop()
             tts.shutdown()
@@ -356,29 +437,55 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
         } catch (_: Exception) {}
     }
 
-    private fun postList() { _conversation.postValue(entries.toList()) }
+    private fun postList() {
+        _conversation.postValue(entries.toList())
+        Log.d(TAG, "[STATE] Conversation updated: size=${entries.size}")
+    }
 
     private fun queueTts(spoken: SpokenSentence, force: Boolean = false) {
         val key = "${spoken.entryIndex}:${spoken.sentenceIndex}"
-        if (!force && !queuedKeys.add(key)) return
+        if (!force && !queuedKeys.add(key)) {
+            Log.d(TAG, "[TTS] Skipping duplicate: $key")
+            return
+        }
+
         ttsQueue.addLast(spoken)
-        if (isSpeaking.value != true) {
+        Log.i(TAG, "[TTS] Queued: $key, text='${spoken.text.take(60)}...', queueSize=${ttsQueue.size}, speaking=${isSpeaking.value}, currentUtteranceId=$currentUtteranceId")
+
+        // Only start speaking if nothing is currently being spoken AND no current utterance is active
+        if (isSpeaking.value != true && currentUtteranceId == null) {
+            Log.d(TAG, "[TTS] Queue not active, starting speakNext")
             speakNext()
+        } else {
+            Log.d(TAG, "[TTS] Already speaking (speaking=${isSpeaking.value}, currentUtteranceId=$currentUtteranceId), will wait")
         }
     }
 
     private fun clearDedupForEntry(entryIndex: Int) {
-        queuedKeys.removeAll { it.startsWith("$entryIndex:") }
+        val removed = queuedKeys.removeAll { it.startsWith("$entryIndex:") }
+        Log.d(TAG, "[TTS] Cleared dedup for entry $entryIndex: removed=$removed")
     }
 
     private fun speakNext() {
         if (!ttsReady || ttsQueue.isEmpty()) {
+            Log.d(TAG, "[TTS] speakNext skipped: ttsReady=$ttsReady, queueEmpty=${ttsQueue.isEmpty()}")
             _isSpeaking.postValue(false)
             return
         }
+
+        // Safety check: don't start new speech if already speaking
+        if (currentUtteranceId != null) {
+            Log.w(TAG, "[TTS] speakNext skipped: already have active utterance $currentUtteranceId")
+            return
+        }
+
         val next = ttsQueue.first()
+        val key = "${next.entryIndex}:${next.sentenceIndex}"
         _currentSpeaking.postValue(next)
         val id = UUID.randomUUID().toString()
+        currentUtteranceId = id
+
+        Log.i(TAG, "[TTS] Speaking: $key, id=$id, text='${next.text.take(60)}...', queueRemaining=${ttsQueue.size - 1}")
         tts.speak(next.text, TextToSpeech.QUEUE_ADD, null, id)
     }
 

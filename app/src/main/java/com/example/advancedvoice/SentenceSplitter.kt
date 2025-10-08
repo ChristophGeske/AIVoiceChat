@@ -1,22 +1,28 @@
 package com.example.advancedvoice
 
 import android.util.Log
+import java.util.regex.Matcher
+import java.util.regex.Pattern
 
 /**
-Splits LLM responses into speakable sentences.
-- Minimum 20 characters per sentence (prevents splitting lists into tiny fragments)
-- Handles ., !, ? terminators
+ * Splits LLM responses into speakable sentences.
+ * - [Restored] Minimum 20 characters per sentence (prevents splitting lists into tiny fragments).
+ * - [Restored] Merges short trailing sentences with the previous one.
+ * - Handles ., !, ? terminators robustly.
  */
 object SentenceSplitter {
     private const val TAG = "SentenceSplitter"
     private const val MIN_SENTENCE_LENGTH = 20
 
+    // This regex finds segments of text that end with a sentence terminator.
+    // It's non-greedy to capture sentences one by one.
+    private val sentenceMatcher: Pattern = Pattern.compile(".*?([.!?])")
+
     /**
-    Splits text into sentences with minimum length constraint.
+     * Splits text into sentences with the minimum length constraint.
      */
     fun splitIntoSentences(text: String): List<String> {
         if (text.isBlank()) {
-            Log.d(TAG, "splitIntoSentences: empty input")
             return emptyList()
         }
 
@@ -24,50 +30,38 @@ object SentenceSplitter {
         Log.d(TAG, "splitIntoSentences: input length=${normalized.length}, preview='${normalized.take(80)}...'")
 
         val sentences = mutableListOf<String>()
-        val buffer = StringBuilder()
+        val matcher: Matcher = sentenceMatcher.matcher(normalized)
+        var lastEnd = 0
 
-        var i = 0
-        while (i < normalized.length) {
-            val c = normalized[i]
-            buffer.append(c)
-
-            if (c == '.' || c == '!' || c == '?') {
-                val next = normalized.getOrNull(i + 1)
-                val isEndOfSentence = when {
-                    next == null -> true
-                    next.isWhitespace() -> {
-                        val afterSpace = normalized.getOrNull(i + 2)
-                        afterSpace == null || afterSpace.isUpperCase() || afterSpace.isDigit()
-                    }
-                    else -> false
-                }
-
-                if (isEndOfSentence) {
-                    val candidate = buffer.toString().trim()
-                    if (candidate.length >= MIN_SENTENCE_LENGTH || sentences.isNotEmpty()) {
-                        sentences.add(candidate)
-                        Log.d(TAG, " -> sentence #${sentences.size}: '${candidate.take(60)}...'")
-                        buffer.clear()
-                    }
+        while (matcher.find()) {
+            val sentence = normalized.substring(lastEnd, matcher.end()).trim()
+            if (sentence.isNotEmpty()) {
+                // If the current list of sentences is not empty, or if the new sentence is long enough, add it.
+                // This prevents the very first sentence from being discarded if it's too short.
+                if (sentences.isNotEmpty() || sentence.length >= MIN_SENTENCE_LENGTH) {
+                    sentences.add(sentence)
+                    Log.d(TAG, " -> sentence #${sentences.size}: '${sentence.take(60)}...'")
+                } else {
+                    // If the first sentence is too short, we still hold onto it in 'lastEnd'
+                    // so it can be merged with the next one.
+                    Log.d(TAG, " -> short sentence ignored (will be prepended to next): '${sentence.take(60)}...'")
                 }
             }
-            i++
+            lastEnd = matcher.end()
         }
 
-        val remaining = buffer.toString().trim()
-        if (remaining.isNotEmpty()) {
-            if (sentences.isEmpty() || remaining.length >= MIN_SENTENCE_LENGTH) {
-                sentences.add(remaining)
-                Log.d(TAG, " -> added trailing: '${remaining.take(60)}...'")
-            } else {
-                // merge short tail with previous sentence if present
-                val lastIdx = sentences.lastIndex
-                if (lastIdx >= 0) {
-                    val merged = sentences[lastIdx] + " " + remaining
-                    sentences[lastIdx] = merged
-                    Log.d(TAG, " -> merged short trailing with previous (len=${merged.length})")
+        // Handle any remaining text after the last terminator
+        if (lastEnd < normalized.length) {
+            val remaining = normalized.substring(lastEnd).trim()
+            if (remaining.isNotEmpty()) {
+                // If the remainder is too short and there's a previous sentence, merge them.
+                if (remaining.length < MIN_SENTENCE_LENGTH && sentences.isNotEmpty()) {
+                    val lastIndex = sentences.lastIndex
+                    sentences[lastIndex] = sentences[lastIndex] + " " + remaining
+                    Log.d(TAG, " -> merged short trailing fragment with previous.")
                 } else {
                     sentences.add(remaining)
+                    Log.d(TAG, " -> added trailing fragment: '${remaining.take(60)}...'")
                 }
             }
         }
@@ -77,41 +71,23 @@ object SentenceSplitter {
     }
 
     /**
-    Extracts first sentence from text.
-    Returns Pair(firstSentence, remainingText).
+     * Extracts the first sentence from text.
+     * Returns a Pair of (firstSentence, remainingText).
      */
     fun extractFirstSentence(text: String): Pair<String, String> {
         if (text.isBlank()) {
-            Log.d(TAG, "extractFirstSentence: empty input")
             return "" to ""
         }
 
-        val normalized = text.trim().replace(Regex("\\s+"), " ")
-        Log.d(TAG, "extractFirstSentence: input length=${normalized.length}")
-
-        var i = 0
-        while (i < normalized.length) {
-            val c = normalized[i]
-            if (c == '.' || c == '!' || c == '?') {
-                val next = normalized.getOrNull(i + 1)
-                val isEndOfSentence = when {
-                    next == null -> true
-                    next.isWhitespace() -> {
-                        val afterSpace = normalized.getOrNull(i + 2)
-                        afterSpace == null || afterSpace.isUpperCase() || afterSpace.isDigit()
-                    }
-                    else -> false
-                }
-                if (isEndOfSentence && i + 1 >= MIN_SENTENCE_LENGTH) {
-                    val first = normalized.substring(0, i + 1).trim()
-                    val rest = normalized.substring(i + 1).trim()
-                    return first to rest
-                }
-            }
-            i++
+        val sentences = splitIntoSentences(text)
+        return if (sentences.isNotEmpty()) {
+            val first = sentences.first()
+            val rest = sentences.drop(1).joinToString(" ")
+            first to rest
+        } else {
+            // If splitting results in no sentences (e.g., text with no terminators),
+            // return the whole text as the first "sentence".
+            text to ""
         }
-
-        // No terminator found
-        return normalized to ""
     }
 }

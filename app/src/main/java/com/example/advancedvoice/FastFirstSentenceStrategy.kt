@@ -16,7 +16,7 @@ import java.net.URI
 import java.util.UUID
 import java.util.regex.Pattern
 
-// More informative exception used by UI/system messages
+// More informative exception used by UI/system messages (shared by strategies)
 class ModelServiceException(
     val httpCode: Int,
     val service: String,
@@ -29,8 +29,11 @@ class ModelServiceException(
 /**
  * Fast-first strategy with:
  * - Gemini: Google Search grounding enabled on every call (v1beta).
- * - OpenAI GPT-5: Responses API with web_search tool; reasoning effort + verbosity.
+ * - OpenAI GPT-5 (+ gpt-5-mini): Responses API with web_search tool; reasoning effort + verbosity.
  * - No retries. Soft-fail Phase 2 on 429/503.
+ *
+ * Accumulates web sources across Phase 1 and Phase 2, de-duplicates, and posts a single compact
+ * system message with short labels and smaller font.
  */
 class FastFirstSentenceStrategy(
     private val http: OkHttpClient,
@@ -45,7 +48,6 @@ class FastFirstSentenceStrategy(
     companion object {
         private const val TAG = "SentenceTurnEngine"
         private const val FAST_TAG = "FastFirst"
-        // Always include web grounding tools for Gemini requests
         private const val FORCE_GEMINI_SEARCH_ALWAYS = true
     }
 
@@ -59,8 +61,8 @@ class FastFirstSentenceStrategy(
     ) {
         active = true
         val turnId = UUID.randomUUID().toString().substring(0, 8)
+        val combinedSources = CombinedSources()
 
-        // Provide a function value (String) -> Unit to avoid callable reference pitfalls
         val postSystemFn: (String) -> Unit = { msg ->
             scope.launch { callbacks.onSystem(msg) }
         }
@@ -69,28 +71,20 @@ class FastFirstSentenceStrategy(
             try {
                 Log.i(TAG, "[FastFirst:$turnId] Start execute model=$modelName maxSentences=$maxSentences")
 
-                // Phase 1 (single attempt)
+                // Phase 1: accumulate sources; do not post yet
                 val firstSentenceText = getFastFirstSentence(
                     turnId, history, modelName, systemPrompt,
-                    onGrounding = { sources ->
-                        if (sources.isNotEmpty()) {
-                            postSystemFn(formatWebSourcesHtml(sources, "Web sources (phase 1)"))
-                        }
-                    },
+                    onGrounding = { sources -> combinedSources.addAll(sources) },
                     postSystem = postSystemFn
                 )
                 if (!active) throw java.util.concurrent.CancellationException("Aborted during Phase 1")
                 if (firstSentenceText.isNullOrBlank()) throw RuntimeException("Phase 1 failed to generate a first sentence.")
                 callbacks.onFirstSentence(firstSentenceText)
 
-                // Phase 2 (single attempt)
+                // Phase 2: also accumulate sources
                 val remainingSentences = getRemainingSentences(
                     turnId, history, modelName, systemPrompt, maxSentences, firstSentenceText,
-                    onGrounding = { sources ->
-                        if (sources.isNotEmpty()) {
-                            postSystemFn(formatWebSourcesHtml(sources, "Web sources (phase 2)"))
-                        }
-                    },
+                    onGrounding = { sources -> combinedSources.addAll(sources) },
                     postSystem = postSystemFn
                 )
                 if (!active) throw java.util.concurrent.CancellationException("Aborted during Phase 2")
@@ -101,6 +95,9 @@ class FastFirstSentenceStrategy(
                 } else {
                     callbacks.onFinalResponse(firstSentenceText)
                 }
+
+                // Post combined sources once (smaller font, compact labels)
+                combinedSources.toHtmlCompact()?.let { postSystemFn(it) }
             } catch (e: Exception) {
                 if (active && e !is java.util.concurrent.CancellationException) {
                     Log.e(TAG, "[FastFirst:$turnId] Request failed: ${e.message}", e)
@@ -185,7 +182,7 @@ class FastFirstSentenceStrategy(
                         else -> "service error"
                     }
                     val retryStr = e.retryAfterSec?.let { "~${String.format(java.util.Locale.US, "%.1f", it)}s" } ?: "a moment"
-                    val altModel = if (qualityModel.contains("gemini", true)) "gemini-2.5-flash" else "gpt-5-mini"
+                    val altModel = if (qualityModel.contains("gemini", true)) "gemini-2.5-flash" else "gpt-5"
                     "Service note: ${e.service} is $reason for ${e.model}. I already delivered the first sentence; the remainder was skipped. Try again in $retryStr or switch models (e.g., $altModel)."
                 }
                 else -> "Service note: An unknown model error occurred while composing the remainder. The first sentence was delivered; please try again shortly."
@@ -204,7 +201,7 @@ class FastFirstSentenceStrategy(
     private fun chooseFastModel(originalModel: String): String {
         val lower = originalModel.lowercase()
         return when {
-            lower.startsWith("gpt-4o") || lower.startsWith("gpt-5") -> "gpt-5-mini"
+            lower.startsWith("gpt-5") -> "gpt-5" // do not silently downgrade to mini
             lower.startsWith("gemini-2.5-pro") || lower == "gemini-pro-latest" || lower == "gemini-2.5-pro-latest" -> "gemini-2.5-flash"
             else -> originalModel
         }
@@ -216,14 +213,12 @@ class FastFirstSentenceStrategy(
         else -> name
     }
 
-    private fun buildGeminiToolsArray(modelName: String): JSONArray {
+    private fun buildGeminiToolsArray(@Suppress("UNUSED_PARAMETER") modelName: String): JSONArray {
         // For Gemini 2.x, googleSearch is supported in v1beta. We send it on every request.
-        return JSONArray().apply {
-            put(JSONObject().put("googleSearch", JSONObject()))
-        }
+        return JSONArray().apply { put(JSONObject().put("googleSearch", JSONObject())) }
     }
 
-    // -- OpenAI routing: GPT-5 via Responses API (+ web_search), others via Chat Completions
+    // -- OpenAI routing: GPT-5 and GPT-5-mini via Responses API (+ web_search), others via Chat Completions
     private fun callOpenAi(
         systemPrompt: String,
         history: List<Msg>,
@@ -293,7 +288,7 @@ class FastFirstSentenceStrategy(
         val includeArr = JSONArray().put("web_search_call.action.sources")
 
         val bodyObj = JSONObject().apply {
-            put("model", modelName)
+            put("model", modelName) // "gpt-5" or "gpt-5-mini"
             put("input", inputText)
             put("reasoning", JSONObject().put("effort", effectiveEffort))
             put("text", JSONObject().put("verbosity", optsIn.verbosity))
@@ -511,8 +506,71 @@ class FastFirstSentenceStrategy(
         Log.e(FAST_TAG, "$service error code=$code model=$model retryAfter=${retryAfterSec ?: "-"}")
         throw ModelServiceException(code, service, model, retryAfterSec, body, userMessage)
     }
+}
 
-    // ---- Formatting helpers for "Web sources" ----
+/**
+ * Accumulate and de-duplicate sources across phases by compact site label.
+ * Prefer non-vertex redirect URLs if both are seen for the same label.
+ * Outputs a compact HTML line with smaller font and clickable short labels.
+ */
+private class CombinedSources {
+    private data class Entry(
+        val url: String,
+        val title: String?,
+        val host: String,
+        val brand: String,
+        val isVertex: Boolean
+    )
+
+    private val byBrand = LinkedHashMap<String, Entry>() // preserve insertion order
+
+    fun addAll(items: List<Pair<String, String?>>) {
+        for ((url, title) in items) {
+            val host = hostFromUrl(url)
+            // If vertex redirect and title looks like a domain, use title to derive brand
+            val labelHost = if (isVertexRedirectHost(host) && title != null && isDomainLike(title)) {
+                title.lowercase()
+            } else if (title != null && isDomainLike(title)) {
+                // Prefer domain-like title when available (more accurate brand)
+                title.lowercase()
+            } else host.lowercase()
+
+            val brand = baseBrandFromHost(labelHost)
+            if (brand.isBlank()) continue
+
+            val entry = Entry(
+                url = url,
+                title = title,
+                host = host,
+                brand = brand,
+                isVertex = isVertexRedirectHost(host)
+            )
+
+            val existing = byBrand[brand]
+            if (existing == null) {
+                byBrand[brand] = entry
+            } else {
+                // Prefer non-vertex URL over vertex redirect for the same brand
+                val keep = if (existing.isVertex && !entry.isVertex) entry else existing
+                byBrand[brand] = keep
+            }
+        }
+    }
+
+    fun toHtmlCompact(maxItems: Int = 5): String? {
+        if (byBrand.isEmpty()) return null
+        val anchors = byBrand.values.take(maxItems).map { e ->
+            val label = prettyLabel(e.brand)
+            val safeLabel = escapeHtml(label)
+            val safeHref = escapeHtml(e.url)
+            "<a href=\"$safeHref\">$safeLabel</a>"
+        }
+        // Two steps smaller using nested <small>
+        val inner = "Web Sources: ${anchors.joinToString(", ")}"
+        return "<small><small>$inner</small></small>"
+    }
+
+    // ---- Local helpers (file-private) ----
 
     private fun hostFromUrl(u: String): String {
         return try {
@@ -523,20 +581,37 @@ class FastFirstSentenceStrategy(
         }
     }
 
+    private fun isVertexRedirectHost(host: String): Boolean {
+        val h = host.lowercase()
+        return h.contains("vertex") && h.contains("google")
+    }
+
+    private fun isDomainLike(text: String): Boolean {
+        val t = text.lowercase().trim()
+        // crude domain-ish check like "wikipedia.org", "uefa.com"
+        return Regex("^[a-z0-9.-]+\\.[a-z]{2,}$").matches(t)
+    }
+
+    private fun baseBrandFromHost(host: String): String {
+        val h = host.lowercase()
+        if (h.endsWith(".gov")) return "usgovernment" // compact label for .gov
+        var trimmed = h
+        listOf("www.", "m.", "en.").forEach { p -> if (trimmed.startsWith(p)) trimmed = trimmed.removePrefix(p) }
+        val parts = trimmed.split('.')
+        return parts.firstOrNull().orEmpty().ifBlank { trimmed }
+    }
+
+    private fun prettyLabel(brand: String): String {
+        return when (brand.lowercase()) {
+            "usgovernment" -> "USGovernment"
+            else -> brand.replaceFirstChar { if (it.isLowerCase()) it.titlecase() else it.toString() }
+        }
+    }
+
     private fun escapeHtml(s: String): String =
         s.replace("&", "&amp;")
             .replace("<", "&lt;")
             .replace(">", "&gt;")
             .replace("\"", "&quot;")
             .replace("'", "&#39;")
-
-    private fun formatWebSourcesHtml(items: List<Pair<String, String?>>, title: String): String {
-        val parts = items.take(5).mapIndexed { i, it ->
-            val url = it.first
-            val label = it.second?.takeIf { t -> t.isNotBlank() } ?: hostFromUrl(url)
-            val safeLabel = escapeHtml(label)
-            "${i + 1}. <a href=\"${escapeHtml(url)}\">$safeLabel</a>"
-        }
-        return "$title: ${parts.joinToString("  ")}"
-    }
 }

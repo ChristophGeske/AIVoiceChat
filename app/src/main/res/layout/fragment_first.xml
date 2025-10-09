@@ -113,6 +113,7 @@
                     android:layout_marginBottom="12dp"
                     android:orientation="vertical">
 
+                    <!-- Gemini row -->
                     <LinearLayout
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
@@ -136,6 +137,7 @@
                             android:textColor="#FFFFFF" />
                     </LinearLayout>
 
+                    <!-- GPT‑5 row -->
                     <LinearLayout
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
@@ -143,20 +145,54 @@
                         android:orientation="horizontal">
 
                         <RadioButton
-                            android:id="@+id/radioGpt5"
+                            android:id="@+id/radioGpt5High"
                             android:layout_width="0dp"
                             android:layout_height="wrap_content"
                             android:layout_weight="1"
-                            android:text="@string/gpt5_high"
+                            android:text="GPT-5 (High)"
                             android:textColor="#FFFFFF" />
 
                         <RadioButton
-                            android:id="@+id/radioGpt5Mini"
+                            android:id="@+id/radioGpt5Medium"
                             android:layout_width="0dp"
                             android:layout_height="wrap_content"
                             android:layout_marginStart="12dp"
                             android:layout_weight="1"
-                            android:text="@string/gpt5_mini"
+                            android:text="GPT-5 (Medium)"
+                            android:textColor="#FFFFFF" />
+
+                        <RadioButton
+                            android:id="@+id/radioGpt5Low"
+                            android:layout_width="0dp"
+                            android:layout_height="wrap_content"
+                            android:layout_marginStart="12dp"
+                            android:layout_weight="1"
+                            android:text="GPT-5 (Low)"
+                            android:textColor="#FFFFFF" />
+                    </LinearLayout>
+
+                    <!-- GPT‑5 Mini row -->
+                    <LinearLayout
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="8dp"
+                        android:orientation="horizontal">
+
+                        <RadioButton
+                            android:id="@+id/radioGpt5MiniHigh"
+                            android:layout_width="0dp"
+                            android:layout_height="wrap_content"
+                            android:layout_weight="1"
+                            android:text="GPT-5 Mini (High)"
+                            android:textColor="#FFFFFF" />
+
+                        <RadioButton
+                            android:id="@+id/radioGpt5MiniMedium"
+                            android:layout_width="0dp"
+                            android:layout_height="wrap_content"
+                            android:layout_marginStart="12dp"
+                            android:layout_weight="1"
+                            android:text="GPT-5 Mini (Medium)"
                             android:textColor="#FFFFFF" />
                     </LinearLayout>
                 </LinearLayout>
@@ -343,7 +379,9 @@
                 android:textAllCaps="false"
                 android:visibility="gone" />
 
-            <View android:layout_width="6dp" android:layout_height="0dp" />
+            <View
+                android:layout_width="6dp"
+                android:layout_height="0dp" />
 
             <com.google.android.material.button.MaterialButton
                 android:id="@+id/stopButton"
@@ -355,7 +393,9 @@
                 android:text="@string/stop_conversation"
                 android:textAllCaps="false" />
 
-            <View android:layout_width="6dp" android:layout_height="0dp" />
+            <View
+                android:layout_width="6dp"
+                android:layout_height="0dp" />
 
             <com.google.android.material.button.MaterialButton
                 android:id="@+id/clearButton"

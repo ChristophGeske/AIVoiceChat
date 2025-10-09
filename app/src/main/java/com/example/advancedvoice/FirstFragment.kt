@@ -81,7 +81,7 @@ class FirstFragment : Fragment() {
         observeViewModel()
 
         var restoredModel = prefs.getString(PREF_SELECTED_MODEL, "gemini-2.5-pro") ?: "gemini-2.5-pro"
-        // Migrate legacy OpenAI selections (gpt-5-*) to widely available models
+        // Migrate legacy OpenAI names to GPT‑5 (keep gpt‑5‑mini as-is)
         restoredModel = migrateLegacyOpenAiModelName(restoredModel)
         if (restoredModel != prefs.getString(PREF_SELECTED_MODEL, restoredModel)) {
             prefs.edit().putString(PREF_SELECTED_MODEL, restoredModel).apply()
@@ -94,8 +94,21 @@ class FirstFragment : Fragment() {
         when (restoredModel.lowercase()) {
             "gemini-2.5-flash" -> binding.radioGeminiFlash.isChecked = true
             "gemini-2.5-pro" -> binding.radioGeminiPro.isChecked = true
-            "gpt-4o" -> binding.radioGpt5.isChecked = true          // UI label may still say GPT-5 Turbo; underlying value is gpt-4o
-            "gpt-4o-mini" -> binding.radioGpt5Mini.isChecked = true  // UI label may still say GPT-5 Mini; underlying value is gpt-4o-mini
+            "gpt-5" -> {
+                val effort = prefs.getString("gpt5_effort", "low")?.lowercase() ?: "low"
+                when (effort) {
+                    "high" -> binding.radioGpt5High.isChecked = true
+                    "medium" -> binding.radioGpt5Medium.isChecked = true
+                    else -> binding.radioGpt5Low.isChecked = true
+                }
+            }
+            "gpt-5-mini" -> {
+                val effort = prefs.getString("gpt5_effort", "medium")?.lowercase() ?: "medium"
+                when (effort) {
+                    "high" -> binding.radioGpt5MiniHigh.isChecked = true
+                    else -> binding.radioGpt5MiniMedium.isChecked = true
+                }
+            }
             else -> { /* we'll sync after visibility update */ }
         }
 
@@ -154,7 +167,7 @@ class FirstFragment : Fragment() {
         }
         binding.openaiApiKeyInput.doAfterTextChanged { editable ->
             prefs.edit().putString("openai_key", editable?.toString()?.trim()).apply()
-            // If user just added OpenAI key and an old gpt-5-* is stored, migrate it now
+            // If user just added OpenAI key and an old model string is stored, migrate it now
             val migrated = migrateLegacyOpenAiModelName(currentModelName)
             if (migrated != currentModelName) {
                 currentModelName = migrated
@@ -306,25 +319,40 @@ class FirstFragment : Fragment() {
             setLoading(false)
         }
 
-        // UPDATED: Map OpenAI radios to gpt-4o (quality) and gpt-4o-mini (fast)
+        // Map radios to models/effort
         val radios = listOf(
-            binding.radioGeminiFlash to "gemini-2.5-flash",
-            binding.radioGeminiPro to "gemini-2.5-pro",
-            binding.radioGpt5 to "gpt-4o",
-            binding.radioGpt5Mini to "gpt-4o-mini"
+            binding.radioGeminiFlash to ("gemini-2.5-flash" to null),
+            binding.radioGeminiPro to ("gemini-2.5-pro" to null),
+            binding.radioGpt5High to ("gpt-5" to "high"),
+            binding.radioGpt5Medium to ("gpt-5" to "medium"),
+            binding.radioGpt5Low to ("gpt-5" to "low"),
+            binding.radioGpt5MiniHigh to ("gpt-5-mini" to "high"),
+            binding.radioGpt5MiniMedium to ("gpt-5-mini" to "medium")
         )
         val selectRadio: (RadioButton) -> Unit = { selected ->
-            radios.forEach { (rb, _) -> rb.isChecked = (rb === selected) }
+            val all = listOf(
+                binding.radioGeminiFlash, binding.radioGeminiPro,
+                binding.radioGpt5High, binding.radioGpt5Medium, binding.radioGpt5Low,
+                binding.radioGpt5MiniHigh, binding.radioGpt5MiniMedium
+            )
+            all.forEach { rb -> rb.isChecked = (rb === selected) }
         }
 
-        for ((rb, model) in radios) {
+        for ((rb, modelEffort) in radios) {
             rb.setOnClickListener {
-                if (model == currentModelName) return@setOnClickListener
+                val (model, effort) = modelEffort
+                val currentEffort = prefs.getString("gpt5_effort", "low")
+                if (model == currentModelName && (effort == null || effort == currentEffort)) {
+                    return@setOnClickListener
+                }
                 if (viewModel.isEngineActive()) viewModel.abortEngine()
                 selectRadio(rb)
                 currentModelName = model
                 viewModel.setCurrentModel(model)
                 prefs.edit().putString(PREF_SELECTED_MODEL, currentModelName).apply()
+                effort?.let {
+                    prefs.edit().putString("gpt5_effort", it).apply()
+                }
                 val userFacingModelName = rb.text.toString()
                 Toast.makeText(context, "Model: $userFacingModelName", Toast.LENGTH_SHORT).show()
                 viewModel.addSystemEntry("Model switched to $userFacingModelName")
@@ -344,9 +372,6 @@ class FirstFragment : Fragment() {
         view?.postDelayed({ startListeningNow() }, delayMs)
     }
 
-    /**
-     * Contains the actual logic to start listening, called after any necessary permissions or delays.
-     */
     private fun startListeningNow() {
         if (viewModel.sttIsListening.value == true || viewModel.isEngineActive() || viewModel.isSpeaking.value == true) {
             Log.w(TAG, "[AutoContinue] Skipping startListeningNow: isListening=${viewModel.sttIsListening.value}, isEngineActive=${viewModel.isEngineActive()}, isSpeaking=${viewModel.isSpeaking.value}")
@@ -388,15 +413,19 @@ class FirstFragment : Fragment() {
         binding.radioGeminiFlash.visibility = if (geminiKey) View.VISIBLE else View.GONE
         binding.radioGeminiPro.visibility = if (geminiKey) View.VISIBLE else View.GONE
 
-        // Show OpenAI radios only if OpenAI key present
-        binding.radioGpt5.visibility = if (openaiKey) View.VISIBLE else View.GONE
-        binding.radioGpt5Mini.visibility = if (openaiKey) View.VISIBLE else View.GONE
+        // Show GPT‑5 radios only if OpenAI key present
+        val gptVisibility = if (openaiKey) View.VISIBLE else View.GONE
+        binding.radioGpt5High.visibility = gptVisibility
+        binding.radioGpt5Medium.visibility = gptVisibility
+        binding.radioGpt5Low.visibility = gptVisibility
+        binding.radioGpt5MiniHigh.visibility = gptVisibility
+        binding.radioGpt5MiniMedium.visibility = gptVisibility
 
         // Ensure current selection is valid given available providers
         val currentIsOpenAI = currentModelName.startsWith("gpt-", ignoreCase = true)
         val currentIsGemini = currentModelName.startsWith("gemini", ignoreCase = true)
 
-        // Migrate legacy OpenAI names if needed
+        // Migrate legacy names if needed
         if (currentIsOpenAI) {
             val migrated = migrateLegacyOpenAiModelName(currentModelName)
             if (migrated != currentModelName) {
@@ -412,7 +441,7 @@ class FirstFragment : Fragment() {
         if (selectionInvalid) {
             val newModel = when {
                 geminiKey -> "gemini-2.5-pro"
-                openaiKey -> "gpt-4o" // UPDATED default OpenAI quality model
+                openaiKey -> "gpt-5"
                 else -> null
             }
             if (newModel != null) {
@@ -422,11 +451,13 @@ class FirstFragment : Fragment() {
                 prefs.edit().putString(PREF_SELECTED_MODEL, currentModelName).apply()
             } else {
                 Log.w(TAG, "[MODEL] No API keys available. Hiding all model options.")
-                // Uncheck all radios if neither key is present
                 binding.radioGeminiFlash.isChecked = false
                 binding.radioGeminiPro.isChecked = false
-                binding.radioGpt5.isChecked = false
-                binding.radioGpt5Mini.isChecked = false
+                binding.radioGpt5High.isChecked = false
+                binding.radioGpt5Medium.isChecked = false
+                binding.radioGpt5Low.isChecked = false
+                binding.radioGpt5MiniHigh.isChecked = false
+                binding.radioGpt5MiniMedium.isChecked = false
             }
         }
 
@@ -441,85 +472,78 @@ class FirstFragment : Fragment() {
         updateButtonStates()
     }
 
-    // Ensure the appropriate radio button reflects the current model if visible
     private fun syncRadioSelectionToCurrentModel() {
         val model = currentModelName.lowercase()
         val geminiKeyPresent = prefs.getString("gemini_key", "").orEmpty().isNotBlank()
         val openaiKeyPresent = prefs.getString("openai_key", "").orEmpty().isNotBlank()
 
-        // Clear checks first
         binding.radioGeminiFlash.isChecked = false
         binding.radioGeminiPro.isChecked = false
-        binding.radioGpt5.isChecked = false
-        binding.radioGpt5Mini.isChecked = false
+        binding.radioGpt5High.isChecked = false
+        binding.radioGpt5Medium.isChecked = false
+        binding.radioGpt5Low.isChecked = false
+        binding.radioGpt5MiniHigh.isChecked = false
+        binding.radioGpt5MiniMedium.isChecked = false
 
         when {
             model.startsWith("gemini") && geminiKeyPresent -> {
                 if (model.startsWith("gemini-2.5-flash")) {
-                    if (binding.radioGeminiFlash.visibility == View.VISIBLE) {
-                        binding.radioGeminiFlash.isChecked = true
-                        Log.i(TAG, "[MODEL] Synced radio to Gemini Flash (currentModel=$model)")
-                    }
+                    if (binding.radioGeminiFlash.visibility == View.VISIBLE) binding.radioGeminiFlash.isChecked = true
                 } else {
-                    if (binding.radioGeminiPro.visibility == View.VISIBLE) {
-                        binding.radioGeminiPro.isChecked = true
-                        Log.i(TAG, "[MODEL] Synced radio to Gemini Pro (currentModel=$model)")
-                    }
+                    if (binding.radioGeminiPro.visibility == View.VISIBLE) binding.radioGeminiPro.isChecked = true
                 }
             }
-            model.startsWith("gpt-4o") && openaiKeyPresent -> {
-                if (model.startsWith("gpt-4o-mini")) {
-                    if (binding.radioGpt5Mini.visibility == View.VISIBLE) {
-                        binding.radioGpt5Mini.isChecked = true
-                        Log.i(TAG, "[MODEL] Synced radio to GPT-4o Mini (currentModel=$model)")
-                    }
-                } else {
-                    if (binding.radioGpt5.visibility == View.VISIBLE) {
-                        binding.radioGpt5.isChecked = true
-                        Log.i(TAG, "[MODEL] Synced radio to GPT-4o (currentModel=$model)")
-                    }
+            model == "gpt-5" && openaiKeyPresent -> {
+                val effort = prefs.getString("gpt5_effort", "low")?.lowercase() ?: "low"
+                when (effort) {
+                    "high" -> if (binding.radioGpt5High.visibility == View.VISIBLE) binding.radioGpt5High.isChecked = true
+                    "medium" -> if (binding.radioGpt5Medium.visibility == View.VISIBLE) binding.radioGpt5Medium.isChecked = true
+                    else -> if (binding.radioGpt5Low.visibility == View.VISIBLE) binding.radioGpt5Low.isChecked = true
                 }
             }
-            else -> {
-                Log.d(TAG, "[MODEL] No matching radio to sync (model=$model)")
+            model == "gpt-5-mini" && openaiKeyPresent -> {
+                val effort = prefs.getString("gpt5_effort", "medium")?.lowercase() ?: "medium"
+                when (effort) {
+                    "high" -> if (binding.radioGpt5MiniHigh.visibility == View.VISIBLE) binding.radioGpt5MiniHigh.isChecked = true
+                    else -> if (binding.radioGpt5MiniMedium.visibility == View.VISIBLE) binding.radioGpt5MiniMedium.isChecked = true
+                }
             }
+            else -> Log.d(TAG, "[MODEL] No matching radio to sync (model=$model)")
         }
     }
 
-    // If no radio is currently checked but the current model has a visible radio, check it
     private fun ensureRadioSelectedIfVisible() {
         val anyChecked = listOf(
             binding.radioGeminiFlash,
             binding.radioGeminiPro,
-            binding.radioGpt5,
-            binding.radioGpt5Mini
+            binding.radioGpt5High,
+            binding.radioGpt5Medium,
+            binding.radioGpt5Low,
+            binding.radioGpt5MiniHigh,
+            binding.radioGpt5MiniMedium
         ).any { it.visibility == View.VISIBLE && it.isChecked }
 
         if (anyChecked) return
 
         when {
             currentModelName.equals("gemini-2.5-flash", true)
-                    && binding.radioGeminiFlash.visibility == View.VISIBLE -> {
-                binding.radioGeminiFlash.isChecked = true
-                Log.i(TAG, "[MODEL] Auto-checked Gemini Flash as no radio was selected")
-            }
+                    && binding.radioGeminiFlash.visibility == View.VISIBLE -> binding.radioGeminiFlash.isChecked = true
             currentModelName.startsWith("gemini", true)
-                    && binding.radioGeminiPro.visibility == View.VISIBLE -> {
-                binding.radioGeminiPro.isChecked = true
-                Log.i(TAG, "[MODEL] Auto-checked Gemini Pro as no radio was selected")
+                    && binding.radioGeminiPro.visibility == View.VISIBLE -> binding.radioGeminiPro.isChecked = true
+            currentModelName.equals("gpt-5", true) -> {
+                val effort = prefs.getString("gpt5_effort", "low")?.lowercase() ?: "low"
+                when (effort) {
+                    "high" -> if (binding.radioGpt5High.visibility == View.VISIBLE) binding.radioGpt5High.isChecked = true
+                    "medium" -> if (binding.radioGpt5Medium.visibility == View.VISIBLE) binding.radioGpt5Medium.isChecked = true
+                    else -> if (binding.radioGpt5Low.visibility == View.VISIBLE) binding.radioGpt5Low.isChecked = true
+                }
             }
-            currentModelName.equals("gpt-4o-mini", true)
-                    && binding.radioGpt5Mini.visibility == View.VISIBLE -> {
-                binding.radioGpt5Mini.isChecked = true
-                Log.i(TAG, "[MODEL] Auto-checked GPT-4o Mini as no radio was selected")
-            }
-            currentModelName.equals("gpt-4o", true)
-                    && binding.radioGpt5.visibility == View.VISIBLE -> {
-                binding.radioGpt5.isChecked = true
-                Log.i(TAG, "[MODEL] Auto-checked GPT-4o as no radio was selected")
-            }
-            else -> {
-                // Nothing to auto-check
+            currentModelName.equals("gpt-5-mini", true) -> {
+                val effort = prefs.getString("gpt5_effort", "medium")?.lowercase() ?: "medium"
+                when (effort) {
+                    "high" -> if (binding.radioGpt5MiniHigh.visibility == View.VISIBLE) binding.radioGpt5MiniHigh.isChecked = true
+                    else -> if (binding.radioGpt5MiniMedium.visibility == View.VISIBLE) binding.radioGpt5MiniMedium.isChecked = true
+                }
             }
         }
     }
@@ -539,11 +563,13 @@ class FirstFragment : Fragment() {
         val isListening = viewModel.sttIsListening.value == true
         binding.progressBar.visibility = if (engineActive && !isListening) View.VISIBLE else View.GONE
 
-        // Disable model/key inputs when the engine is running
         binding.radioGeminiFlash.isEnabled = !engineActive
         binding.radioGeminiPro.isEnabled = !engineActive
-        binding.radioGpt5.isEnabled = !engineActive
-        binding.radioGpt5Mini.isEnabled = !engineActive
+        binding.radioGpt5High.isEnabled = !engineActive
+        binding.radioGpt5Medium.isEnabled = !engineActive
+        binding.radioGpt5Low.isEnabled = !engineActive
+        binding.radioGpt5MiniHigh.isEnabled = !engineActive
+        binding.radioGpt5MiniMedium.isEnabled = !engineActive
         binding.geminiApiKeyInput.isEnabled = !engineActive
         binding.openaiApiKeyInput.isEnabled = !engineActive
         updateButtonStates()
@@ -552,9 +578,7 @@ class FirstFragment : Fragment() {
     override fun onResume() {
         super.onResume()
         Log.i(TAG, "[LIFECYCLE] onResume - checking TTS resume")
-        view?.postDelayed({
-            viewModel.checkAndResumeTts()
-        }, 300)
+        view?.postDelayed({ viewModel.checkAndResumeTts() }, 300)
     }
 
     override fun onDestroyView() {
@@ -571,20 +595,18 @@ class FirstFragment : Fragment() {
         listenRestartCount = 0
         Log.i(TAG, "[ListenWindow] Started ($reason): seconds=$secs, deadline=$listenWindowDeadlineMs now=$now")
     }
-
     private fun remainingListenWindowMs(): Long {
         val now = SystemClock.elapsedRealtime()
         return (listenWindowDeadlineMs - now).coerceAtLeast(0L)
     }
-
     private fun isListenWindowActive(): Boolean = SystemClock.elapsedRealtime() < listenWindowDeadlineMs
 
-    // Map legacy OpenAI names (gpt-5-*) to broadly available ones
+    // Map legacy OpenAI names to GPT‑5 (keep gpt-5-mini)
     private fun migrateLegacyOpenAiModelName(name: String): String {
         val lower = name.lowercase()
         return when {
-            lower == "gpt-5-turbo" -> "gpt-4o"
-            lower == "gpt-5-mini" -> "gpt-4o-mini"
+            lower == "gpt-5-turbo" -> "gpt-5"
+            lower.startsWith("gpt-4o") -> "gpt-5"
             else -> name
         }
     }

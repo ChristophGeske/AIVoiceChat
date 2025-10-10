@@ -18,7 +18,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     override fun onCreateOptionsMenu(menu: Menu): Boolean {
-        // Activity owns the single gear menu (Fragment does NOT inflate any menu)
+        // Activity owns the single gear menu (Fragment must NOT inflate a menu)
         menuInflater.inflate(R.menu.menu_main, menu)
         return true
     }

@@ -20,7 +20,6 @@ import androidx.fragment.app.Fragment
 import androidx.fragment.app.viewModels
 import com.example.advancedvoice.databinding.FragmentFirstBinding
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
-import java.util.Locale
 
 class FirstFragment : Fragment() {
 
@@ -44,9 +43,9 @@ class FirstFragment : Fragment() {
     private val PREF_LISTEN_SECONDS_KEY = "listen_seconds"
     private val PREF_SELECTED_MODEL = "selected_model"
     private val DEFAULT_SYSTEM_PROMPT = """
-    You are a helpful assistant. Answer the user's request in clear, complete sentences.
-    Avoid code blocks and JSON unless explicitly requested by the user.
-""".trimIndent()
+        You are a helpful assistant. Answer the user's request in clear, complete sentences.
+        Avoid code blocks and JSON unless explicitly requested by the user.
+    """.trimIndent()
 
     private val prefs by lazy { requireContext().getSharedPreferences(PREFS, Context.MODE_PRIVATE) }
 
@@ -71,7 +70,7 @@ class FirstFragment : Fragment() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         // IMPORTANT: Fragment does not inflate a menu; Activity owns the gear icon
-        // setHasOptionsMenu(true)
+        // setHasOptionsMenu(true)  // keep disabled
     }
 
     override fun onCreateView(inflater: LayoutInflater, container: ViewGroup?, savedInstanceState: Bundle?): View {
@@ -238,15 +237,26 @@ class FirstFragment : Fragment() {
             }
         }
 
+        // AUTO-RECORD after TTS
         viewModel.ttsQueueFinishedEvent.observe(viewLifecycleOwner) { event ->
             event.getContentIfNotHandled()?.let {
-                Log.d(TAG, "[AutoContinue] TTS Queue finished event received. autoContinue=$autoContinue")
-                if (autoContinue && isListenWindowActive()) {
+                if (autoContinue && !isSettingsVisible()) {
+                    startListenWindow("TTS")
+                    handleStartListeningRequest(delayMs = STT_GRACE_MS_AFTER_TTS)
+                }
+            }
+        }
+
+        // Restart STT quickly if NO_MATCH occurs within the listen window
+        viewModel.sttNoMatch.observe(viewLifecycleOwner) { event ->
+            event.getContentIfNotHandled()?.let {
+                val remain = remainingListenWindowMs()
+                if (autoContinue && isListenWindowActive() && !isSettingsVisible()) {
                     listenRestartCount += 1
-                    Log.w(TAG, "[ListenWindow] NO_MATCH within window. Restarting STT. restartCount=$listenRestartCount remaining=${remainingListenWindowMs()}ms")
+                    Log.w(TAG, "[ListenWindow] NO_MATCH within window. Restarting STT. restartCount=$listenRestartCount remaining=${remain}ms")
                     handleStartListeningRequest(delayMs = 50L)
                 } else {
-                    Log.i(TAG, "[ListenWindow] NO_MATCH but window expired or autoContinue=false. remaining=${remainingListenWindowMs()}ms autoContinue=$autoContinue")
+                    Log.i(TAG, "[ListenWindow] NO_MATCH but window expired or autoContinue=false. remaining=${remain}ms autoContinue=$autoContinue")
                 }
             }
         }
@@ -277,7 +287,7 @@ class FirstFragment : Fragment() {
 
         binding.speakButton.setOnClickListener {
             autoContinue = true
-            // If current model isn't usable (missing key), show warning dialog only
+            // If current model isn't usable (missing key), only show warning dialog (do not auto-open settings)
             if (!ensureKeyAvailableForModelOrShow(currentModelName)) return@setOnClickListener
             startListenWindow("Manual Speak")
             handleStartListeningRequest(delayMs = 0L)
@@ -353,8 +363,7 @@ class FirstFragment : Fragment() {
             return
         }
         if (!ensureKeyAvailableForModelOrShow(currentModelName)) return
-        val remain = remainingListenWindowMs()
-        Log.i(TAG, "[AutoContinue] Starting listening. listenWindowRemaining=${remain}ms (deadline=$listenWindowDeadlineMs)")
+        Log.i(TAG, "[AutoContinue] Starting listening.")
         viewModel.startListening()
     }
 
@@ -369,13 +378,6 @@ class FirstFragment : Fragment() {
             .setNegativeButton("Cancel", null)
             .show()
         return false
-    }
-
-    private fun maybeAutoCollapseSettings() {
-        if (userToggledSettings) return
-        if ((viewModel.conversation.value?.size ?: 0) > 2) {
-            binding.settingsContainerScrollView.visibility = View.GONE
-        }
     }
 
     private fun updateModelOptionsVisibility() {
@@ -425,7 +427,7 @@ class FirstFragment : Fragment() {
                 binding.radioGpt5High.isChecked = false
                 binding.radioGpt5Medium.isChecked = false
                 binding.radioGpt5Low.isChecked = false
-                binding.radioGpt5MiniHigh.isChecked= false
+                binding.radioGpt5MiniHigh.isChecked = false
                 binding.radioGpt5MiniMedium.isChecked = false
             }
         }
@@ -542,7 +544,9 @@ class FirstFragment : Fragment() {
         super.onResume()
         Log.i(TAG, "[LIFECYCLE] onResume - checking TTS resume")
         binding.speakButton.text = computeSpeakButtonLabel()
-        view?.postDelayed({ viewModel.checkAndResumeTts() }, 300)
+        view?.postDelayed({
+            viewModel.checkAndResumeTts()
+        }, 300)
     }
 
     override fun onDestroyView() {
@@ -551,7 +555,7 @@ class FirstFragment : Fragment() {
         _binding = null
     }
 
-    // Listen window helpers
+    // Helpers
     private fun startListenWindow(reason: String) {
         val secs = prefs.getInt(PREF_LISTEN_SECONDS_KEY, 5).coerceIn(1, 120)
         val now = SystemClock.elapsedRealtime()
@@ -559,13 +563,15 @@ class FirstFragment : Fragment() {
         listenRestartCount = 0
         Log.i(TAG, "[ListenWindow] Started ($reason): seconds=$secs, deadline=$listenWindowDeadlineMs now=$now")
     }
+
     private fun remainingListenWindowMs(): Long {
         val now = SystemClock.elapsedRealtime()
         return (listenWindowDeadlineMs - now).coerceAtLeast(0L)
     }
-    private fun isListenWindowActive(): Boolean = SystemClock.elapsedRealtime() < listenWindowDeadlineMs
 
-    // Map legacy OpenAI names to GPT‑5 (keep gpt-5-mini)
+    private fun isListenWindowActive(): Boolean = SystemClock.elapsedRealtime() < listenWindowDeadlineMs
+    private fun isSettingsVisible(): Boolean = binding.settingsContainerScrollView.visibility == View.VISIBLE
+
     private fun migrateLegacyOpenAiModelName(name: String): String {
         val lower = name.lowercase()
         return when {
@@ -587,7 +593,7 @@ class FirstFragment : Fragment() {
         binding.geminiApiKeyHelpLink.visibility = if (empty) View.VISIBLE else View.GONE
     }
 
-    // PUBLIC: called by MainActivity (gear icon). Also hides/shows main UI under settings.
+    // PUBLIC: called by MainActivity (gear icon). Hides/shows main UI under settings.
     fun toggleSettingsVisibility(forceShow: Boolean = false) {
         val visible = binding.settingsContainerScrollView.visibility == View.VISIBLE
         val show = forceShow || !visible
@@ -599,4 +605,3 @@ class FirstFragment : Fragment() {
 
     private fun computeSpeakButtonLabel(): String = getString(R.string.start_conversation)
 }
-

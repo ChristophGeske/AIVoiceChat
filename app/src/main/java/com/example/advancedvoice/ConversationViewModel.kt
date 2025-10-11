@@ -3,9 +3,6 @@ package com.example.advancedvoice
 import android.app.Application
 import android.content.Intent
 import android.content.SharedPreferences
-import android.content.pm.PackageManager
-import android.location.Geocoder
-import android.location.LocationManager
 import android.os.Bundle
 import android.os.SystemClock
 import android.speech.RecognitionListener
@@ -14,18 +11,24 @@ import android.speech.SpeechRecognizer
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
 import android.util.Log
-import androidx.core.content.ContextCompat
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.LiveData
+import androidx.lifecycle.MediatorLiveData
 import androidx.lifecycle.MutableLiveData
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.launch
 import okhttp3.OkHttpClient
 import java.util.ArrayDeque
 import java.util.Locale
-import java.util.TimeZone
 import java.util.UUID
 import java.util.concurrent.TimeUnit
+
+enum class GenerationPhase {
+    IDLE,
+    GENERATING_FIRST,
+    GENERATING_REMAINDER,
+    SINGLE_SHOT_GENERATING
+}
 
 class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpeech.OnInitListener {
     private val TAG = "ConversationVM"
@@ -55,6 +58,21 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
     private val _errorMessage = MutableLiveData<String?>()
     val errorMessage: LiveData<String?> = _errorMessage
 
+    // Controls orchestrator inputs
+    private val _engineActive = MutableLiveData(false)
+    val engineActive: LiveData<Boolean> = _engineActive
+
+    private val _settingsVisible = MutableLiveData(false)
+    val settingsVisible: LiveData<Boolean> = _settingsVisible
+
+    // Generation phase for accurate UI
+    private val _generationPhase = MutableLiveData(GenerationPhase.IDLE)
+    val generationPhase: LiveData<GenerationPhase> = _generationPhase
+
+    // Single derived state for UI controls
+    private val _uiControls = MediatorLiveData<ControlsState>()
+    val uiControls: LiveData<ControlsState> = _uiControls
+
     // TTS
     private lateinit var tts: TextToSpeech
     private var ttsReady = false
@@ -78,6 +96,9 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
     private lateinit var speechRecognizer: SpeechRecognizer
     private var currentModelName: String = "gemini-2.5-pro"
 
+    // Config flags
+    private var fasterFirstEnabled: Boolean = false
+
     // Dedup keys for queued sentences
     private val queuedKeys = mutableSetOf<String>()
 
@@ -93,58 +114,34 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
     // Stable UtteranceProgressListener
     private val utteranceListener = object : UtteranceProgressListener() {
         override fun onStart(utteranceId: String?) {
-            try {
-                val prevId = currentUtteranceId
-                currentUtteranceId = utteranceId
-                _isSpeaking.postValue(true)
-                val current = _currentSpeaking.value
-                Log.i(TAG, "[TTS] onStart id=$utteranceId (prev=$prevId) queueSize=${ttsQueue.size} currentSpeaking=${current?.let { "${it.entryIndex}:${it.sentenceIndex}" }}")
-            } catch (e: Exception) {
-                Log.e(TAG, "[TTS] onStart crashed: ${e.message}", e)
-            }
+            _isSpeaking.postValue(true)
         }
 
         override fun onDone(utteranceId: String?) {
-            try {
-                viewModelScope.launch {
-                    Log.i(TAG, "[TTS] onDone id=$utteranceId currentId=$currentUtteranceId queueSize=${ttsQueue.size}")
-
-                    val shouldProcess = if (utteranceId == currentUtteranceId) true
-                    else {
-                        val canProcess = currentUtteranceId == null || currentUtteranceId == utteranceId
-                        if (!canProcess) {
-                            Log.w(TAG, "[TTS] onDone skipped - utteranceId mismatch (expected=$currentUtteranceId, got=$utteranceId)")
-                        }
-                        canProcess
-                    }
-                    if (!shouldProcess) return@launch
-
-                    lastTtsDoneAt = SystemClock.elapsedRealtime()
-                    Log.i(TAG, "[TTS] Setting lastTtsDoneAt=${lastTtsDoneAt}")
-                    ttsQueue.pollFirst()
-                    _currentSpeaking.postValue(null)
-                    currentUtteranceId = null
-
-                    if (ttsQueue.isNotEmpty()) {
-                        speakNext()
-                    } else {
-                        _isSpeaking.postValue(false)
-                        _ttsQueueFinishedEvent.postValue(Event(Unit))
-                    }
+            viewModelScope.launch {
+                val wasCurrent = utteranceId == currentUtteranceId
+                if (!wasCurrent) {
+                    Log.w(TAG, "[TTS] onDone skipped - utteranceId mismatch (expected=$currentUtteranceId, got=$utteranceId)")
+                    return@launch
                 }
-            } catch (e: Exception) {
-                Log.e(TAG, "[TTS] onDone crashed: ${e.message}", e)
+
+                lastTtsDoneAt = SystemClock.elapsedRealtime()
+                ttsQueue.pollFirst()
+                _currentSpeaking.postValue(null)
+                currentUtteranceId = null
+
+                if (ttsQueue.isNotEmpty()) {
+                    speakNext()
+                } else {
+                    _isSpeaking.postValue(false)
+                    _ttsQueueFinishedEvent.postValue(Event(Unit))
+                }
             }
         }
 
         @Deprecated("Deprecated in Java")
         override fun onError(utteranceId: String?) {
-            try {
-                Log.e(TAG, "[TTS] onError id=$utteranceId")
-                onDone(utteranceId)
-            } catch (e: Exception) {
-                Log.e(TAG, "[TTS] onError crashed: ${e.message}", e)
-            }
+            onDone(utteranceId)
         }
     }
 
@@ -152,22 +149,26 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
         val cb = SentenceTurnEngine.Callbacks(
             onStreamDelta = { delta ->
                 val idx = currentAssistantEntryIndex ?: return@Callbacks
-                val current = entries.getOrNull(idx) ?: return@Callbacks
-                entries[idx] = current.copy(streamingText = (current.streamingText ?: "") + delta)
-                postList()
-            },
-            onStreamSentence = { sentence ->
-                val idx = currentAssistantEntryIndex ?: return@Callbacks
-                val current = entries.getOrNull(idx) ?: return@Callbacks
-                val trimmed = sentence.trim()
-                if (current.sentences.none { it.trim() == trimmed }) {
-                    val newSentences = current.sentences.toMutableList().apply { add(trimmed) }
-                    entries[idx] = current.copy(sentences = newSentences)
-                    queueTts(SpokenSentence(trimmed, idx, newSentences.size - 1))
+                entries.getOrNull(idx)?.let { current ->
+                    entries[idx] = current.copy(streamingText = (current.streamingText ?: "") + delta)
                     postList()
                 }
             },
+            onStreamSentence = { sentence ->
+                val idx = currentAssistantEntryIndex ?: return@Callbacks
+                entries.getOrNull(idx)?.let { current ->
+                    val trimmed = sentence.trim()
+                    if (current.sentences.none { it.trim() == trimmed }) {
+                        val newSentences = current.sentences + trimmed
+                        entries[idx] = current.copy(sentences = newSentences)
+                        queueTts(SpokenSentence(trimmed, idx, newSentences.size - 1))
+                        postList()
+                    }
+                }
+            },
             onFirstSentence = { sentence ->
+                // Phase 1 finished, Phase 2 starts now
+                _generationPhase.postValue(GenerationPhase.GENERATING_REMAINDER)
                 val newEntry = ConversationEntry("Assistant", listOf(sentence), isAssistant = true)
                 entries.add(newEntry)
                 currentAssistantEntryIndex = entries.lastIndex
@@ -175,42 +176,43 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
                 postList()
             },
             onRemainingSentences = { sentences ->
+                // Phase 2 finished generating
+                _generationPhase.postValue(GenerationPhase.IDLE)
                 val idx = currentAssistantEntryIndex ?: return@Callbacks
-                val current = entries.getOrNull(idx) ?: return@Callbacks
-                val ns = current.sentences.toMutableList()
-                var added = false
-                sentences.forEach { s ->
-                    val t = s.trim()
-                    if (ns.none { it.trim() == t }) {
-                        ns.add(t)
-                        queueTts(SpokenSentence(t, idx, ns.size - 1))
-                        added = true
+                entries.getOrNull(idx)?.let { current ->
+                    val ns = current.sentences.toMutableList()
+                    var added = false
+                    sentences.forEach { s ->
+                        val t = s.trim()
+                        if (ns.none { it.trim() == t }) {
+                            ns.add(t)
+                            queueTts(SpokenSentence(t, idx, ns.size - 1))
+                            added = true
+                        }
                     }
-                }
-                if (added) {
-                    entries[idx] = current.copy(sentences = ns)
-                    postList()
+                    if (added) {
+                        entries[idx] = current.copy(sentences = ns)
+                        postList()
+                    }
                 }
             },
             onFinalResponse = { fullText ->
-                // Deduplicate sentences to avoid speaking duplicates
+                _generationPhase.postValue(GenerationPhase.IDLE)
                 val sentences = dedupeSentences(SentenceSplitter.splitIntoSentences(fullText))
                 val idx = currentAssistantEntryIndex
                 if (idx == null || entries.getOrNull(idx)?.isAssistant != true) {
                     val newEntry = ConversationEntry("Assistant", sentences, isAssistant = true)
                     entries.add(newEntry)
                     currentAssistantEntryIndex = entries.lastIndex
-                    sentences.forEachIndexed { i, s ->
-                        queueTts(SpokenSentence(s, currentAssistantEntryIndex!!, i))
-                    }
-                    postList()
+                    sentences.forEachIndexed { i, s -> queueTts(SpokenSentence(s, currentAssistantEntryIndex!!, i)) }
                 } else {
-                    val current = entries[idx]
-                    entries[idx] = current.copy(sentences = sentences, streamingText = null)
-                    postList()
+                    entries[idx] = entries[idx].copy(sentences = sentences, streamingText = null)
                 }
+                postList()
             },
             onTurnFinish = {
+                _engineActive.postValue(false)
+                _generationPhase.postValue(GenerationPhase.IDLE)
                 _turnFinishedEvent.postValue(Event(Unit))
             },
             onSystem = { msg -> addSystemEntry(msg) },
@@ -236,35 +238,43 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
         Log.i(TAG, "[INIT] ViewModel created (hashCode=${this.hashCode()})")
         tts = TextToSpeech(getApplication(), this)
         setupSpeechRecognizer()
+        setupControlsMediator()
+    }
+
+    private fun setupControlsMediator() {
+        fun recompute() {
+            val state = ControlsLogic.derive(
+                isSpeaking = isSpeaking.value == true,
+                isListening = sttIsListening.value == true,
+                engineActive = engineActive.value == true,
+                settingsVisible = settingsVisible.value == true
+            )
+            _uiControls.postValue(state)
+        }
+        _uiControls.value = ControlsLogic.derive(false, false, false, false)
+        _uiControls.addSource(isSpeaking) { recompute() }
+        _uiControls.addSource(sttIsListening) { recompute() }
+        _uiControls.addSource(engineActive) { recompute() }
+        _uiControls.addSource(settingsVisible) { recompute() }
     }
 
     private fun setupSpeechRecognizer() {
         if (!SpeechRecognizer.isRecognitionAvailable(getApplication())) {
-            Log.e(TAG, "[STT] Recognition not available")
             _sttError.postValue(Event("Speech recognition not available on this device."))
             return
         }
         speechRecognizer = SpeechRecognizer.createSpeechRecognizer(getApplication())
         speechRecognizer.setRecognitionListener(object : RecognitionListener {
-            override fun onReadyForSpeech(params: Bundle?) {
-                Log.i(TAG, "[STT] onReadyForSpeech")
-                _sttIsListening.postValue(true)
-            }
+            override fun onReadyForSpeech(params: Bundle?) { _sttIsListening.postValue(true) }
             override fun onResults(results: Bundle?) {
-                Log.i(TAG, "[STT] onResults")
                 _sttIsListening.postValue(false)
                 val matches = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
-                if (!matches.isNullOrEmpty()) {
-                    val spokenText = matches[0]
-                    Log.i(TAG, "[STT] Recognized: '$spokenText'")
-                    if (spokenText.isNotBlank()) {
-                        addUserEntry(spokenText)
-                        startTurn(spokenText, currentModelName)
-                    }
+                if (!matches.isNullOrEmpty() && matches[0].isNotBlank()) {
+                    addUserEntry(matches[0])
+                    startTurn(matches[0], currentModelName)
                 }
             }
             override fun onError(error: Int) {
-                Log.e(TAG, "[STT] onError code=$error")
                 _sttIsListening.postValue(false)
                 if (error == SpeechRecognizer.ERROR_NO_MATCH) {
                     _sttNoMatch.postValue(Event(Unit))
@@ -272,17 +282,16 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
                     _sttError.postValue(Event("STT Error (code:$error)"))
                 }
             }
-            override fun onBeginningOfSpeech() { Log.d(TAG, "[STT] onBeginningOfSpeech") }
+            override fun onBeginningOfSpeech() {}
             override fun onRmsChanged(rmsdB: Float) {}
             override fun onBufferReceived(buffer: ByteArray?) {}
-            override fun onEndOfSpeech() { Log.d(TAG, "[STT] onEndOfSpeech") }
+            override fun onEndOfSpeech() {}
             override fun onPartialResults(partialResults: Bundle?) {}
             override fun onEvent(eventType: Int, params: Bundle?) {}
         })
     }
 
     fun startListening() {
-        Log.i(TAG, "[STT] startListening requested")
         if (engine.isActive()) {
             injectDraftIfActive()
             abortEngine()
@@ -303,43 +312,42 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
             putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
             putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
         }
-
-        Log.i(TAG, "[STT] Starting listener with config: silenceMs=$silenceMs (from $listenSeconds seconds setting), minLengthMs=$minLengthMs")
         speechRecognizer.startListening(intent)
     }
 
     fun stopListening() {
         if (_sttIsListening.value == true) {
-            Log.i(TAG, "[STT] Stopping listening")
             speechRecognizer.stopListening()
             _sttIsListening.postValue(false)
         }
     }
 
-    fun setCurrentModel(modelName: String) {
-        Log.i(TAG, "[MODEL] Set to: $modelName")
-        this.currentModelName = modelName
-    }
+    fun setCurrentModel(modelName: String) { this.currentModelName = modelName }
 
     fun applyEngineConfigFromPrefs(prefs: SharedPreferences) {
         val maxSent = prefs.getInt("max_sentences", 4).coerceIn(1, 10)
         val faster = prefs.getBoolean("faster_first", true)
-        Log.i(TAG, "[CONFIG] Applying: maxSentences=$maxSent, fasterFirst=$faster")
+        fasterFirstEnabled = faster
         engine.setMaxSentences(maxSent)
         engine.setFasterFirst(faster)
     }
 
     fun startTurn(userInput: String, modelName: String) {
-        Log.i(TAG, "[TURN] Starting: model=$modelName, input='${userInput.take(80)}...'")
         currentAssistantEntryIndex = null
+        _engineActive.postValue(true)
+        _generationPhase.postValue(
+            if (fasterFirstEnabled) GenerationPhase.GENERATING_FIRST
+            else GenerationPhase.SINGLE_SHOT_GENERATING
+        )
         engine.startTurn(userInput, modelName)
     }
 
     fun isEngineActive(): Boolean = engine.isActive()
 
     fun abortEngine() {
-        Log.i(TAG, "[ENGINE] Abort requested")
         engine.abort()
+        _engineActive.postValue(false)
+        _generationPhase.postValue(GenerationPhase.IDLE)
     }
 
     fun addUserEntry(text: String) {
@@ -364,6 +372,7 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
         currentAssistantEntryIndex = null
         queuedKeys.clear()
         postList()
+        _generationPhase.postValue(GenerationPhase.IDLE)
     }
 
     fun replayEntry(entryIndex: Int) {
@@ -398,11 +407,6 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
         buildAssistantDraft()?.let { engine.injectAssistantDraft(it) }
     }
 
-    fun elapsedSinceTtsDone(): Long {
-        if (lastTtsDoneAt == 0L) return Long.MAX_VALUE
-        return SystemClock.elapsedRealtime() - lastTtsDoneAt
-    }
-
     fun checkAndResumeTts() {
         if (!ttsInitialized) return
         if (ttsQueue.isNotEmpty() && isSpeaking.value == false && currentUtteranceId == null) {
@@ -423,7 +427,6 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
             tts.setOnUtteranceProgressListener(utteranceListener)
         } else {
             ttsReady = false
-            Log.e(TAG, "[TTS] Initialization failed: status=$status")
         }
     }
 
@@ -436,16 +439,11 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
         } catch (_: Exception) {}
     }
 
-    private fun postList() {
-        _conversation.postValue(entries.toList())
-    }
+    private fun postList() { _conversation.postValue(entries.toList()) }
 
     private fun queueTts(spoken: SpokenSentence, force: Boolean = false) {
         val key = "${spoken.entryIndex}:${spoken.sentenceIndex}"
-        if (!force && !queuedKeys.add(key)) {
-            Log.d(TAG, "[TTS] Skipping duplicate: $key")
-            return
-        }
+        if (!force && !queuedKeys.add(key)) return
         ttsQueue.addLast(spoken)
         if (isSpeaking.value != true && currentUtteranceId == null) {
             speakNext()
@@ -457,15 +455,7 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
     }
 
     private fun speakNext() {
-        if (!ttsReady || ttsQueue.isEmpty()) {
-            if (ttsQueue.isEmpty()) {
-                _isSpeaking.postValue(false)
-                _ttsQueueFinishedEvent.postValue(Event(Unit))
-            }
-            return
-        }
-        if (currentUtteranceId != null) return
-
+        if (!ttsReady || ttsQueue.isEmpty() || currentUtteranceId != null) return
         val next = ttsQueue.first()
         _currentSpeaking.postValue(next)
         val id = UUID.randomUUID().toString()
@@ -477,37 +467,20 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
         val base = prefs.getString("system_prompt", "").orEmpty().ifBlank { DEFAULT_BASE_PROMPT }
         val maxSent = prefs.getInt("max_sentences", 4).coerceIn(1, 10)
         val faster = prefs.getBoolean("faster_first", true)
-
         val extras = buildList {
             add("Return plain text only.")
             if (maxSent >= 1) add("When appropriate, keep answers to at most $maxSent complete sentences.")
             if (faster) add("Begin with a complete first sentence promptly, then continue.")
         }.joinToString(" ")
-
         return if (extras.isBlank()) base else "$base\n\n$extras"
     }
 
     private fun getOpenAiOptionsFromPrefs(): OpenAiOptions {
-        val effort = prefs.getString("gpt5_effort", "low") ?: "low"       // minimal|low|medium|high
-        val verbosity = prefs.getString("gpt5_verbosity", "low") ?: "low" // low|medium|high
-
-        // Try to build approximate user location:
-        // 1) from stored prefs,
-        // 2) else from device last-known location (if permission granted),
-        // 3) else from device defaults (timezone/country),
-        // 4) else null (omit).
-        val userLoc = resolveApproxUserLocation()
-
-        // Domain filters can be added later via prefs/UI if needed.
-        return OpenAiOptions(
-            effort = effort,
-            verbosity = verbosity,
-            filters = null,
-            userLocation = userLoc
-        )
+        val effort = prefs.getString("gpt5_effort", "low") ?: "low"
+        val verbosity = prefs.getString("gpt5_verbosity", "low") ?: "low"
+        return OpenAiOptions(effort = effort, verbosity = verbosity)
     }
 
-    // RESTORED: used by injectDraftIfActive()
     private fun buildAssistantDraft(): String? {
         val idx = currentAssistantEntryIndex ?: return null
         val entry = entries.getOrNull(idx) ?: return null
@@ -516,7 +489,6 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
         return if (!inStream.isNullOrBlank() && inStream.length > base.length) inStream else base
     }
 
-    // Remove duplicate sentences (trim) while preserving order
     private fun dedupeSentences(input: List<String>): List<String> {
         val seen = LinkedHashSet<String>()
         input.forEach { s ->
@@ -526,76 +498,7 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
         return seen.toList()
     }
 
-    // Build/refresh approximate user location for OpenAI web_search tool.
-    // Will persist to prefs so it's available across app restarts.
-    private fun resolveApproxUserLocation(): OpenAiOptions.UserLocation? {
-        // 1) Prefs
-        var country = prefs.getString("user_loc_country", null)
-        var city = prefs.getString("user_loc_city", null)
-        var region = prefs.getString("user_loc_region", null)
-        var timezone = prefs.getString("user_loc_timezone", null)
-
-        // 2) Device fallback (timezone, country)
-        if (timezone.isNullOrBlank()) {
-            timezone = TimeZone.getDefault().id
-        }
-        if (country.isNullOrBlank()) {
-            val lc = Locale.getDefault()
-            if (!lc.country.isNullOrBlank()) country = lc.country // ISO-2
-        }
-
-        // 3) Try device last known location + reverse geocode if we don't already have city/region/country
-        val ctx = getApplication<Application>()
-        val hasCoarse = ContextCompat.checkSelfPermission(ctx, android.Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED
-        val hasFine = ContextCompat.checkSelfPermission(ctx, android.Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
-
-        if ((city.isNullOrBlank() || region.isNullOrBlank() || country.isNullOrBlank()) && (hasCoarse || hasFine)) {
-            try {
-                val lm = ctx.getSystemService(Application.LOCATION_SERVICE) as? LocationManager
-                val providers = lm?.getProviders(true).orEmpty()
-                var best: android.location.Location? = null
-                for (prov in providers) {
-                    val l = try { lm?.getLastKnownLocation(prov) } catch (_: SecurityException) { null }
-                    if (l != null && (best == null || l.time > best!!.time)) best = l
-                }
-                if (best != null) {
-                    try {
-                        val geocoder = Geocoder(ctx, Locale.getDefault())
-                        val results = geocoder.getFromLocation(best.latitude, best.longitude, 1)
-                        if (!results.isNullOrEmpty()) {
-                            val addr = results[0]
-                            if (country.isNullOrBlank()) country = addr.countryCode ?: addr.countryName
-                            if (city.isNullOrBlank()) city = addr.locality ?: addr.subAdminArea ?: addr.subLocality
-                            if (region.isNullOrBlank()) region = addr.adminArea ?: addr.subAdminArea
-                        }
-                    } catch (ge: Exception) {
-                        Log.w(TAG, "[LOC] Reverse geocode failed: ${ge.message}")
-                    }
-                }
-            } catch (e: Exception) {
-                Log.w(TAG, "[LOC] Unable to read last known location: ${e.message}")
-            }
-        }
-
-        val any = !country.isNullOrBlank() || !city.isNullOrBlank() || !region.isNullOrBlank() || !timezone.isNullOrBlank()
-        if (!any) return null
-
-        // Persist for future runs
-        prefs.edit().apply {
-            country?.let { putString("user_loc_country", it) }
-            city?.let { putString("user_loc_city", it) }
-            region?.let { putString("user_loc_region", it) }
-            timezone?.let { putString("user_loc_timezone", it) }
-            apply()
-        }
-
-        return OpenAiOptions.UserLocation(
-            country = country,
-            city = city,
-            region = region,
-            timezone = timezone
-        )
-    }
+    fun setSettingsVisible(visible: Boolean) { _settingsVisible.postValue(visible) }
 
     companion object {
         private val DEFAULT_BASE_PROMPT = """

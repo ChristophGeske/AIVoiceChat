@@ -8,9 +8,7 @@ import android.os.SystemClock
 import android.text.Html
 import android.text.method.LinkMovementMethod
 import android.util.Log
-import android.view.LayoutInflater
-import android.view.View
-import android.view.ViewGroup
+import android.view.*
 import android.widget.RadioButton
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
@@ -34,21 +32,13 @@ class FirstFragment : Fragment() {
     private var pendingStartAfterPermission = false
 
     private var currentModelName = "gemini-2.5-pro"
-    private var userToggledSettings = false
 
-    private val PREFS = "ai_prefs"
-    private val PREF_SYSTEM_PROMPT_KEY = "system_prompt"
-    private val PREF_MAX_SENTENCES_KEY = "max_sentences"
-    private val PREF_FASTER_FIRST = "faster_first"
-    private val PREF_LISTEN_SECONDS_KEY = "listen_seconds"
-    private val PREF_SELECTED_MODEL = "selected_model"
-    private val DEFAULT_SYSTEM_PROMPT = """
-        You are a helpful assistant. Answer the user's request in clear, complete sentences.
-        Avoid code blocks and JSON unless explicitly requested by the user.
-    """.trimIndent()
+    // Listen window helpers
+    private val STT_GRACE_MS_AFTER_TTS = 500L
+    private var listenWindowDeadlineMs: Long = 0L
+    private var listenRestartCount: Int = 0
 
-    private val prefs by lazy { requireContext().getSharedPreferences(PREFS, Context.MODE_PRIVATE) }
-
+    // Permission launcher
     private val requestPermissionLauncher =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { isGranted ->
             Log.i(TAG, "[PERM] RECORD_AUDIO granted=$isGranted pending=$pendingStartAfterPermission")
@@ -60,17 +50,9 @@ class FirstFragment : Fragment() {
             }
         }
 
-    // A short grace period to prevent STT from starting while TTS audio might still be finalizing.
-    private val STT_GRACE_MS_AFTER_TTS = 500L
-
-    // Listen window tracking for post-TTS listening duration
-    private var listenWindowDeadlineMs: Long = 0L
-    private var listenRestartCount: Int = 0
-
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        // IMPORTANT: Fragment does not inflate a menu; Activity owns the gear icon
-        // setHasOptionsMenu(true)  // keep disabled
+        // Fragment does NOT inflate a menu; Activity owns the gear icon
     }
 
     override fun onCreateView(inflater: LayoutInflater, container: ViewGroup?, savedInstanceState: Bundle?): View {
@@ -80,17 +62,17 @@ class FirstFragment : Fragment() {
 
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)
-        Log.i(TAG, "[LIFECYCLE] onViewCreated (savedInstanceState=${savedInstanceState != null})")
 
         setupRecyclerView()
         setupUI()
         setupPrefsBackedInputs()
         observeViewModel()
 
-        var restoredModel = prefs.getString(PREF_SELECTED_MODEL, "gemini-2.5-pro") ?: "gemini-2.5-pro"
+        val prefs = requireContext().getSharedPreferences("ai_prefs", Context.MODE_PRIVATE)
+        var restoredModel = prefs.getString("selected_model", "gemini-2.5-pro") ?: "gemini-2.5-pro"
         restoredModel = migrateLegacyOpenAiModelName(restoredModel)
-        if (restoredModel != prefs.getString(PREF_SELECTED_MODEL, restoredModel)) {
-            prefs.edit().putString(PREF_SELECTED_MODEL, restoredModel).apply()
+        if (restoredModel != prefs.getString("selected_model", restoredModel)) {
+            prefs.edit().putString("selected_model", restoredModel).apply()
         }
 
         currentModelName = restoredModel
@@ -121,11 +103,6 @@ class FirstFragment : Fragment() {
             syncRadioSelectionToCurrentModel()
             ensureRadioSelectedIfVisible()
         }
-
-        Log.i(TAG, "[MODEL] Restored selection: $currentModelName")
-        Log.i(TAG, "[STATE] Conversation entries: ${viewModel.conversation.value?.size ?: 0}")
-        Log.i(TAG, "[STATE] Is speaking: ${viewModel.isSpeaking.value}")
-        Log.i(TAG, "[STATE] Engine active: ${viewModel.isEngineActive()}")
     }
 
     private fun setupRecyclerView() {
@@ -146,6 +123,8 @@ class FirstFragment : Fragment() {
     }
 
     private fun setupPrefsBackedInputs() {
+        val prefs = requireContext().getSharedPreferences("ai_prefs", Context.MODE_PRIVATE)
+
         binding.geminiApiKeyInput.hint = getString(R.string.gemini_api_key_hint)
         binding.openaiApiKeyInput.hint = getString(R.string.openai_api_key_hint)
 
@@ -170,7 +149,7 @@ class FirstFragment : Fragment() {
             if (migrated != currentModelName) {
                 currentModelName = migrated
                 viewModel.setCurrentModel(migrated)
-                prefs.edit().putString(PREF_SELECTED_MODEL, migrated).apply()
+                prefs.edit().putString("selected_model", migrated).apply()
                 Log.i(TAG, "[MODEL] Migrated selection to $migrated after OpenAI key entry")
             }
             updateModelOptionsVisibility()
@@ -180,37 +159,37 @@ class FirstFragment : Fragment() {
             }
         }
 
-        val savedPrompt = prefs.getString(PREF_SYSTEM_PROMPT_KEY, DEFAULT_SYSTEM_PROMPT)
+        val savedPrompt = prefs.getString("system_prompt", getString(R.string.system_prompt_hint))
         binding.systemPromptInput.setText(savedPrompt)
         binding.systemPromptInput.doAfterTextChanged { editable ->
-            prefs.edit().putString(PREF_SYSTEM_PROMPT_KEY, editable?.toString().orEmpty()).apply()
+            prefs.edit().putString("system_prompt", editable?.toString().orEmpty()).apply()
         }
 
         binding.systemPromptExtensionInput.visibility = View.GONE
 
-        val savedMax = prefs.getInt(PREF_MAX_SENTENCES_KEY, 4).coerceIn(1, 10)
+        val savedMax = prefs.getInt("max_sentences", 4).coerceIn(1, 10)
         binding.maxSentencesInput.setText(savedMax.toString())
         binding.maxSentencesInput.doAfterTextChanged { editable ->
             val n = editable?.toString()?.trim()?.toIntOrNull()?.coerceIn(1, 10)
             if (n != null) {
-                prefs.edit().putInt(PREF_MAX_SENTENCES_KEY, n).apply()
+                prefs.edit().putInt("max_sentences", n).apply()
                 viewModel.applyEngineConfigFromPrefs(prefs)
             }
         }
 
-        val faster = prefs.getBoolean(PREF_FASTER_FIRST, true)
+        val faster = prefs.getBoolean("faster_first", true)
         binding.switchFasterFirst.isChecked = faster
         binding.switchFasterFirst.setOnCheckedChangeListener { _, isChecked ->
-            prefs.edit().putBoolean(PREF_FASTER_FIRST, isChecked).apply()
+            prefs.edit().putBoolean("faster_first", isChecked).apply()
             viewModel.applyEngineConfigFromPrefs(prefs)
         }
 
-        val savedListen = prefs.getInt(PREF_LISTEN_SECONDS_KEY, 5).coerceIn(1, 120)
+        val savedListen = prefs.getInt("listen_seconds", 5).coerceIn(1, 120)
         binding.listenSecondsInput?.setText(savedListen.toString())
         binding.listenSecondsInput?.doAfterTextChanged { editable ->
             val sec = editable?.toString()?.trim()?.toIntOrNull()?.coerceIn(1, 120)
             if (sec != null) {
-                prefs.edit().putInt(PREF_LISTEN_SECONDS_KEY, sec).apply()
+                prefs.edit().putInt("listen_seconds", sec).apply()
             }
         }
 
@@ -218,6 +197,58 @@ class FirstFragment : Fragment() {
     }
 
     private fun observeViewModel() {
+        // Unified controls observer (enables/disables buttons)
+        viewModel.uiControls.observe(viewLifecycleOwner) { state ->
+            binding.speakButton.isEnabled = state.speakEnabled
+            binding.stopButton.isEnabled = state.stopEnabled
+            binding.newRecordingButton.visibility = if (state.newRecordingEnabled) View.VISIBLE else View.GONE
+            binding.newRecordingButton.isEnabled = state.newRecordingEnabled
+            binding.clearButton.isEnabled = state.clearEnabled
+        }
+
+        // Speak button label + spinner logic driven by phase + speaking
+        val updateSpeakVisuals = {
+            val speaking = viewModel.isSpeaking.value == true
+            val listening = viewModel.sttIsListening.value == true
+            val phase = viewModel.generationPhase.value ?: GenerationPhase.IDLE
+            val generating = phase != GenerationPhase.IDLE
+
+            // Spinner removed completely
+            binding.progressBar.visibility = View.GONE
+
+            when {
+                listening -> {
+                    // STT listening (highest priority visual)
+                    binding.speakButton.text = "Recording Agent Listening"
+                    binding.speakButton.setTextColor(0xFFF44336.toInt()) // red 500
+                }
+                speaking && generating -> {
+                    // TTS speaking while model is generating remainder
+                    binding.speakButton.text = "Agent speaking + Generating next response"
+                    binding.speakButton.setTextColor(0xFF42A5F5.toInt()) // light blue 500
+                }
+                speaking -> {
+                    // TTS speaking (no generation)
+                    binding.speakButton.text = "Agent speaking"
+                    binding.speakButton.setTextColor(0xFFFFFFFF.toInt()) // white
+                }
+                generating -> {
+                    // LLM generating (not speaking)
+                    binding.speakButton.text = "Response gets Generated"
+                    binding.speakButton.setTextColor(0xFF4CAF50.toInt()) // green 500
+                }
+                else -> {
+                    // Idle
+                    binding.speakButton.text = getString(R.string.start_conversation) // "Tap to Speak"
+                    binding.speakButton.setTextColor(0xFFFFFFFF.toInt()) // white
+                }
+            }
+        }
+
+        viewModel.generationPhase.observe(viewLifecycleOwner) { updateSpeakVisuals() }
+        viewModel.isSpeaking.observe(viewLifecycleOwner) { updateSpeakVisuals() }
+        viewModel.sttIsListening.observe(viewLifecycleOwner) { updateSpeakVisuals() }
+
         viewModel.currentSpeaking.observe(viewLifecycleOwner) { speaking ->
             val adapter = binding.conversationRecyclerView.adapter as ConversationAdapter
             val prev = adapter.currentSpeaking?.entryIndex
@@ -225,19 +256,9 @@ class FirstFragment : Fragment() {
             if (prev != null) adapter.notifyItemChanged(prev)
             val now = speaking?.entryIndex
             if (now != null) adapter.notifyItemChanged(now)
-
-            binding.newRecordingButton.visibility = if (speaking != null) View.VISIBLE else View.GONE
-            updateButtonStates()
         }
 
-        viewModel.turnFinishedEvent.observe(viewLifecycleOwner) { event ->
-            event.getContentIfNotHandled()?.let {
-                Log.d(TAG, "[LIFECYCLE] Turn finished event received. Unlocking UI.")
-                setLoading(false)
-            }
-        }
-
-        // AUTO-RECORD after TTS
+        // Auto re-record after TTS, only if settings overlay is closed
         viewModel.ttsQueueFinishedEvent.observe(viewLifecycleOwner) { event ->
             event.getContentIfNotHandled()?.let {
                 if (autoContinue && !isSettingsVisible()) {
@@ -247,7 +268,6 @@ class FirstFragment : Fragment() {
             }
         }
 
-        // Restart STT quickly if NO_MATCH occurs within the listen window
         viewModel.sttNoMatch.observe(viewLifecycleOwner) { event ->
             event.getContentIfNotHandled()?.let {
                 val remain = remainingListenWindowMs()
@@ -260,26 +280,6 @@ class FirstFragment : Fragment() {
                 }
             }
         }
-
-        viewModel.errorMessage.observe(viewLifecycleOwner) { msg ->
-            if (!msg.isNullOrBlank()) {
-                MaterialAlertDialogBuilder(requireContext())
-                    .setTitle("LLM error")
-                    .setMessage(msg.take(700))
-                    .setPositiveButton("OK", null)
-                    .show()
-            }
-        }
-
-        viewModel.sttIsListening.observe(viewLifecycleOwner) { isListening ->
-            binding.speakButton.text = if (isListening) {
-                getString(R.string.status_listening)
-            } else {
-                computeSpeakButtonLabel()
-            }
-            setLoading(false)
-            updateButtonStates()
-        }
     }
 
     private fun setupUI() {
@@ -287,7 +287,6 @@ class FirstFragment : Fragment() {
 
         binding.speakButton.setOnClickListener {
             autoContinue = true
-            // If current model isn't usable (missing key), only show warning dialog (do not auto-open settings)
             if (!ensureKeyAvailableForModelOrShow(currentModelName)) return@setOnClickListener
             startListenWindow("Manual Speak")
             handleStartListeningRequest(delayMs = 0L)
@@ -305,9 +304,9 @@ class FirstFragment : Fragment() {
             listenWindowDeadlineMs = 0L
             listenRestartCount = 0
             viewModel.stopAll()
-            setLoading(false)
         }
 
+        val prefs = requireContext().getSharedPreferences("ai_prefs", Context.MODE_PRIVATE)
         val radios = listOf(
             binding.radioGeminiFlash to ("gemini-2.5-flash" to null),
             binding.radioGeminiPro to ("gemini-2.5-pro" to null),
@@ -335,25 +334,20 @@ class FirstFragment : Fragment() {
                 selectRadio(rb)
                 currentModelName = model
                 viewModel.setCurrentModel(model)
-                prefs.edit().putString(PREF_SELECTED_MODEL, currentModelName).apply()
+                prefs.edit().putString("selected_model", currentModelName).apply()
                 effort?.let { prefs.edit().putString("gpt5_effort", it).apply() }
                 Toast.makeText(context, "Model: ${rb.text}", Toast.LENGTH_SHORT).show()
                 viewModel.addSystemEntry("Model switched to ${rb.text}")
-                binding.speakButton.text = computeSpeakButtonLabel()
             }
         }
     }
 
     private fun handleStartListeningRequest(delayMs: Long = STT_GRACE_MS_AFTER_TTS) {
-        if (ContextCompat.checkSelfPermission(requireContext(), Manifest.permission.RECORD_AUDIO)
-            != PackageManager.PERMISSION_GRANTED
-        ) {
+        if (ContextCompat.checkSelfPermission(requireContext(), Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
             pendingStartAfterPermission = true
             requestPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
             return
         }
-        val remain = remainingListenWindowMs()
-        Log.d(TAG, "[AutoContinue] Handling start listening request. Delay=${delayMs}ms, listenWindowRemaining=${remain}ms, autoContinue=$autoContinue")
         view?.postDelayed({ startListeningNow() }, delayMs)
     }
 
@@ -368,6 +362,7 @@ class FirstFragment : Fragment() {
     }
 
     private fun ensureKeyAvailableForModelOrShow(modelName: String): Boolean {
+        val prefs = requireContext().getSharedPreferences("ai_prefs", Context.MODE_PRIVATE)
         val isGpt = modelName.startsWith("gpt-", ignoreCase = true)
         val key = if (isGpt) prefs.getString("openai_key", "").orEmpty() else prefs.getString("gemini_key", "").orEmpty()
         if (key.isNotBlank()) return true
@@ -381,6 +376,7 @@ class FirstFragment : Fragment() {
     }
 
     private fun updateModelOptionsVisibility() {
+        val prefs = requireContext().getSharedPreferences("ai_prefs", Context.MODE_PRIVATE)
         val geminiKey = prefs.getString("gemini_key", "").orEmpty().isNotBlank()
         val openaiKey = prefs.getString("openai_key", "").orEmpty().isNotBlank()
 
@@ -393,53 +389,10 @@ class FirstFragment : Fragment() {
         binding.radioGpt5Low.visibility = gptVisibility
         binding.radioGpt5MiniHigh.visibility = gptVisibility
         binding.radioGpt5MiniMedium.visibility = gptVisibility
-
-        val currentIsOpenAI = currentModelName.startsWith("gpt-", ignoreCase = true)
-        val currentIsGemini = currentModelName.startsWith("gemini", ignoreCase = true)
-
-        if (currentIsOpenAI) {
-            val migrated = migrateLegacyOpenAiModelName(currentModelName)
-            if (migrated != currentModelName) {
-                Log.i(TAG, "[MODEL] Migrated selection to $migrated")
-                currentModelName = migrated
-                viewModel.setCurrentModel(migrated)
-                prefs.edit().putString(PREF_SELECTED_MODEL, migrated).apply()
-            }
-        }
-
-        val selectionInvalid = (currentIsOpenAI && !openaiKey) || (currentIsGemini && !geminiKey)
-
-        if (selectionInvalid) {
-            val newModel = when {
-                geminiKey -> "gemini-2.5-pro"
-                openaiKey -> "gpt-5"
-                else -> null
-            }
-            if (newModel != null) {
-                Log.i(TAG, "[MODEL] Adjusting selection to $newModel due to key availability")
-                currentModelName = newModel
-                viewModel.setCurrentModel(newModel)
-                prefs.edit().putString(PREF_SELECTED_MODEL, currentModelName).apply()
-            } else {
-                Log.w(TAG, "[MODEL] No API keys available. Hiding all model options.")
-                binding.radioGeminiFlash.isChecked = false
-                binding.radioGeminiPro.isChecked = false
-                binding.radioGpt5High.isChecked = false
-                binding.radioGpt5Medium.isChecked = false
-                binding.radioGpt5Low.isChecked = false
-                binding.radioGpt5MiniHigh.isChecked = false
-                binding.radioGpt5MiniMedium.isChecked = false
-            }
-        }
-
-        syncRadioSelectionToCurrentModel()
-        ensureRadioSelectedIfVisible()
-        refreshGeminiKeyHelpLinkVisibility()
-        updateButtonStates()
-        binding.speakButton.text = computeSpeakButtonLabel()
     }
 
     private fun syncRadioSelectionToCurrentModel() {
+        val prefs = requireContext().getSharedPreferences("ai_prefs", Context.MODE_PRIVATE)
         val model = currentModelName.lowercase()
         val geminiKeyPresent = prefs.getString("gemini_key", "").orEmpty().isNotBlank()
         val openaiKeyPresent = prefs.getString("openai_key", "").orEmpty().isNotBlank()
@@ -480,29 +433,29 @@ class FirstFragment : Fragment() {
 
     private fun ensureRadioSelectedIfVisible() {
         val anyChecked = listOf(
-            binding.radioGeminiFlash,
-            binding.radioGeminiPro,
-            binding.radioGpt5High,
-            binding.radioGpt5Medium,
-            binding.radioGpt5Low,
-            binding.radioGpt5MiniHigh,
-            binding.radioGpt5MiniMedium
+            binding.radioGeminiFlash, binding.radioGeminiPro,
+            binding.radioGpt5High, binding.radioGpt5Medium, binding.radioGpt5Low,
+            binding.radioGpt5MiniHigh, binding.radioGpt5MiniMedium
         ).any { it.visibility == View.VISIBLE && it.isChecked }
         if (anyChecked) return
 
+        val prefs = requireContext().getSharedPreferences("ai_prefs", Context.MODE_PRIVATE)
         when {
             currentModelName.equals("gemini-2.5-flash", true)
                     && binding.radioGeminiFlash.visibility == View.VISIBLE -> binding.radioGeminiFlash.isChecked = true
+
             currentModelName.startsWith("gemini", true)
                     && binding.radioGeminiPro.visibility == View.VISIBLE -> binding.radioGeminiPro.isChecked = true
-            currentModelName.equals("gpt-5", true) -> {
+
+            currentModelName.equals("gpt-5", true) && binding.radioGpt5Low.visibility == View.VISIBLE -> {
                 val effort = prefs.getString("gpt5_effort", "low")?.lowercase() ?: "low"
                 when (effort) {
-                    "high" -> if (binding.radioGpt5High.visibility == View.VISIBLE) binding.radioGpt5High.isChecked = true
-                    "medium" -> if (binding.radioGpt5Medium.visibility == View.VISIBLE) binding.radioGpt5Medium.isChecked = true
-                    else -> if (binding.radioGpt5Low.visibility == View.VISIBLE) binding.radioGpt5Low.isChecked = true
+                    "high" -> binding.radioGpt5High.isChecked = true
+                    "medium" -> binding.radioGpt5Medium.isChecked = true
+                    else -> binding.radioGpt5Low.isChecked = true
                 }
             }
+
             currentModelName.equals("gpt-5-mini", true) -> {
                 val effort = prefs.getString("gpt5_effort", "medium")?.lowercase() ?: "medium"
                 when (effort) {
@@ -513,62 +466,26 @@ class FirstFragment : Fragment() {
         }
     }
 
-    private fun updateButtonStates() {
-        val engineActive = viewModel.isEngineActive()
-        val isSpeaking = viewModel.isSpeaking.value == true
-        val isListening = viewModel.sttIsListening.value == true
-        binding.stopButton.isEnabled = isSpeaking || isListening || engineActive
-        binding.newRecordingButton.isEnabled = isSpeaking
-        binding.speakButton.isEnabled = !isListening && !engineActive && !isSpeaking
-        binding.clearButton.isEnabled = !isListening && !engineActive
-    }
-
-    private fun setLoading(isLoading: Boolean) {
-        val engineActive = isLoading || viewModel.isEngineActive()
-        val isListening = viewModel.sttIsListening.value == true
-        binding.progressBar.visibility = if (engineActive && !isListening) View.VISIBLE else View.GONE
-
-        binding.radioGeminiFlash.isEnabled = !engineActive
-        binding.radioGeminiPro.isEnabled = !engineActive
-        binding.radioGpt5High.isEnabled = !engineActive
-        binding.radioGpt5Medium.isEnabled = !engineActive
-        binding.radioGpt5Low.isEnabled = !engineActive
-        binding.radioGpt5MiniHigh.isEnabled = !engineActive
-        binding.radioGpt5MiniMedium.isEnabled = !engineActive
-        binding.geminiApiKeyInput.isEnabled = !engineActive
-        binding.openaiApiKeyInput.isEnabled = !engineActive
-        updateButtonStates()
-    }
-
-    override fun onResume() {
-        super.onResume()
-        Log.i(TAG, "[LIFECYCLE] onResume - checking TTS resume")
-        binding.speakButton.text = computeSpeakButtonLabel()
-        view?.postDelayed({
-            viewModel.checkAndResumeTts()
-        }, 300)
-    }
-
-    override fun onDestroyView() {
-        super.onDestroyView()
-        Log.i(TAG, "[LIFECYCLE] onDestroyView")
-        _binding = null
+    // PUBLIC: called by MainActivity (gear icon).
+    fun toggleSettingsVisibility(forceShow: Boolean = false) {
+        val visible = binding.settingsContainerScrollView.visibility == View.VISIBLE
+        val show = forceShow || !visible
+        binding.settingsContainerScrollView.visibility = if (show) View.VISIBLE else View.GONE
+        binding.conversationRecyclerView.visibility = if (show) View.GONE else View.VISIBLE
+        binding.bottomBar.visibility = if (show) View.GONE else View.VISIBLE
+        viewModel.setSettingsVisible(show)
     }
 
     // Helpers
     private fun startListenWindow(reason: String) {
-        val secs = prefs.getInt(PREF_LISTEN_SECONDS_KEY, 5).coerceIn(1, 120)
+        val prefs = requireContext().getSharedPreferences("ai_prefs", Context.MODE_PRIVATE)
+        val secs = prefs.getInt("listen_seconds", 5).coerceIn(1, 120)
         val now = SystemClock.elapsedRealtime()
         listenWindowDeadlineMs = now + secs * 1000L
         listenRestartCount = 0
-        Log.i(TAG, "[ListenWindow] Started ($reason): seconds=$secs, deadline=$listenWindowDeadlineMs now=$now")
     }
-
-    private fun remainingListenWindowMs(): Long {
-        val now = SystemClock.elapsedRealtime()
-        return (listenWindowDeadlineMs - now).coerceAtLeast(0L)
-    }
-
+    private fun remainingListenWindowMs(): Long =
+        (listenWindowDeadlineMs - SystemClock.elapsedRealtime()).coerceAtLeast(0L)
     private fun isListenWindowActive(): Boolean = SystemClock.elapsedRealtime() < listenWindowDeadlineMs
     private fun isSettingsVisible(): Boolean = binding.settingsContainerScrollView.visibility == View.VISIBLE
 
@@ -589,19 +506,18 @@ class FirstFragment : Fragment() {
     }
 
     private fun refreshGeminiKeyHelpLinkVisibility() {
-        val empty = binding.geminiApiKeyInput.text?.toString()?.trim().isNullOrEmpty()
+        val prefs = requireContext().getSharedPreferences("ai_prefs", Context.MODE_PRIVATE)
+        val empty = prefs.getString("gemini_key", "").orEmpty().isBlank()
         binding.geminiApiKeyHelpLink.visibility = if (empty) View.VISIBLE else View.GONE
     }
 
-    // PUBLIC: called by MainActivity (gear icon). Hides/shows main UI under settings.
-    fun toggleSettingsVisibility(forceShow: Boolean = false) {
-        val visible = binding.settingsContainerScrollView.visibility == View.VISIBLE
-        val show = forceShow || !visible
-        binding.settingsContainerScrollView.visibility = if (show) View.VISIBLE else View.GONE
-        binding.conversationRecyclerView.visibility = if (show) View.GONE else View.VISIBLE
-        binding.bottomBar.visibility = if (show) View.GONE else View.VISIBLE
-        userToggledSettings = true
+    override fun onResume() {
+        super.onResume()
+        view?.postDelayed({ viewModel.checkAndResumeTts() }, 300)
     }
 
-    private fun computeSpeakButtonLabel(): String = getString(R.string.start_conversation)
+    override fun onDestroyView() {
+        super.onDestroyView()
+        _binding = null
+    }
 }

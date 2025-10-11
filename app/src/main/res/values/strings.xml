@@ -48,7 +48,7 @@
     <string name="lorem_ipsum">Lorem ipsum dolor sit amet, consectetur adipiscing elit.</string>
 
     <string name="faster_first_label">Faster First Response</string>
-    <string name="faster_first_desc">To speed up the initial response, the first sentence uses a non‑thinking pass and the rest uses deeper thinking. This helps balance speed and quality.</string>
+    <string name="faster_first_desc">Using this setting results in the first sentence being generated with the same model you choose, but only one sentence is generated, which reduces generation time and thinking is disabled for this first sentence. This often results in slightly worse quality responses, especially for science and math questions.</string>
 
     <!-- NEW: System Prompt Strings -->
     <string name="system_prompt_label">System Prompt</string>

@@ -99,8 +99,8 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
     // Track last user input for combining when interrupted
     private var lastUserInput: String? = null
 
-    // Pending combined input (used when user interrupts generation)
-    private var pendingCombinedInput: String? = null
+    // Track if user started speaking during generation (to abort LLM)
+    private var userInterruptedDuringGeneration = false
 
     // SpeechRecognizer
     private lateinit var speechRecognizer: SpeechRecognizer
@@ -277,23 +277,42 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
         }
         speechRecognizer = SpeechRecognizer.createSpeechRecognizer(getApplication())
         speechRecognizer.setRecognitionListener(object : RecognitionListener {
-            override fun onReadyForSpeech(params: Bundle?) { _sttIsListening.postValue(true) }
+            override fun onReadyForSpeech(params: Bundle?) {
+                _sttIsListening.postValue(true)
+            }
+
+            override fun onBeginningOfSpeech() {
+                Log.i(TAG, "[STT] onBeginningOfSpeech - user started speaking")
+
+                // If LLM is generating (not yet delivered), abort it immediately
+                val generating = engine.isActive() && _llmDelivered.value != true
+                if (generating) {
+                    Log.i(TAG, "[STT] User interrupted generation - aborting LLM")
+                    userInterruptedDuringGeneration = true
+                    injectDraftIfActive()
+                    abortEngine()
+                }
+            }
+
             override fun onResults(results: Bundle?) {
                 _sttIsListening.postValue(false)
                 val matches = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
                 if (!matches.isNullOrEmpty() && matches[0].isNotBlank()) {
                     handleSttResult(matches[0])
                 }
+                userInterruptedDuringGeneration = false
             }
+
             override fun onError(error: Int) {
                 _sttIsListening.postValue(false)
+                userInterruptedDuringGeneration = false
                 if (error == SpeechRecognizer.ERROR_NO_MATCH) {
                     _sttNoMatch.postValue(Event(Unit))
                 } else {
                     _sttError.postValue(Event("STT Error (code:$error)"))
                 }
             }
-            override fun onBeginningOfSpeech() {}
+
             override fun onRmsChanged(rmsdB: Float) {}
             override fun onBufferReceived(buffer: ByteArray?) {}
             override fun onEndOfSpeech() {}
@@ -303,7 +322,6 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
     }
 
     private fun handleSttResult(newInput: String) {
-        val phase = _generationPhase.value ?: GenerationPhase.IDLE
         val delivered = _llmDelivered.value == true
 
         // If LLM has delivered and TTS is speaking, ignore the speech
@@ -313,9 +331,9 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
             return
         }
 
-        // If generation is active (before delivery), combine with previous input
-        if (engine.isActive() && !delivered) {
-            Log.i(TAG, "[STT] Interrupting generation - combining inputs")
+        // If user interrupted during generation, combine inputs
+        if (userInterruptedDuringGeneration) {
+            Log.i(TAG, "[STT] Processing interrupted generation - combining inputs")
             val oldInput = lastUserInput ?: ""
             val combined = if (oldInput.isNotBlank()) {
                 "$oldInput $newInput"
@@ -323,11 +341,6 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
                 newInput
             }
 
-            // Inject draft and abort
-            injectDraftIfActive()
-            abortEngine()
-
-            // Add combined entry
             addUserEntry(combined)
             lastUserInput = combined
             _llmDelivered.postValue(false)
@@ -346,11 +359,6 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
         if (_llmDelivered.value == true && _isSpeaking.value == true) {
             Log.i(TAG, "[STT] Blocked - LLM delivered, TTS speaking. Use buttons to interrupt.")
             return
-        }
-
-        if (engine.isActive()) {
-            // Will handle interruption in handleSttResult
-            Log.i(TAG, "[STT] Starting during generation - will combine on result")
         }
 
         val listenSeconds = prefs.getInt("listen_seconds", 5).coerceIn(1, 120)
@@ -374,6 +382,7 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
         if (_sttIsListening.value == true) {
             speechRecognizer.stopListening()
             _sttIsListening.postValue(false)
+            userInterruptedDuringGeneration = false
         }
     }
 
@@ -391,6 +400,7 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
         currentAssistantEntryIndex = null
         _engineActive.postValue(true)
         _llmDelivered.postValue(false)
+        userInterruptedDuringGeneration = false
         _generationPhase.postValue(
             if (fasterFirstEnabled) GenerationPhase.GENERATING_FIRST
             else GenerationPhase.SINGLE_SHOT_GENERATING
@@ -429,7 +439,7 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
         currentAssistantEntryIndex = null
         queuedKeys.clear()
         lastUserInput = null
-        pendingCombinedInput = null
+        userInterruptedDuringGeneration = false
         postList()
         _generationPhase.postValue(GenerationPhase.IDLE)
         _llmDelivered.postValue(false)

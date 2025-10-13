@@ -262,6 +262,22 @@ class FirstFragment : Fragment() {
             if (now != null) adapter.notifyItemChanged(now)
         }
 
+        // When generation starts, auto-start STT listening (to detect interruptions)
+        viewModel.generationPhase.observe(viewLifecycleOwner) { phase ->
+            val generating = phase != GenerationPhase.IDLE
+            val alreadyListening = viewModel.sttIsListening.value == true
+
+            if (generating && !alreadyListening && !isSettingsVisible()) {
+                Log.i(TAG, "[AutoSTT] Generation started - auto-starting STT for interruption detection")
+                view?.postDelayed({
+                    if (viewModel.generationPhase.value != GenerationPhase.IDLE
+                        && viewModel.sttIsListening.value != true) {
+                        handleStartListeningRequest(delayMs = 0L)
+                    }
+                }, 100)
+            }
+        }
+
         // Auto re-record after TTS, only if settings overlay is closed
         viewModel.ttsQueueFinishedEvent.observe(viewLifecycleOwner) { event ->
             event.getContentIfNotHandled()?.let {

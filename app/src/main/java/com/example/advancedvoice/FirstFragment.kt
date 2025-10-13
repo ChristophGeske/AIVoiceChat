@@ -18,10 +18,15 @@ import androidx.fragment.app.Fragment
 import androidx.fragment.app.viewModels
 import com.example.advancedvoice.databinding.FragmentFirstBinding
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 class FirstFragment : Fragment() {
 
     private val TAG = "FirstFragment"
+
+    private fun now(): String = SimpleDateFormat("HH:mm:ss.SSS", Locale.US).format(Date())
 
     private var _binding: FragmentFirstBinding? = null
     private val binding get() = _binding!!
@@ -38,10 +43,13 @@ class FirstFragment : Fragment() {
     private var listenWindowDeadlineMs: Long = 0L
     private var listenRestartCount: Int = 0
 
+    // Delay auto-start STT to avoid immediate sensitivity
+    private val AUTO_STT_DELAY_MS = 800L
+
     // Permission launcher
     private val requestPermissionLauncher =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { isGranted ->
-            Log.i(TAG, "[PERM] RECORD_AUDIO granted=$isGranted pending=$pendingStartAfterPermission")
+            Log.i(TAG, "[${now()}][PERM] RECORD_AUDIO granted=$isGranted")
             if (isGranted && pendingStartAfterPermission) {
                 pendingStartAfterPermission = false
                 handleStartListeningRequest()
@@ -149,7 +157,7 @@ class FirstFragment : Fragment() {
                 currentModelName = migrated
                 viewModel.setCurrentModel(migrated)
                 prefs.edit().putString("selected_model", migrated).apply()
-                Log.i(TAG, "[MODEL] Migrated selection to $migrated after OpenAI key entry")
+                Log.i(TAG, "[MODEL] Migrated selection to $migrated")
             }
             updateModelOptionsVisibility()
             binding.root.post {
@@ -164,7 +172,6 @@ class FirstFragment : Fragment() {
             prefs.edit().putString("system_prompt", editable?.toString().orEmpty()).apply()
         }
 
-        // Reset button handler
         binding.resetSystemPromptButton.setOnClickListener {
             val defaultPrompt = """
                 You are a helpful assistant. Answer the user's request in clear, complete sentences.
@@ -207,7 +214,6 @@ class FirstFragment : Fragment() {
     }
 
     private fun observeViewModel() {
-        // Unified controls observer (enables/disables buttons)
         viewModel.uiControls.observe(viewLifecycleOwner) { state ->
             binding.speakButton.isEnabled = state.speakEnabled
             binding.stopButton.isEnabled = state.stopEnabled
@@ -216,7 +222,6 @@ class FirstFragment : Fragment() {
             binding.clearButton.isEnabled = state.clearEnabled
         }
 
-        // Speak button label logic
         val updateSpeakVisuals = {
             val speaking = viewModel.isSpeaking.value == true
             val listening = viewModel.sttIsListening.value == true
@@ -228,19 +233,19 @@ class FirstFragment : Fragment() {
             when {
                 listening -> {
                     binding.speakButton.text = "Recording - Agent Listening"
-                    binding.speakButton.setTextColor(0xFFF44336.toInt()) // red
+                    binding.speakButton.setTextColor(0xFFF44336.toInt())
                 }
                 speaking && generating -> {
                     binding.speakButton.text = "Agent speaking + Generating next response"
-                    binding.speakButton.setTextColor(0xFF42A5F5.toInt()) // light blue
+                    binding.speakButton.setTextColor(0xFF42A5F5.toInt())
                 }
                 speaking -> {
                     binding.speakButton.text = "Agent speaking"
-                    binding.speakButton.setTextColor(0xFFFFFFFF.toInt()) // white
+                    binding.speakButton.setTextColor(0xFFFFFFFF.toInt())
                 }
                 generating -> {
                     binding.speakButton.text = "Response gets Generated"
-                    binding.speakButton.setTextColor(0xFF4CAF50.toInt()) // green
+                    binding.speakButton.setTextColor(0xFF4CAF50.toInt())
                 }
                 else -> {
                     binding.speakButton.text = getString(R.string.start_conversation)
@@ -262,26 +267,27 @@ class FirstFragment : Fragment() {
             if (now != null) adapter.notifyItemChanged(now)
         }
 
-        // When generation starts, auto-start STT listening (to detect interruptions)
+        // Auto-start STT when generation starts (with delay to avoid immediate triggers)
         viewModel.generationPhase.observe(viewLifecycleOwner) { phase ->
             val generating = phase != GenerationPhase.IDLE
             val alreadyListening = viewModel.sttIsListening.value == true
 
             if (generating && !alreadyListening && !isSettingsVisible()) {
-                Log.i(TAG, "[AutoSTT] Generation started - auto-starting STT for interruption detection")
+                Log.i(TAG, "[${now()}][AutoSTT] Generation started - scheduling STT start in ${AUTO_STT_DELAY_MS}ms")
                 view?.postDelayed({
                     if (viewModel.generationPhase.value != GenerationPhase.IDLE
                         && viewModel.sttIsListening.value != true) {
+                        Log.i(TAG, "[${now()}][AutoSTT] Starting STT for interruption detection")
                         handleStartListeningRequest(delayMs = 0L)
                     }
-                }, 100)
+                }, AUTO_STT_DELAY_MS)
             }
         }
 
-        // Auto re-record after TTS, only if settings overlay is closed
         viewModel.ttsQueueFinishedEvent.observe(viewLifecycleOwner) { event ->
             event.getContentIfNotHandled()?.let {
                 if (autoContinue && !isSettingsVisible()) {
+                    Log.i(TAG, "[${now()}][AutoContinue] TTS finished - starting listen window")
                     startListenWindow("TTS")
                     handleStartListeningRequest(delayMs = STT_GRACE_MS_AFTER_TTS)
                 }
@@ -293,19 +299,23 @@ class FirstFragment : Fragment() {
                 val remain = remainingListenWindowMs()
                 if (autoContinue && isListenWindowActive() && !isSettingsVisible()) {
                     listenRestartCount += 1
-                    Log.w(TAG, "[ListenWindow] NO_MATCH within window. Restarting STT. restartCount=$listenRestartCount remaining=${remain}ms")
+                    Log.w(TAG, "[${now()}][ListenWindow] NO_MATCH within window. Restarting STT (count=$listenRestartCount, remaining=${remain}ms)")
                     handleStartListeningRequest(delayMs = 50L)
                 } else {
-                    Log.i(TAG, "[ListenWindow] NO_MATCH but window expired or autoContinue=false. remaining=${remain}ms autoContinue=$autoContinue")
+                    Log.i(TAG, "[${now()}][ListenWindow] NO_MATCH but window expired (remaining=${remain}ms, autoContinue=$autoContinue)")
                 }
             }
         }
     }
 
     private fun setupUI() {
-        binding.clearButton.setOnClickListener { viewModel.clearConversation() }
+        binding.clearButton.setOnClickListener {
+            Log.i(TAG, "[${now()}][UI] Clear button pressed")
+            viewModel.clearConversation()
+        }
 
         binding.speakButton.setOnClickListener {
+            Log.i(TAG, "[${now()}][UI] Speak button pressed")
             autoContinue = true
             if (!ensureKeyAvailableForModelOrShow(currentModelName)) return@setOnClickListener
             startListenWindow("Manual Speak")
@@ -313,6 +323,7 @@ class FirstFragment : Fragment() {
         }
 
         binding.newRecordingButton.setOnClickListener {
+            Log.i(TAG, "[${now()}][UI] New Recording button pressed")
             autoContinue = true
             startListenWindow("New Recording")
             viewModel.stopTts()
@@ -320,6 +331,7 @@ class FirstFragment : Fragment() {
         }
 
         binding.stopButton.setOnClickListener {
+            Log.i(TAG, "[${now()}][UI] Stop button pressed")
             autoContinue = false
             listenWindowDeadlineMs = 0L
             listenRestartCount = 0
@@ -372,14 +384,13 @@ class FirstFragment : Fragment() {
     }
 
     private fun startListeningNow() {
-        // Block if LLM delivered and TTS is speaking
         if (viewModel.llmDelivered.value == true && viewModel.isSpeaking.value == true) {
-            Log.w(TAG, "[STT] Blocked - LLM delivered, TTS speaking")
+            Log.w(TAG, "[${now()}][STT] Blocked - LLM delivered, TTS speaking")
             return
         }
 
         if (!ensureKeyAvailableForModelOrShow(currentModelName)) return
-        Log.i(TAG, "[STT] Starting listening")
+        Log.i(TAG, "[${now()}][STT] Starting listening NOW")
         viewModel.startListening()
     }
 
@@ -503,10 +514,14 @@ class FirstFragment : Fragment() {
         val now = SystemClock.elapsedRealtime()
         listenWindowDeadlineMs = now + secs * 1000L
         listenRestartCount = 0
+        Log.d(TAG, "[${now()}][ListenWindow] Started: reason='$reason', duration=${secs}s")
     }
+
     private fun remainingListenWindowMs(): Long =
         (listenWindowDeadlineMs - SystemClock.elapsedRealtime()).coerceAtLeast(0L)
+
     private fun isListenWindowActive(): Boolean = SystemClock.elapsedRealtime() < listenWindowDeadlineMs
+
     private fun isSettingsVisible(): Boolean = binding.settingsContainerScrollView.visibility == View.VISIBLE
 
     private fun migrateLegacyOpenAiModelName(name: String): String {

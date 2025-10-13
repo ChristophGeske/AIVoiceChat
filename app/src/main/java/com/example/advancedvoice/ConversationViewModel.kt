@@ -18,7 +18,9 @@ import androidx.lifecycle.MutableLiveData
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.launch
 import okhttp3.OkHttpClient
+import java.text.SimpleDateFormat
 import java.util.ArrayDeque
+import java.util.Date
 import java.util.Locale
 import java.util.UUID
 import java.util.concurrent.TimeUnit
@@ -32,6 +34,9 @@ enum class GenerationPhase {
 
 class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpeech.OnInitListener {
     private val TAG = "ConversationVM"
+
+    // Timestamp helper for logs
+    private fun now(): String = SimpleDateFormat("HH:mm:ss.SSS", Locale.US).format(Date())
 
     // Conversation state
     private val entries = mutableListOf<ConversationEntry>()
@@ -99,8 +104,18 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
     // Track last user input for combining when interrupted
     private var lastUserInput: String? = null
 
+    // Track last user entry index for replacement (not addition)
+    private var lastUserEntryIndex: Int? = null
+
     // Track if user started speaking during generation (to abort LLM)
     private var userInterruptedDuringGeneration = false
+
+    // Debouncing: track last onBeginningOfSpeech time
+    private var lastBeginningOfSpeechMs: Long = 0L
+    private val MIN_SPEECH_INTERVAL_MS = 1000L  // 1 second minimum between speech starts
+
+    // Minimum input length to process (filter out noise)
+    private val MIN_INPUT_LENGTH = 8  // "okay" = 4, "what is" = 7, so 8 is reasonable
 
     // SpeechRecognizer
     private lateinit var speechRecognizer: SpeechRecognizer
@@ -131,7 +146,7 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
             viewModelScope.launch {
                 val wasCurrent = utteranceId == currentUtteranceId
                 if (!wasCurrent) {
-                    Log.w(TAG, "[TTS] onDone skipped - utteranceId mismatch (expected=$currentUtteranceId, got=$utteranceId)")
+                    Log.w(TAG, "[${now()}][TTS] onDone skipped - utteranceId mismatch")
                     return@launch
                 }
 
@@ -247,7 +262,7 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
     private var currentAssistantEntryIndex: Int? = null
 
     init {
-        Log.i(TAG, "[INIT] ViewModel created (hashCode=${this.hashCode()})")
+        Log.i(TAG, "[${now()}][INIT] ViewModel created (hashCode=${this.hashCode()})")
         tts = TextToSpeech(getApplication(), this)
         setupSpeechRecognizer()
         setupControlsMediator()
@@ -279,24 +294,38 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
         speechRecognizer.setRecognitionListener(object : RecognitionListener {
             override fun onReadyForSpeech(params: Bundle?) {
                 _sttIsListening.postValue(true)
+                Log.d(TAG, "[${now()}][STT] onReadyForSpeech")
             }
 
             override fun onBeginningOfSpeech() {
-                Log.i(TAG, "[STT] onBeginningOfSpeech - user started speaking")
+                val now = SystemClock.elapsedRealtime()
+                val timeSinceLastMs = now - lastBeginningOfSpeechMs
 
-                // If LLM is generating (not yet delivered), abort it immediately
+                Log.i(TAG, "[${now()}][STT] onBeginningOfSpeech (timeSinceLast=${timeSinceLastMs}ms)")
+
+                // Debounce: ignore if too soon after last trigger
+                if (timeSinceLastMs < MIN_SPEECH_INTERVAL_MS) {
+                    Log.w(TAG, "[${now()}][STT] DEBOUNCED - ignoring (too soon: ${timeSinceLastMs}ms < ${MIN_SPEECH_INTERVAL_MS}ms)")
+                    return
+                }
+
+                lastBeginningOfSpeechMs = now
+
+                // If LLM is generating (not yet delivered), abort it silently
                 val generating = engine.isActive() && _llmDelivered.value != true
                 if (generating) {
-                    Log.i(TAG, "[STT] User interrupted generation - aborting LLM")
+                    Log.i(TAG, "[${now()}][STT] User interrupted generation - aborting LLM silently")
                     userInterruptedDuringGeneration = true
                     injectDraftIfActive()
-                    abortEngine()
+                    abortEngineSilently()
                 }
             }
 
             override fun onResults(results: Bundle?) {
                 _sttIsListening.postValue(false)
                 val matches = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+                Log.d(TAG, "[${now()}][STT] onResults: ${matches?.firstOrNull()?.take(50)}")
+
                 if (!matches.isNullOrEmpty() && matches[0].isNotBlank()) {
                     handleSttResult(matches[0])
                 }
@@ -306,60 +335,91 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
             override fun onError(error: Int) {
                 _sttIsListening.postValue(false)
                 userInterruptedDuringGeneration = false
+                val errorName = when(error) {
+                    SpeechRecognizer.ERROR_AUDIO -> "ERROR_AUDIO"
+                    SpeechRecognizer.ERROR_CLIENT -> "ERROR_CLIENT"
+                    SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> "ERROR_INSUFFICIENT_PERMISSIONS"
+                    SpeechRecognizer.ERROR_NETWORK -> "ERROR_NETWORK"
+                    SpeechRecognizer.ERROR_NETWORK_TIMEOUT -> "ERROR_NETWORK_TIMEOUT"
+                    SpeechRecognizer.ERROR_NO_MATCH -> "ERROR_NO_MATCH"
+                    SpeechRecognizer.ERROR_RECOGNIZER_BUSY -> "ERROR_RECOGNIZER_BUSY"
+                    SpeechRecognizer.ERROR_SERVER -> "ERROR_SERVER"
+                    SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> "ERROR_SPEECH_TIMEOUT"
+                    else -> "UNKNOWN_$error"
+                }
+                Log.w(TAG, "[${now()}][STT] onError: $errorName")
+
                 if (error == SpeechRecognizer.ERROR_NO_MATCH) {
                     _sttNoMatch.postValue(Event(Unit))
                 } else {
-                    _sttError.postValue(Event("STT Error (code:$error)"))
+                    _sttError.postValue(Event("STT Error: $errorName"))
                 }
             }
 
             override fun onRmsChanged(rmsdB: Float) {}
             override fun onBufferReceived(buffer: ByteArray?) {}
-            override fun onEndOfSpeech() {}
+            override fun onEndOfSpeech() {
+                Log.d(TAG, "[${now()}][STT] onEndOfSpeech")
+            }
             override fun onPartialResults(partialResults: Bundle?) {}
             override fun onEvent(eventType: Int, params: Bundle?) {}
         })
     }
 
     private fun handleSttResult(newInput: String) {
+        val trimmed = newInput.trim()
+
+        // Filter out very short inputs (likely noise or false triggers)
+        if (trimmed.length < MIN_INPUT_LENGTH) {
+            Log.w(TAG, "[${now()}][STT] FILTERED - input too short (${trimmed.length} < $MIN_INPUT_LENGTH): '$trimmed'")
+            addSystemEntry("Input too short - ignored: \"$trimmed\"")
+            return
+        }
+
         val delivered = _llmDelivered.value == true
 
         // If LLM has delivered and TTS is speaking, ignore the speech
         if (delivered && _isSpeaking.value == true) {
-            Log.i(TAG, "[STT] Ignoring speech - LLM delivered, TTS is speaking. User must use buttons.")
+            Log.i(TAG, "[${now()}][STT] Ignoring speech - LLM delivered, TTS is speaking")
             addSystemEntry("Speech detected but ignored. Please use Stop button to interrupt.")
             return
         }
 
-        // If user interrupted during generation, combine inputs
+        // If user interrupted during generation, combine and REPLACE the previous user entry
         if (userInterruptedDuringGeneration) {
-            Log.i(TAG, "[STT] Processing interrupted generation - combining inputs")
+            Log.i(TAG, "[${now()}][STT] Processing interrupted generation - combining and replacing")
             val oldInput = lastUserInput ?: ""
             val combined = if (oldInput.isNotBlank()) {
-                "$oldInput $newInput"
+                "$oldInput $trimmed"
             } else {
-                newInput
+                trimmed
             }
 
-            addUserEntry(combined)
+            Log.i(TAG, "[${now()}][STT] Combined: old='${oldInput.take(30)}' + new='${trimmed.take(30)}' = '${combined.take(50)}'")
+
+            // REPLACE the last user entry instead of adding new one
+            replaceLastUserEntry(combined)
             lastUserInput = combined
             _llmDelivered.postValue(false)
             startTurn(combined, currentModelName)
         } else {
-            // Normal case: start new turn
-            addUserEntry(newInput)
-            lastUserInput = newInput
+            // Normal case: add new user entry
+            Log.i(TAG, "[${now()}][STT] Normal input: '$trimmed'")
+            addUserEntry(trimmed)
+            lastUserInput = trimmed
             _llmDelivered.postValue(false)
-            startTurn(newInput, currentModelName)
+            startTurn(trimmed, currentModelName)
         }
     }
 
     fun startListening() {
         // Block if LLM has delivered and TTS is speaking
         if (_llmDelivered.value == true && _isSpeaking.value == true) {
-            Log.i(TAG, "[STT] Blocked - LLM delivered, TTS speaking. Use buttons to interrupt.")
+            Log.i(TAG, "[${now()}][STT] Blocked - LLM delivered, TTS speaking")
             return
         }
+
+        Log.i(TAG, "[${now()}][STT] startListening()")
 
         val listenSeconds = prefs.getInt("listen_seconds", 5).coerceIn(1, 120)
         val silenceMs = (listenSeconds * 1000L).coerceIn(1000L, 30000L)
@@ -380,6 +440,7 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
 
     fun stopListening() {
         if (_sttIsListening.value == true) {
+            Log.i(TAG, "[${now()}][STT] stopListening()")
             speechRecognizer.stopListening()
             _sttIsListening.postValue(false)
             userInterruptedDuringGeneration = false
@@ -415,11 +476,35 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
         _engineActive.postValue(false)
         _generationPhase.postValue(GenerationPhase.IDLE)
         _llmDelivered.postValue(false)
+        addSystemEntry("Generation interrupted.")
+    }
+
+    private fun abortEngineSilently() {
+        engine.abort()
+        _engineActive.postValue(false)
+        _generationPhase.postValue(GenerationPhase.IDLE)
+        _llmDelivered.postValue(false)
+        Log.i(TAG, "[${now()}][Engine] Silently aborted for user interruption")
     }
 
     fun addUserEntry(text: String) {
-        entries.add(ConversationEntry("You", listOf(text), isAssistant = false))
+        val entry = ConversationEntry("You", listOf(text), isAssistant = false)
+        entries.add(entry)
+        lastUserEntryIndex = entries.lastIndex
+        Log.d(TAG, "[${now()}][Conversation] Added user entry at index $lastUserEntryIndex: '${text.take(50)}...'")
         postList()
+    }
+
+    private fun replaceLastUserEntry(text: String) {
+        val idx = lastUserEntryIndex
+        if (idx != null && idx < entries.size && entries[idx].speaker == "You") {
+            entries[idx] = ConversationEntry("You", listOf(text), isAssistant = false)
+            Log.d(TAG, "[${now()}][Conversation] Replaced user entry at index $idx: '${text.take(50)}...'")
+            postList()
+        } else {
+            Log.w(TAG, "[${now()}][Conversation] Could not replace - adding new entry instead")
+            addUserEntry(text)
+        }
     }
 
     fun addSystemEntry(text: String) {
@@ -437,9 +522,11 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
         entries.clear()
         engine.clearHistory()
         currentAssistantEntryIndex = null
+        lastUserEntryIndex = null
         queuedKeys.clear()
         lastUserInput = null
         userInterruptedDuringGeneration = false
+        lastBeginningOfSpeechMs = 0L
         postList()
         _generationPhase.postValue(GenerationPhase.IDLE)
         _llmDelivered.postValue(false)

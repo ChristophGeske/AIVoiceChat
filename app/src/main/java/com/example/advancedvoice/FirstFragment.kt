@@ -52,7 +52,6 @@ class FirstFragment : Fragment() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        // Fragment does NOT inflate a menu; Activity owns the gear icon
     }
 
     override fun onCreateView(inflater: LayoutInflater, container: ViewGroup?, savedInstanceState: Bundle?): View {
@@ -165,6 +164,17 @@ class FirstFragment : Fragment() {
             prefs.edit().putString("system_prompt", editable?.toString().orEmpty()).apply()
         }
 
+        // Reset button handler
+        binding.resetSystemPromptButton.setOnClickListener {
+            val defaultPrompt = """
+                You are a helpful assistant. Answer the user's request in clear, complete sentences.
+                Do not use JSON or code fences unless explicitly requested.
+            """.trimIndent()
+            binding.systemPromptInput.setText(defaultPrompt)
+            prefs.edit().putString("system_prompt", defaultPrompt).apply()
+            Toast.makeText(context, "System prompt reset to default", Toast.LENGTH_SHORT).show()
+        }
+
         binding.systemPromptExtensionInput.visibility = View.GONE
 
         val savedMax = prefs.getInt("max_sentences", 4).coerceIn(1, 10)
@@ -206,41 +216,35 @@ class FirstFragment : Fragment() {
             binding.clearButton.isEnabled = state.clearEnabled
         }
 
-        // Speak button label + spinner logic driven by phase + speaking
+        // Speak button label logic
         val updateSpeakVisuals = {
             val speaking = viewModel.isSpeaking.value == true
             val listening = viewModel.sttIsListening.value == true
             val phase = viewModel.generationPhase.value ?: GenerationPhase.IDLE
             val generating = phase != GenerationPhase.IDLE
 
-            // Spinner removed completely
             binding.progressBar.visibility = View.GONE
 
             when {
                 listening -> {
-                    // STT listening (highest priority visual)
-                    binding.speakButton.text = "Recording Agent Listening"
-                    binding.speakButton.setTextColor(0xFFF44336.toInt()) // red 500
+                    binding.speakButton.text = "Recording - Agent Listening"
+                    binding.speakButton.setTextColor(0xFFF44336.toInt()) // red
                 }
                 speaking && generating -> {
-                    // TTS speaking while model is generating remainder
                     binding.speakButton.text = "Agent speaking + Generating next response"
-                    binding.speakButton.setTextColor(0xFF42A5F5.toInt()) // light blue 500
+                    binding.speakButton.setTextColor(0xFF42A5F5.toInt()) // light blue
                 }
                 speaking -> {
-                    // TTS speaking (no generation)
                     binding.speakButton.text = "Agent speaking"
                     binding.speakButton.setTextColor(0xFFFFFFFF.toInt()) // white
                 }
                 generating -> {
-                    // LLM generating (not speaking)
                     binding.speakButton.text = "Response gets Generated"
-                    binding.speakButton.setTextColor(0xFF4CAF50.toInt()) // green 500
+                    binding.speakButton.setTextColor(0xFF4CAF50.toInt()) // green
                 }
                 else -> {
-                    // Idle
-                    binding.speakButton.text = getString(R.string.start_conversation) // "Tap to Speak"
-                    binding.speakButton.setTextColor(0xFFFFFFFF.toInt()) // white
+                    binding.speakButton.text = getString(R.string.start_conversation)
+                    binding.speakButton.setTextColor(0xFFFFFFFF.toInt())
                 }
             }
         }
@@ -352,12 +356,14 @@ class FirstFragment : Fragment() {
     }
 
     private fun startListeningNow() {
-        if (viewModel.sttIsListening.value == true || viewModel.isEngineActive() || viewModel.isSpeaking.value == true) {
-            Log.w(TAG, "[AutoContinue] Skipping startListeningNow: isListening=${viewModel.sttIsListening.value}, isEngineActive=${viewModel.isEngineActive()}, isSpeaking=${viewModel.isSpeaking.value}")
+        // Block if LLM delivered and TTS is speaking
+        if (viewModel.llmDelivered.value == true && viewModel.isSpeaking.value == true) {
+            Log.w(TAG, "[STT] Blocked - LLM delivered, TTS speaking")
             return
         }
+
         if (!ensureKeyAvailableForModelOrShow(currentModelName)) return
-        Log.i(TAG, "[AutoContinue] Starting listening.")
+        Log.i(TAG, "[STT] Starting listening")
         viewModel.startListening()
     }
 
@@ -466,7 +472,6 @@ class FirstFragment : Fragment() {
         }
     }
 
-    // PUBLIC: called by MainActivity (gear icon).
     fun toggleSettingsVisibility(forceShow: Boolean = false) {
         val visible = binding.settingsContainerScrollView.visibility == View.VISIBLE
         val show = forceShow || !visible
@@ -476,7 +481,6 @@ class FirstFragment : Fragment() {
         viewModel.setSettingsVisible(show)
     }
 
-    // Helpers
     private fun startListenWindow(reason: String) {
         val prefs = requireContext().getSharedPreferences("ai_prefs", Context.MODE_PRIVATE)
         val secs = prefs.getInt("listen_seconds", 5).coerceIn(1, 120)

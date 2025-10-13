@@ -69,6 +69,10 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
     private val _generationPhase = MutableLiveData(GenerationPhase.IDLE)
     val generationPhase: LiveData<GenerationPhase> = _generationPhase
 
+    // Track if LLM has delivered response (for blocking STT during TTS-only phase)
+    private val _llmDelivered = MutableLiveData(false)
+    val llmDelivered: LiveData<Boolean> = _llmDelivered
+
     // Single derived state for UI controls
     private val _uiControls = MediatorLiveData<ControlsState>()
     val uiControls: LiveData<ControlsState> = _uiControls
@@ -91,6 +95,12 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
     // One-shot event for NO_MATCH
     private val _sttNoMatch = MutableLiveData<Event<Unit>>()
     val sttNoMatch: LiveData<Event<Unit>> = _sttNoMatch
+
+    // Track last user input for combining when interrupted
+    private var lastUserInput: String? = null
+
+    // Pending combined input (used when user interrupts generation)
+    private var pendingCombinedInput: String? = null
 
     // SpeechRecognizer
     private lateinit var speechRecognizer: SpeechRecognizer
@@ -178,6 +188,7 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
             onRemainingSentences = { sentences ->
                 // Phase 2 finished generating
                 _generationPhase.postValue(GenerationPhase.IDLE)
+                _llmDelivered.postValue(true)
                 val idx = currentAssistantEntryIndex ?: return@Callbacks
                 entries.getOrNull(idx)?.let { current ->
                     val ns = current.sentences.toMutableList()
@@ -198,6 +209,7 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
             },
             onFinalResponse = { fullText ->
                 _generationPhase.postValue(GenerationPhase.IDLE)
+                _llmDelivered.postValue(true)
                 val sentences = dedupeSentences(SentenceSplitter.splitIntoSentences(fullText))
                 val idx = currentAssistantEntryIndex
                 if (idx == null || entries.getOrNull(idx)?.isAssistant != true) {
@@ -270,8 +282,7 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
                 _sttIsListening.postValue(false)
                 val matches = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
                 if (!matches.isNullOrEmpty() && matches[0].isNotBlank()) {
-                    addUserEntry(matches[0])
-                    startTurn(matches[0], currentModelName)
+                    handleSttResult(matches[0])
                 }
             }
             override fun onError(error: Int) {
@@ -291,12 +302,56 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
         })
     }
 
-    fun startListening() {
-        if (engine.isActive()) {
+    private fun handleSttResult(newInput: String) {
+        val phase = _generationPhase.value ?: GenerationPhase.IDLE
+        val delivered = _llmDelivered.value == true
+
+        // If LLM has delivered and TTS is speaking, ignore the speech
+        if (delivered && _isSpeaking.value == true) {
+            Log.i(TAG, "[STT] Ignoring speech - LLM delivered, TTS is speaking. User must use buttons.")
+            addSystemEntry("Speech detected but ignored. Please use Stop button to interrupt.")
+            return
+        }
+
+        // If generation is active (before delivery), combine with previous input
+        if (engine.isActive() && !delivered) {
+            Log.i(TAG, "[STT] Interrupting generation - combining inputs")
+            val oldInput = lastUserInput ?: ""
+            val combined = if (oldInput.isNotBlank()) {
+                "$oldInput $newInput"
+            } else {
+                newInput
+            }
+
+            // Inject draft and abort
             injectDraftIfActive()
             abortEngine()
+
+            // Add combined entry
+            addUserEntry(combined)
+            lastUserInput = combined
+            _llmDelivered.postValue(false)
+            startTurn(combined, currentModelName)
+        } else {
+            // Normal case: start new turn
+            addUserEntry(newInput)
+            lastUserInput = newInput
+            _llmDelivered.postValue(false)
+            startTurn(newInput, currentModelName)
         }
-        if (_isSpeaking.value == true) return
+    }
+
+    fun startListening() {
+        // Block if LLM has delivered and TTS is speaking
+        if (_llmDelivered.value == true && _isSpeaking.value == true) {
+            Log.i(TAG, "[STT] Blocked - LLM delivered, TTS speaking. Use buttons to interrupt.")
+            return
+        }
+
+        if (engine.isActive()) {
+            // Will handle interruption in handleSttResult
+            Log.i(TAG, "[STT] Starting during generation - will combine on result")
+        }
 
         val listenSeconds = prefs.getInt("listen_seconds", 5).coerceIn(1, 120)
         val silenceMs = (listenSeconds * 1000L).coerceIn(1000L, 30000L)
@@ -335,6 +390,7 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
     fun startTurn(userInput: String, modelName: String) {
         currentAssistantEntryIndex = null
         _engineActive.postValue(true)
+        _llmDelivered.postValue(false)
         _generationPhase.postValue(
             if (fasterFirstEnabled) GenerationPhase.GENERATING_FIRST
             else GenerationPhase.SINGLE_SHOT_GENERATING
@@ -348,6 +404,7 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
         engine.abort()
         _engineActive.postValue(false)
         _generationPhase.postValue(GenerationPhase.IDLE)
+        _llmDelivered.postValue(false)
     }
 
     fun addUserEntry(text: String) {
@@ -371,8 +428,11 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
         engine.clearHistory()
         currentAssistantEntryIndex = null
         queuedKeys.clear()
+        lastUserInput = null
+        pendingCombinedInput = null
         postList()
         _generationPhase.postValue(GenerationPhase.IDLE)
+        _llmDelivered.postValue(false)
     }
 
     fun replayEntry(entryIndex: Int) {

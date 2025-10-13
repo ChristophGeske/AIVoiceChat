@@ -232,6 +232,16 @@
                             android:inputType="number"
                             android:maxLength="3" />
                     </com.google.android.material.textfield.TextInputLayout>
+
+                    <!-- Description for listening time -->
+                    <TextView
+                        android:id="@+id/listenSecondsDesc"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="4dp"
+                        android:text="Time the app listens after 'Tap to Speak' button was pressed and after the system finished speaking the complete answer."
+                    android:textColor="#B0BEC5"
+                    android:textSize="12sp" />
                 </LinearLayout>
 
                 <!-- Faster First Response -->
@@ -255,9 +265,9 @@
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
                         android:layout_marginTop="4dp"
-                        android:text="@string/faster_first_desc"
+                        android:text="Using this setting results in the first sentence being generated quickly, reducing initial response time. After the first sentence which arrives quickly, a short gap is to be expected, especially when using GPT-5 models or when setting the number of response sentences to a high number. This may result in slightly lower quality for complex queries."
                         android:textColor="#B0BEC5"
-                        android:textSize="13sp" />
+                        android:textSize="12sp" />
                 </LinearLayout>
 
                 <!-- System Prompt -->

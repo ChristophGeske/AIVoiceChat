@@ -8,7 +8,9 @@ import android.os.SystemClock
 import android.text.Html
 import android.text.method.LinkMovementMethod
 import android.util.Log
-import android.view.*
+import android.view.LayoutInflater
+import android.view.View
+import android.view.ViewGroup
 import android.widget.RadioButton
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
@@ -60,6 +62,7 @@ class FirstFragment : Fragment() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // Fragment menu handled in Activity (gear icon)
     }
 
     override fun onCreateView(inflater: LayoutInflater, container: ViewGroup?, savedInstanceState: Bundle?): View {
@@ -214,6 +217,7 @@ class FirstFragment : Fragment() {
     }
 
     private fun observeViewModel() {
+        // Unified controls observer
         viewModel.uiControls.observe(viewLifecycleOwner) { state ->
             binding.speakButton.isEnabled = state.speakEnabled
             binding.stopButton.isEnabled = state.stopEnabled
@@ -222,6 +226,7 @@ class FirstFragment : Fragment() {
             binding.clearButton.isEnabled = state.clearEnabled
         }
 
+        // Speak button visuals
         val updateSpeakVisuals = {
             val speaking = viewModel.isSpeaking.value == true
             val listening = viewModel.sttIsListening.value == true
@@ -267,16 +272,15 @@ class FirstFragment : Fragment() {
             if (now != null) adapter.notifyItemChanged(now)
         }
 
-        // Auto-start STT when generation starts (with delay to avoid immediate triggers)
+        // Auto-start STT during generation to allow barge-in during the "thinking" phase.
         viewModel.generationPhase.observe(viewLifecycleOwner) { phase ->
             val generating = phase != GenerationPhase.IDLE
             val alreadyListening = viewModel.sttIsListening.value == true
-
             if (generating && !alreadyListening && !isSettingsVisible()) {
                 Log.i(TAG, "[${now()}][AutoSTT] Generation started - scheduling STT start in ${AUTO_STT_DELAY_MS}ms")
                 view?.postDelayed({
-                    if (viewModel.generationPhase.value != GenerationPhase.IDLE
-                        && viewModel.sttIsListening.value != true) {
+                    // Re-check conditions inside the delay to avoid race conditions
+                    if (viewModel.generationPhase.value != GenerationPhase.IDLE && viewModel.sttIsListening.value != true && viewModel.isSpeaking.value != true) {
                         Log.i(TAG, "[${now()}][AutoSTT] Starting STT for interruption detection")
                         handleStartListeningRequest(delayMs = 0L)
                     }
@@ -284,6 +288,15 @@ class FirstFragment : Fragment() {
             }
         }
 
+        // Immediately stop any interruption listening as soon as TTS starts speaking.
+        viewModel.isSpeaking.observe(viewLifecycleOwner) { isSpeaking ->
+            if (isSpeaking && viewModel.sttIsListening.value == true) {
+                Log.i(TAG, "[${now()}][AutoStopSTT] TTS started speaking. Forcibly stopping any active listening session.")
+                viewModel.stopListening()
+            }
+        }
+
+        // Auto re-record after TTS finishes
         viewModel.ttsQueueFinishedEvent.observe(viewLifecycleOwner) { event ->
             event.getContentIfNotHandled()?.let {
                 if (autoContinue && !isSettingsVisible()) {
@@ -294,6 +307,7 @@ class FirstFragment : Fragment() {
             }
         }
 
+        // Retry on NO_MATCH within listen window
         viewModel.sttNoMatch.observe(viewLifecycleOwner) { event ->
             event.getContentIfNotHandled()?.let {
                 val remain = remainingListenWindowMs()
@@ -384,11 +398,11 @@ class FirstFragment : Fragment() {
     }
 
     private fun startListeningNow() {
-        if (viewModel.llmDelivered.value == true && viewModel.isSpeaking.value == true) {
-            Log.w(TAG, "[${now()}][STT] Blocked - LLM delivered, TTS speaking")
+        // Block if the assistant is currently speaking.
+        if (viewModel.isSpeaking.value == true) {
+            Log.w(TAG, "[${now()}][STT] Blocked - assistant is speaking")
             return
         }
-
         if (!ensureKeyAvailableForModelOrShow(currentModelName)) return
         Log.i(TAG, "[${now()}][STT] Starting listening NOW")
         viewModel.startListening()
@@ -499,6 +513,7 @@ class FirstFragment : Fragment() {
         }
     }
 
+    // PUBLIC: called by MainActivity (gear icon).
     fun toggleSettingsVisibility(forceShow: Boolean = false) {
         val visible = binding.settingsContainerScrollView.visibility == View.VISIBLE
         val show = forceShow || !visible
@@ -508,6 +523,7 @@ class FirstFragment : Fragment() {
         viewModel.setSettingsVisible(show)
     }
 
+    // Helpers
     private fun startListenWindow(reason: String) {
         val prefs = requireContext().getSharedPreferences("ai_prefs", Context.MODE_PRIVATE)
         val secs = prefs.getInt("listen_seconds", 5).coerceIn(1, 120)
@@ -548,7 +564,7 @@ class FirstFragment : Fragment() {
 
     override fun onResume() {
         super.onResume()
-        view?.postDelayed({ viewModel.checkAndResumeTts() }, 300)
+        // Removed call to viewModel.checkAndResumeTts() (no longer needed; ViewModel manages TTS state)
     }
 
     override fun onDestroyView() {

@@ -35,7 +35,6 @@ enum class GenerationPhase {
 class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpeech.OnInitListener {
     private val TAG = "ConversationVM"
 
-    // Timestamp helper for logs
     private fun now(): String = SimpleDateFormat("HH:mm:ss.SSS", Locale.US).format(Date())
 
     // Conversation state
@@ -74,7 +73,7 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
     private val _generationPhase = MutableLiveData(GenerationPhase.IDLE)
     val generationPhase: LiveData<GenerationPhase> = _generationPhase
 
-    // Track if LLM has delivered response (for blocking STT during TTS-only phase)
+    // Mark only when the final answer is delivered
     private val _llmDelivered = MutableLiveData(false)
     val llmDelivered: LiveData<Boolean> = _llmDelivered
 
@@ -90,39 +89,30 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
     private var ttsInitialized = false
     private var currentUtteranceId: String? = null
 
-    // STT (Speech-To-Text) State LiveData
+    // STT State
     private val _sttIsListening = MutableLiveData(false)
     val sttIsListening: LiveData<Boolean> = _sttIsListening
 
     private val _sttError = MutableLiveData<Event<String>>()
     val sttError: LiveData<Event<String>> = _sttError
 
-    // One-shot event for NO_MATCH
     private val _sttNoMatch = MutableLiveData<Event<Unit>>()
     val sttNoMatch: LiveData<Event<Unit>> = _sttNoMatch
 
-    // Track last user input for combining when interrupted
+    // Combine/replace helpers
     private var lastUserInput: String? = null
-
-    // Track last user entry index for replacement (not addition)
     private var lastUserEntryIndex: Int? = null
-
-    // Track if user started speaking during generation (to abort LLM)
     private var userInterruptedDuringGeneration = false
 
-    // Debouncing: track last onBeginningOfSpeech time
-    private var lastBeginningOfSpeechMs: Long = 0L
-    private val MIN_SPEECH_INTERVAL_MS = 1000L  // 1 second minimum between speech starts
-
-    // Minimum input length to process (filter out noise)
-    private val MIN_INPUT_LENGTH = 8  // "okay" = 4, "what is" = 7, so 8 is reasonable
+    // Filters
+    private val MIN_INPUT_LENGTH = 8
 
     // SpeechRecognizer
     private lateinit var speechRecognizer: SpeechRecognizer
-    private var currentModelName: String = "gemini-2.5-pro"
+    private var currentModelName: String = "gemini-1.5-pro"
 
     // Config flags
-    private var fasterFirstEnabled: Boolean = false
+    private var fasterFirstEnabled: Boolean = true
 
     // Dedup keys for queued sentences
     private val queuedKeys = mutableSetOf<String>()
@@ -136,7 +126,7 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
     }
     private val prefs by lazy { app.getSharedPreferences("ai_prefs", Application.MODE_PRIVATE) }
 
-    // Stable UtteranceProgressListener
+    // Utterance listener
     private val utteranceListener = object : UtteranceProgressListener() {
         override fun onStart(utteranceId: String?) {
             _isSpeaking.postValue(true)
@@ -144,12 +134,7 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
 
         override fun onDone(utteranceId: String?) {
             viewModelScope.launch {
-                val wasCurrent = utteranceId == currentUtteranceId
-                if (!wasCurrent) {
-                    Log.w(TAG, "[${now()}][TTS] onDone skipped - utteranceId mismatch")
-                    return@launch
-                }
-
+                if (utteranceId != currentUtteranceId) return@launch
                 lastTtsDoneAt = SystemClock.elapsedRealtime()
                 ttsQueue.pollFirst()
                 _currentSpeaking.postValue(null)
@@ -165,34 +150,34 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
         }
 
         @Deprecated("Deprecated in Java")
-        override fun onError(utteranceId: String?) {
-            onDone(utteranceId)
-        }
+        override fun onError(utteranceId: String?) { onDone(utteranceId) }
     }
+
+    private var currentAssistantEntryIndex: Int? = null
 
     private val engine: SentenceTurnEngine by lazy {
         val cb = SentenceTurnEngine.Callbacks(
             onStreamDelta = { delta ->
                 val idx = currentAssistantEntryIndex ?: return@Callbacks
-                entries.getOrNull(idx)?.let { current ->
-                    entries[idx] = current.copy(streamingText = (current.streamingText ?: "") + delta)
+                entries.getOrNull(idx)?.let { cur ->
+                    entries[idx] = cur.copy(streamingText = (cur.streamingText ?: "") + delta)
                     postList()
                 }
             },
             onStreamSentence = { sentence ->
                 val idx = currentAssistantEntryIndex ?: return@Callbacks
-                entries.getOrNull(idx)?.let { current ->
+                entries.getOrNull(idx)?.let { cur ->
                     val trimmed = sentence.trim()
-                    if (current.sentences.none { it.trim() == trimmed }) {
-                        val newSentences = current.sentences + trimmed
-                        entries[idx] = current.copy(sentences = newSentences)
-                        queueTts(SpokenSentence(trimmed, idx, newSentences.size - 1))
+                    if (cur.sentences.none { it.trim() == trimmed }) {
+                        val ns = cur.sentences + trimmed
+                        entries[idx] = cur.copy(sentences = ns)
+                        queueTts(SpokenSentence(trimmed, idx, ns.size - 1))
                         postList()
                     }
                 }
             },
             onFirstSentence = { sentence ->
-                // Phase 1 finished, Phase 2 starts now
+                // Do NOT mark delivered here; allow barge-in during remainder
                 _generationPhase.postValue(GenerationPhase.GENERATING_REMAINDER)
                 val newEntry = ConversationEntry("Assistant", listOf(sentence), isAssistant = true)
                 entries.add(newEntry)
@@ -201,12 +186,11 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
                 postList()
             },
             onRemainingSentences = { sentences ->
-                // Phase 2 finished generating
+                // Remainder text; still not final delivered
                 _generationPhase.postValue(GenerationPhase.IDLE)
-                _llmDelivered.postValue(true)
                 val idx = currentAssistantEntryIndex ?: return@Callbacks
-                entries.getOrNull(idx)?.let { current ->
-                    val ns = current.sentences.toMutableList()
+                entries.getOrNull(idx)?.let { cur ->
+                    val ns = cur.sentences.toMutableList()
                     var added = false
                     sentences.forEach { s ->
                         val t = s.trim()
@@ -217,21 +201,26 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
                         }
                     }
                     if (added) {
-                        entries[idx] = current.copy(sentences = ns)
+                        entries[idx] = cur.copy(sentences = ns)
                         postList()
                     }
                 }
             },
             onFinalResponse = { fullText ->
+                // Final delivered - stop any ongoing STT immediately
                 _generationPhase.postValue(GenerationPhase.IDLE)
                 _llmDelivered.postValue(true)
+                if (_sttIsListening.value == true) stopListening()
+
                 val sentences = dedupeSentences(SentenceSplitter.splitIntoSentences(fullText))
                 val idx = currentAssistantEntryIndex
                 if (idx == null || entries.getOrNull(idx)?.isAssistant != true) {
                     val newEntry = ConversationEntry("Assistant", sentences, isAssistant = true)
                     entries.add(newEntry)
                     currentAssistantEntryIndex = entries.lastIndex
-                    sentences.forEachIndexed { i, s -> queueTts(SpokenSentence(s, currentAssistantEntryIndex!!, i)) }
+                    sentences.forEachIndexed { i, s ->
+                        queueTts(SpokenSentence(s, currentAssistantEntryIndex!!, i))
+                    }
                 } else {
                     entries[idx] = entries[idx].copy(sentences = sentences, streamingText = null)
                 }
@@ -258,8 +247,6 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
             callbacks = cb
         )
     }
-
-    private var currentAssistantEntryIndex: Int? = null
 
     init {
         Log.i(TAG, "[${now()}][INIT] ViewModel created (hashCode=${this.hashCode()})")
@@ -298,25 +285,23 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
             }
 
             override fun onBeginningOfSpeech() {
-                val now = SystemClock.elapsedRealtime()
-                val timeSinceLastMs = now - lastBeginningOfSpeechMs
+                Log.i(TAG, "[${now()}][STT] onBeginningOfSpeech")
 
-                Log.i(TAG, "[${now()}][STT] onBeginningOfSpeech (timeSinceLast=${timeSinceLastMs}ms)")
-
-                // Debounce: ignore if too soon after last trigger
-                if (timeSinceLastMs < MIN_SPEECH_INTERVAL_MS) {
-                    Log.w(TAG, "[${now()}][STT] DEBOUNCED - ignoring (too soon: ${timeSinceLastMs}ms < ${MIN_SPEECH_INTERVAL_MS}ms)")
+                // If TTS is already speaking, this speech input is invalid.
+                // Stop listening immediately and ignore this interruption attempt.
+                if (_isSpeaking.value == true) {
+                    Log.w(TAG, "[${now()}][STT] Ignored onBeginningOfSpeech because TTS is active. Stopping listening.")
+                    stopListening()
                     return
                 }
 
-                lastBeginningOfSpeechMs = now
-
-                // If LLM is generating (not yet delivered), abort it silently
-                val generating = engine.isActive() && _llmDelivered.value != true
-                if (generating) {
-                    Log.i(TAG, "[${now()}][STT] User interrupted generation - aborting LLM silently")
+                // Interrupt only before final delivery
+                val generating = engine.isActive()
+                val delivered = _llmDelivered.value == true
+                if (generating && !delivered) {
+                    Log.i(TAG, "[${now()}][STT] User interrupted generation (before final) - cleaning up and aborting")
                     userInterruptedDuringGeneration = true
-                    injectDraftIfActive()
+                    removeAssistantEntryIfCurrent()
                     abortEngineSilently()
                 }
             }
@@ -325,7 +310,6 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
                 _sttIsListening.postValue(false)
                 val matches = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
                 Log.d(TAG, "[${now()}][STT] onResults: ${matches?.firstOrNull()?.take(50)}")
-
                 if (!matches.isNullOrEmpty() && matches[0].isNotBlank()) {
                     handleSttResult(matches[0])
                 }
@@ -334,7 +318,9 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
 
             override fun onError(error: Int) {
                 _sttIsListening.postValue(false)
-                userInterruptedDuringGeneration = false
+                val wasInterrupting = userInterruptedDuringGeneration
+                userInterruptedDuringGeneration = false // Reset flag immediately
+
                 val errorName = when(error) {
                     SpeechRecognizer.ERROR_AUDIO -> "ERROR_AUDIO"
                     SpeechRecognizer.ERROR_CLIENT -> "ERROR_CLIENT"
@@ -350,17 +336,25 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
                 Log.w(TAG, "[${now()}][STT] onError: $errorName")
 
                 if (error == SpeechRecognizer.ERROR_NO_MATCH) {
-                    _sttNoMatch.postValue(Event(Unit))
+                    // If an interruption attempt fails with NO_MATCH, restart the turn with the last valid input to prevent a stall.
+                    if (wasInterrupting) {
+                        Log.i(TAG, "[${now()}][STT] Interruption resulted in NO_MATCH. Restarting turn with previous input.")
+                        lastUserInput?.let {
+                            startTurnReplacingLast(it, currentModelName)
+                        }
+                    } else {
+                        // Original behavior for non-interruption NO_MATCH
+                        _sttNoMatch.postValue(Event(Unit))
+                    }
                 } else {
                     _sttError.postValue(Event("STT Error: $errorName"))
                 }
             }
 
+
             override fun onRmsChanged(rmsdB: Float) {}
             override fun onBufferReceived(buffer: ByteArray?) {}
-            override fun onEndOfSpeech() {
-                Log.d(TAG, "[${now()}][STT] onEndOfSpeech")
-            }
+            override fun onEndOfSpeech() { Log.d(TAG, "[${now()}][STT] onEndOfSpeech") }
             override fun onPartialResults(partialResults: Bundle?) {}
             override fun onEvent(eventType: Int, params: Bundle?) {}
         })
@@ -368,42 +362,26 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
 
     private fun handleSttResult(newInput: String) {
         val trimmed = newInput.trim()
-
-        // Filter out very short inputs (likely noise or false triggers)
         if (trimmed.length < MIN_INPUT_LENGTH) {
-            Log.w(TAG, "[${now()}][STT] FILTERED - input too short (${trimmed.length} < $MIN_INPUT_LENGTH): '$trimmed'")
-            addSystemEntry("Input too short - ignored: \"$trimmed\"")
+            Log.w(TAG, "[${now()}][STT] FILTERED - input too short (${trimmed.length} < $MIN_INPUT_LENGTH)")
             return
         }
 
-        val delivered = _llmDelivered.value == true
-
-        // If LLM has delivered and TTS is speaking, ignore the speech
-        if (delivered && _isSpeaking.value == true) {
-            Log.i(TAG, "[${now()}][STT] Ignoring speech - LLM delivered, TTS is speaking")
-            addSystemEntry("Speech detected but ignored. Please use Stop button to interrupt.")
+        // If TTS is speaking, do not process (silent ignore)
+        if (_isSpeaking.value == true) {
+            Log.i(TAG, "[${now()}][STT] Ignored speech - TTS is speaking")
             return
         }
 
-        // If user interrupted during generation, combine and REPLACE the previous user entry
         if (userInterruptedDuringGeneration) {
-            Log.i(TAG, "[${now()}][STT] Processing interrupted generation - combining and replacing")
-            val oldInput = lastUserInput ?: ""
-            val combined = if (oldInput.isNotBlank()) {
-                "$oldInput $trimmed"
-            } else {
-                trimmed
-            }
-
-            Log.i(TAG, "[${now()}][STT] Combined: old='${oldInput.take(30)}' + new='${trimmed.take(30)}' = '${combined.take(50)}'")
-
-            // REPLACE the last user entry instead of adding new one
+            Log.i(TAG, "[${now()}][STT] Combining with previous and replacing")
+            val old = lastUserInput.orEmpty()
+            val combined = if (old.isNotBlank()) "$old $trimmed" else trimmed
             replaceLastUserEntry(combined)
             lastUserInput = combined
             _llmDelivered.postValue(false)
-            startTurn(combined, currentModelName)
+            startTurnReplacingLast(combined, currentModelName)
         } else {
-            // Normal case: add new user entry
             Log.i(TAG, "[${now()}][STT] Normal input: '$trimmed'")
             addUserEntry(trimmed)
             lastUserInput = trimmed
@@ -413,17 +391,16 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
     }
 
     fun startListening() {
-        // Block if LLM has delivered and TTS is speaking
-        if (_llmDelivered.value == true && _isSpeaking.value == true) {
-            Log.i(TAG, "[${now()}][STT] Blocked - LLM delivered, TTS speaking")
+        // Block listening if the assistant is currently speaking.
+        if (isSpeaking.value == true) {
+            Log.i(TAG, "[${now()}][STT] Blocked - TTS is speaking")
             return
         }
-
         Log.i(TAG, "[${now()}][STT] startListening()")
 
-        val listenSeconds = prefs.getInt("listen_seconds", 5).coerceIn(1, 120)
-        val silenceMs = (listenSeconds * 1000L).coerceIn(1000L, 30000L)
-        val minLengthMs = 2000L
+        // Use a fixed, reasonable silence timeout for STT to end promptly after speech.
+        val silenceMs = 1500L
+        val minLengthMs = 1000L
 
         val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
             putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
@@ -441,7 +418,7 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
     fun stopListening() {
         if (_sttIsListening.value == true) {
             Log.i(TAG, "[${now()}][STT] stopListening()")
-            speechRecognizer.stopListening()
+            try { speechRecognizer.stopListening() } catch (_: Exception) {}
             _sttIsListening.postValue(false)
             userInterruptedDuringGeneration = false
         }
@@ -469,22 +446,33 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
         engine.startTurn(userInput, modelName)
     }
 
+    private fun startTurnReplacingLast(userInput: String, modelName: String) {
+        currentAssistantEntryIndex = null
+        _engineActive.postValue(true)
+        _llmDelivered.postValue(false)
+        userInterruptedDuringGeneration = false
+        _generationPhase.postValue(
+            if (fasterFirstEnabled) GenerationPhase.GENERATING_FIRST
+            else GenerationPhase.SINGLE_SHOT_GENERATING
+        )
+        engine.replaceLastUserMessage(userInput)
+        engine.startTurnWithCurrentHistory(modelName)
+    }
+
     fun isEngineActive(): Boolean = engine.isActive()
 
     fun abortEngine() {
-        engine.abort()
+        engine.abort(silent = true) // Silent abort always
         _engineActive.postValue(false)
         _generationPhase.postValue(GenerationPhase.IDLE)
         _llmDelivered.postValue(false)
-        addSystemEntry("Generation interrupted.")
     }
 
     private fun abortEngineSilently() {
-        engine.abort()
+        engine.abort(silent = true)
         _engineActive.postValue(false)
         _generationPhase.postValue(GenerationPhase.IDLE)
-        _llmDelivered.postValue(false)
-        Log.i(TAG, "[${now()}][Engine] Silently aborted for user interruption")
+        // do not touch _llmDelivered here
     }
 
     fun addUserEntry(text: String) {
@@ -502,12 +490,14 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
             Log.d(TAG, "[${now()}][Conversation] Replaced user entry at index $idx: '${text.take(50)}...'")
             postList()
         } else {
-            Log.w(TAG, "[${now()}][Conversation] Could not replace - adding new entry instead")
+            Log.w(TAG, "[${now()}][Conversation] Replace failed - adding new user entry")
             addUserEntry(text)
         }
     }
 
     fun addSystemEntry(text: String) {
+        // Keep only relevant system entries (e.g., web sources, model switches).
+        // Do NOT add interruption or speech-ignored messages anymore.
         entries.add(ConversationEntry("System", listOf(text), isAssistant = false))
         postList()
     }
@@ -526,7 +516,6 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
         queuedKeys.clear()
         lastUserInput = null
         userInterruptedDuringGeneration = false
-        lastBeginningOfSpeechMs = 0L
         postList()
         _generationPhase.postValue(GenerationPhase.IDLE)
         _llmDelivered.postValue(false)
@@ -557,18 +546,6 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
         _currentSpeaking.postValue(null)
         currentUtteranceId = null
         lastTtsDoneAt = 0L
-    }
-
-    fun injectDraftIfActive() {
-        if (!engine.isActive()) return
-        buildAssistantDraft()?.let { engine.injectAssistantDraft(it) }
-    }
-
-    fun checkAndResumeTts() {
-        if (!ttsInitialized) return
-        if (ttsQueue.isNotEmpty() && isSpeaking.value == false && currentUtteranceId == null) {
-            speakNext()
-        }
     }
 
     override fun onInit(status: Int) {
@@ -602,9 +579,7 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
         val key = "${spoken.entryIndex}:${spoken.sentenceIndex}"
         if (!force && !queuedKeys.add(key)) return
         ttsQueue.addLast(spoken)
-        if (isSpeaking.value != true && currentUtteranceId == null) {
-            speakNext()
-        }
+        if (isSpeaking.value != true && currentUtteranceId == null) speakNext()
     }
 
     private fun clearDedupForEntry(entryIndex: Int) {
@@ -620,6 +595,36 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
         tts.speak(next.text, TextToSpeech.QUEUE_ADD, null, id)
     }
 
+    // Remove queued/ongoing TTS for a given assistant entry
+    private fun removeTtsForEntry(entryIndex: Int) {
+        val it = ttsQueue.iterator()
+        while (it.hasNext()) {
+            val s = it.next()
+            if (s.entryIndex == entryIndex) it.remove()
+        }
+        if (_currentSpeaking.value?.entryIndex == entryIndex) {
+            try { tts.stop() } catch (_: Exception) {}
+            _isSpeaking.postValue(false)
+            currentUtteranceId = null
+            _currentSpeaking.postValue(null)
+        }
+        clearDedupForEntry(entryIndex)
+    }
+
+    // Remove current assistant partial entry (for clean barge-in)
+    private fun removeAssistantEntryIfCurrent() {
+        val idx = currentAssistantEntryIndex
+        if (idx != null && idx in entries.indices) {
+            val entry = entries[idx]
+            if (entry.isAssistant) {
+                removeTtsForEntry(idx)
+                entries.removeAt(idx)
+                currentAssistantEntryIndex = null
+                postList()
+            }
+        }
+    }
+
     private fun getEffectiveSystemPromptFromPrefs(): String {
         val base = prefs.getString("system_prompt", "").orEmpty().ifBlank { DEFAULT_BASE_PROMPT }
         val maxSent = prefs.getInt("max_sentences", 4).coerceIn(1, 10)
@@ -633,17 +638,9 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
     }
 
     private fun getOpenAiOptionsFromPrefs(): OpenAiOptions {
-        val effort = prefs.getString("gpt5_effort", "low") ?: "low"
-        val verbosity = prefs.getString("gpt5_verbosity", "low") ?: "low"
+        val effort = prefs.getString("gpt4_effort", "low") ?: "low"
+        val verbosity = prefs.getString("gpt4_verbosity", "low") ?: "low"
         return OpenAiOptions(effort = effort, verbosity = verbosity)
-    }
-
-    private fun buildAssistantDraft(): String? {
-        val idx = currentAssistantEntryIndex ?: return null
-        val entry = entries.getOrNull(idx) ?: return null
-        val base = entry.sentences.joinToString(" ").trim()
-        val inStream = entry.streamingText
-        return if (!inStream.isNullOrBlank() && inStream.length > base.length) inStream else base
     }
 
     private fun dedupeSentences(input: List<String>): List<String> {

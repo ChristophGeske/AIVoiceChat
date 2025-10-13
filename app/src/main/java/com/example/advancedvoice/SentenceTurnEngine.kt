@@ -54,13 +54,16 @@ class SentenceTurnEngine(
 
     fun isActive(): Boolean = active
 
-    fun abort() {
+    /**
+     * Abort the current turn. If silent=true, do not post a "Generation interrupted." system message.
+     */
+    fun abort(silent: Boolean = false) {
         if (!active) return
-        Log.i(TAG, "Abort requested.")
+        Log.i(TAG, "Abort requested. silent=$silent")
         active = false
         currentStrategy?.abort()
         uiScope.launch {
-            callbacks.onSystem("Generation interrupted.")
+            if (!silent) callbacks.onSystem("Generation interrupted.")
             callbacks.onTurnFinish()
         }
     }
@@ -81,18 +84,87 @@ class SentenceTurnEngine(
         Log.i(TAG, "Injected assistant draft into history (len=${text.length})")
     }
 
+    /**
+     * Replace the last user message in history (for interruption combining).
+     * If the last message is not user, add a user message instead.
+     */
+    fun replaceLastUserMessage(newText: String) {
+        if (history.isNotEmpty() && history.last().role == "user") {
+            history[history.lastIndex] = Msg("user", newText)
+            Log.d(TAG, "History replaced last user message (len=${newText.length}) total=${history.size}")
+        } else {
+            history.add(Msg("user", newText))
+            Log.d(TAG, "History +user (no previous to replace) (len=${newText.length}) total=${history.size}")
+        }
+    }
+
     fun startTurn(userText: String, modelName: String) {
         if (userText.isBlank()) return
         if (active) {
             Log.w(TAG, "startTurn called while already active - aborting previous turn")
-            abort()
+            abort(silent = true)
         }
 
         active = true
         addUser(userText)
         Log.i(TAG, "=== TURN START === model=$modelName fasterFirst=$fasterFirst historySize=${history.size} maxSentences=$maxSentencesPerTurn")
 
-        currentStrategy = if (fasterFirst) {
+        currentStrategy = createStrategy()
+        currentStrategy?.execute(
+            scope = uiScope,
+            history = ArrayList(history), // defensive copy
+            modelName = modelName,
+            systemPrompt = systemPromptProvider(),
+            maxSentences = maxSentencesPerTurn,
+            callbacks = wrapCallbacks()
+        )
+    }
+
+    /**
+     * Start a turn using the existing history (used after replacing last user message).
+     */
+    fun startTurnWithCurrentHistory(modelName: String) {
+        if (active) {
+            Log.w(TAG, "startTurnWithCurrentHistory called while already active - aborting previous turn")
+            abort(silent = true)
+        }
+
+        active = true
+        Log.i(TAG, "=== TURN START (with existing history) === model=$modelName fasterFirst=$fasterFirst historySize=${history.size} maxSentences=$maxSentencesPerTurn")
+
+        currentStrategy = createStrategy()
+        currentStrategy?.execute(
+            scope = uiScope,
+            history = ArrayList(history),
+            modelName = modelName,
+            systemPrompt = systemPromptProvider(),
+            maxSentences = maxSentencesPerTurn,
+            callbacks = wrapCallbacks()
+        )
+    }
+
+    fun clearHistory() {
+        Log.i(TAG, "History cleared")
+        history.clear()
+    }
+
+    private fun addUser(text: String) {
+        history.add(Msg("user", text))
+        Log.d(TAG, "History +user (len=${text.length}) total=${history.size}")
+    }
+
+    private fun addAssistant(text: String) {
+        if (history.lastOrNull()?.role == "assistant") {
+            history[history.lastIndex] = Msg("assistant", text)
+            Log.d(TAG, "History updated last assistant (len=${text.length}) total=${history.size}")
+        } else {
+            history.add(Msg("assistant", text))
+            Log.d(TAG, "History +assistant (len=${text.length}) total=${history.size}")
+        }
+    }
+
+    private fun createStrategy(): IGenerationStrategy {
+        return if (fasterFirst) {
             Log.i(TAG, "Strategy=FastFirstSentenceStrategy")
             FastFirstSentenceStrategy(
                 http = http,
@@ -109,9 +181,13 @@ class SentenceTurnEngine(
                 openAiOptionsProvider = openAiOptionsProvider
             )
         }
+    }
 
-        // Wrap callbacks so all UI updates happen on uiScope and only while active.
-        val strategyCallbacks = Callbacks(
+    /**
+     * Wrap callbacks so all UI updates happen on uiScope and only while active.
+     */
+    private fun wrapCallbacks(): Callbacks {
+        return Callbacks(
             onStreamDelta = { delta ->
                 if (active) {
                     uiScope.launch {
@@ -178,34 +254,5 @@ class SentenceTurnEngine(
                 }
             }
         )
-
-        currentStrategy?.execute(
-            scope = uiScope,
-            history = ArrayList(history), // defensive copy
-            modelName = modelName,
-            systemPrompt = systemPromptProvider(),
-            maxSentences = maxSentencesPerTurn,
-            callbacks = strategyCallbacks
-        )
-    }
-
-    fun clearHistory() {
-        Log.i(TAG, "History cleared")
-        history.clear()
-    }
-
-    private fun addUser(text: String) {
-        history.add(Msg("user", text))
-        Log.d(TAG, "History +user (len=${text.length}) total=${history.size}")
-    }
-
-    private fun addAssistant(text: String) {
-        if (history.lastOrNull()?.role == "assistant") {
-            history[history.lastIndex] = Msg("assistant", text)
-            Log.d(TAG, "History updated last assistant (len=${text.length}) total=${history.size}")
-        } else {
-            history.add(Msg("assistant", text))
-            Log.d(TAG, "History +assistant (len=${text.length}) total=${history.size}")
-        }
     }
 }

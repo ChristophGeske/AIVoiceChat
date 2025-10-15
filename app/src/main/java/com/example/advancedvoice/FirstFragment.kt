@@ -18,8 +18,10 @@ import androidx.core.content.ContextCompat
 import androidx.core.widget.doAfterTextChanged
 import androidx.fragment.app.Fragment
 import androidx.fragment.app.viewModels
+import androidx.lifecycle.lifecycleScope
 import com.example.advancedvoice.databinding.FragmentFirstBinding
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
+import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -48,7 +50,6 @@ class FirstFragment : Fragment() {
     // Delay auto-start STT to avoid immediate sensitivity
     private val AUTO_STT_DELAY_MS = 800L
 
-    // Permission launcher
     private val requestPermissionLauncher =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { isGranted ->
             Log.i(TAG, "[${now()}][PERM] RECORD_AUDIO granted=$isGranted")
@@ -59,11 +60,6 @@ class FirstFragment : Fragment() {
                 Toast.makeText(context, getString(R.string.error_permission_denied), Toast.LENGTH_LONG).show()
             }
         }
-
-    override fun onCreate(savedInstanceState: Bundle?) {
-        super.onCreate(savedInstanceState)
-        // Fragment menu handled in Activity (gear icon)
-    }
 
     override fun onCreateView(inflater: LayoutInflater, container: ViewGroup?, savedInstanceState: Bundle?): View {
         _binding = FragmentFirstBinding.inflate(inflater, container, false)
@@ -77,6 +73,8 @@ class FirstFragment : Fragment() {
         setupUI()
         setupPrefsBackedInputs()
         observeViewModel()
+        setupWhisperSettings()
+        observeWhisperStatus()
 
         val prefs = requireContext().getSharedPreferences("ai_prefs", Context.MODE_PRIVATE)
         var restoredModel = prefs.getString("selected_model", "gemini-2.5-pro") ?: "gemini-2.5-pro"
@@ -217,7 +215,6 @@ class FirstFragment : Fragment() {
     }
 
     private fun observeViewModel() {
-        // Unified controls observer
         viewModel.uiControls.observe(viewLifecycleOwner) { state ->
             binding.speakButton.isEnabled = state.speakEnabled
             binding.stopButton.isEnabled = state.stopEnabled
@@ -226,7 +223,6 @@ class FirstFragment : Fragment() {
             binding.clearButton.isEnabled = state.clearEnabled
         }
 
-        // Speak button visuals
         val updateSpeakVisuals = {
             val speaking = viewModel.isSpeaking.value == true
             val listening = viewModel.sttIsListening.value == true
@@ -272,14 +268,18 @@ class FirstFragment : Fragment() {
             if (now != null) adapter.notifyItemChanged(now)
         }
 
-        // Auto-start STT during generation to allow barge-in during the "thinking" phase.
+        // *** CHANGE #1: DISABLE AUTOMATIC BARGE-IN FOR WHISPER ***
         viewModel.generationPhase.observe(viewLifecycleOwner) { phase ->
+            val prefs = requireContext().getSharedPreferences("ai_prefs", Context.MODE_PRIVATE)
+            if (prefs.getBoolean("use_whisper", false)) {
+                return@observe // With Whisper, barge-in is manual (tap button), so disable this automatic listener.
+            }
+
             val generating = phase != GenerationPhase.IDLE
             val alreadyListening = viewModel.sttIsListening.value == true
             if (generating && !alreadyListening && !isSettingsVisible()) {
                 Log.i(TAG, "[${now()}][AutoSTT] Generation started - scheduling STT start in ${AUTO_STT_DELAY_MS}ms")
                 view?.postDelayed({
-                    // Re-check conditions inside the delay to avoid race conditions
                     if (viewModel.generationPhase.value != GenerationPhase.IDLE && viewModel.sttIsListening.value != true && viewModel.isSpeaking.value != true) {
                         Log.i(TAG, "[${now()}][AutoSTT] Starting STT for interruption detection")
                         handleStartListeningRequest(delayMs = 0L)
@@ -288,7 +288,6 @@ class FirstFragment : Fragment() {
             }
         }
 
-        // Immediately stop any interruption listening as soon as TTS starts speaking.
         viewModel.isSpeaking.observe(viewLifecycleOwner) { isSpeaking ->
             if (isSpeaking && viewModel.sttIsListening.value == true) {
                 Log.i(TAG, "[${now()}][AutoStopSTT] TTS started speaking. Forcibly stopping any active listening session.")
@@ -296,9 +295,15 @@ class FirstFragment : Fragment() {
             }
         }
 
-        // Auto re-record after TTS finishes
+        // *** CHANGE #2: DISABLE AUTOMATIC RE-RECORDING FOR WHISPER ***
         viewModel.ttsQueueFinishedEvent.observe(viewLifecycleOwner) { event ->
             event.getContentIfNotHandled()?.let {
+                val prefs = requireContext().getSharedPreferences("ai_prefs", Context.MODE_PRIVATE)
+                if (prefs.getBoolean("use_whisper", false)) {
+                    autoContinue = false // Ensure we don't auto-continue
+                    return@let
+                }
+
                 if (autoContinue && !isSettingsVisible()) {
                     Log.i(TAG, "[${now()}][AutoContinue] TTS finished - starting listen window")
                     startListenWindow("TTS")
@@ -307,7 +312,6 @@ class FirstFragment : Fragment() {
             }
         }
 
-        // Retry on NO_MATCH within listen window
         viewModel.sttNoMatch.observe(viewLifecycleOwner) { event ->
             event.getContentIfNotHandled()?.let {
                 val remain = remainingListenWindowMs()
@@ -346,10 +350,10 @@ class FirstFragment : Fragment() {
 
         binding.stopButton.setOnClickListener {
             Log.i(TAG, "[${now()}][UI] Stop button pressed")
-            autoContinue = false
+            autoContinue = false // Explicitly stop auto-continue
             listenWindowDeadlineMs = 0L
             listenRestartCount = 0
-            viewModel.stopAll()
+            viewModel.stopAll() // This will call stopListening(), which stops the Whisper recorder
         }
 
         val prefs = requireContext().getSharedPreferences("ai_prefs", Context.MODE_PRIVATE)
@@ -398,7 +402,6 @@ class FirstFragment : Fragment() {
     }
 
     private fun startListeningNow() {
-        // Block if the assistant is currently speaking.
         if (viewModel.isSpeaking.value == true) {
             Log.w(TAG, "[${now()}][STT] Blocked - assistant is speaking")
             return
@@ -410,6 +413,9 @@ class FirstFragment : Fragment() {
 
     private fun ensureKeyAvailableForModelOrShow(modelName: String): Boolean {
         val prefs = requireContext().getSharedPreferences("ai_prefs", Context.MODE_PRIVATE)
+        val useWhisper = prefs.getBoolean("use_whisper", false)
+        if (useWhisper) return true
+
         val isGpt = modelName.startsWith("gpt-", ignoreCase = true)
         val key = if (isGpt) prefs.getString("openai_key", "").orEmpty() else prefs.getString("gemini_key", "").orEmpty()
         if (key.isNotBlank()) return true
@@ -513,7 +519,6 @@ class FirstFragment : Fragment() {
         }
     }
 
-    // PUBLIC: called by MainActivity (gear icon).
     fun toggleSettingsVisibility(forceShow: Boolean = false) {
         val visible = binding.settingsContainerScrollView.visibility == View.VISIBLE
         val show = forceShow || !visible
@@ -523,7 +528,6 @@ class FirstFragment : Fragment() {
         viewModel.setSettingsVisible(show)
     }
 
-    // Helpers
     private fun startListenWindow(reason: String) {
         val prefs = requireContext().getSharedPreferences("ai_prefs", Context.MODE_PRIVATE)
         val secs = prefs.getInt("listen_seconds", 5).coerceIn(1, 120)
@@ -562,9 +566,104 @@ class FirstFragment : Fragment() {
         binding.geminiApiKeyHelpLink.visibility = if (empty) View.VISIBLE else View.GONE
     }
 
-    override fun onResume() {
-        super.onResume()
-        // Removed call to viewModel.checkAndResumeTts() (no longer needed; ViewModel manages TTS state)
+    private fun setupWhisperSettings() {
+        val prefs = requireContext().getSharedPreferences("ai_prefs", Context.MODE_PRIVATE)
+        val useWhisper = prefs.getBoolean("use_whisper", false)
+        val modelHasBeenSelected = prefs.getBoolean("whisper_model_selected", false)
+
+        binding.switchUseWhisper.isChecked = useWhisper
+        binding.radioGroupWhisperModel.visibility = if (useWhisper) View.VISIBLE else View.GONE
+
+        binding.radioGroupWhisperModel.clearCheck()
+
+        if (useWhisper && modelHasBeenSelected) {
+            val isMultilingual = prefs.getBoolean("whisper_is_multilingual", true)
+            if (isMultilingual) {
+                binding.radioWhisperMultilingual.isChecked = true
+            } else {
+                binding.radioWhisperEnglish.isChecked = true
+            }
+            viewModel.setUseWhisper(true, isMultilingual)
+            checkAndDownloadModel()
+        } else {
+            viewModel.setUseWhisper(useWhisper, false)
+        }
+
+        binding.switchUseWhisper.setOnCheckedChangeListener { _, isChecked ->
+            prefs.edit().putBoolean("use_whisper", isChecked).apply()
+            binding.radioGroupWhisperModel.visibility = if (isChecked) View.VISIBLE else View.GONE
+
+            if (!isChecked) {
+                viewModel.setUseWhisper(false, false)
+            }
+        }
+
+        binding.radioGroupWhisperModel.setOnCheckedChangeListener { _, checkedId ->
+            if (checkedId == -1) return@setOnCheckedChangeListener
+
+            val isMultilingual = checkedId == R.id.radioWhisperMultilingual
+
+            prefs.edit()
+                .putBoolean("whisper_model_selected", true)
+                .putBoolean("whisper_is_multilingual", isMultilingual)
+                .apply()
+
+            viewModel.setUseWhisper(true, isMultilingual)
+            checkAndDownloadModel()
+        }
+    }
+
+    private fun checkAndDownloadModel() {
+        if (binding.radioGroupWhisperModel.checkedRadioButtonId == -1) {
+            Log.d(TAG, "checkAndDownloadModel called, but no model is selected. Aborting.")
+            return
+        }
+
+        lifecycleScope.launch {
+            val whisperService = viewModel.whisperService
+            val modelToUse = if (binding.radioWhisperMultilingual.isChecked) {
+                whisperService.multilingualModel
+            } else {
+                whisperService.englishModel
+            }
+
+            if (!whisperService.isModelDownloaded(modelToUse)) {
+                binding.whisperDownloadStatus.text = "Downloading ${modelToUse.name}..."
+                binding.whisperDownloadStatus.visibility = View.VISIBLE
+                binding.whisperDownloadProgress.visibility = View.VISIBLE
+                whisperService.downloadModel(modelToUse) { success ->
+                    if (success) {
+                        Toast.makeText(context, "${modelToUse.name} downloaded.", Toast.LENGTH_SHORT).show()
+                    } else {
+                        Toast.makeText(context, "Download failed.", Toast.LENGTH_LONG).show()
+                    }
+                }
+            } else {
+                Log.d(TAG, "Model ${modelToUse.name} is already downloaded.")
+                whisperService.initialize(modelToUse)
+            }
+        }
+    }
+
+    private fun observeWhisperStatus() {
+        val whisperService = viewModel.whisperService
+
+        whisperService.downloadProgress.observe(viewLifecycleOwner) { progress ->
+            if (progress in 1..99) {
+                binding.whisperDownloadStatus.visibility = View.VISIBLE
+                binding.whisperDownloadProgress.visibility = View.VISIBLE
+                binding.whisperDownloadProgress.progress = progress
+            } else {
+                binding.whisperDownloadProgress.visibility = View.GONE
+                binding.whisperDownloadStatus.visibility = View.GONE
+            }
+        }
+
+        whisperService.isModelReady.observe(viewLifecycleOwner) { isReady ->
+            if (isReady) {
+                Log.d(TAG, "Whisper model is ready.")
+            }
+        }
     }
 
     override fun onDestroyView() {

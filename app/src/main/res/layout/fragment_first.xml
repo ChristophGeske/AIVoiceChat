@@ -240,8 +240,8 @@
                         android:layout_height="wrap_content"
                         android:layout_marginTop="4dp"
                         android:text="Time the app listens after 'Tap to Speak' button was pressed and after the system finished speaking the complete answer."
-                    android:textColor="#B0BEC5"
-                    android:textSize="12sp" />
+                        android:textColor="#B0BEC5"
+                        android:textSize="12sp" />
                 </LinearLayout>
 
                 <!-- Faster First Response -->
@@ -269,6 +269,69 @@
                         android:textColor="#B0BEC5"
                         android:textSize="12sp" />
                 </LinearLayout>
+
+                <!-- START: WHISPER SETTINGS BLOCK -->
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="24dp"
+                    android:text="Speech Recognition Engine"
+                    android:textAppearance="?attr/textAppearanceTitleMedium"
+                    android:textColor="#FFFFFF"/>
+
+                <com.google.android.material.switchmaterial.SwitchMaterial
+                    android:id="@+id/switchUseWhisper"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:text="Improved Voice Detection (slower, requires download)"
+                    android:textColor="#FFFFFF"
+                    android:checked="false"/>
+
+                <RadioGroup
+                    android:id="@+id/radioGroupWhisperModel"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="16dp"
+                    android:layout_marginTop="8dp"
+                    android:visibility="gone"
+                    tools:visibility="visible">
+
+                    <RadioButton
+                        android:id="@+id/radioWhisperMultilingual"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:textColor="#FFFFFF"
+                        android:text="Multi-lingual (slower, high quality)" />
+
+                    <RadioButton
+                        android:id="@+id/radioWhisperEnglish"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:textColor="#FFFFFF"
+                        android:text="English only (faster)" />
+                </RadioGroup>
+
+                <TextView
+                    android:id="@+id/whisperDownloadStatus"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="16dp"
+                    android:layout_marginTop="8dp"
+                    android:visibility="gone"
+                    android:textColor="#B0BEC5"
+                    tools:text="Downloading model..."/>
+
+                <ProgressBar
+                    android:id="@+id/whisperDownloadProgress"
+                    style="?android:attr/progressBarStyleHorizontal"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="16dp"
+                    android:layout_marginEnd="16dp"
+                    android:layout_marginTop="4dp"
+                    android:visibility="gone"/>
+                <!-- END: WHISPER SETTINGS BLOCK -->
 
                 <!-- System Prompt -->
                 <LinearLayout

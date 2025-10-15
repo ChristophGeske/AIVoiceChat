@@ -1,4 +1,4 @@
-// Event.kt
+// In: app/src/main/java/com/example/advancedvoice/Event.kt
 package com.example.advancedvoice
 
 /**

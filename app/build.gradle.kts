@@ -61,6 +61,8 @@ android {
     }
 }
 
+// In: app/build.gradle
+
 dependencies {
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.appcompat)
@@ -80,13 +82,15 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.7.0")
     implementation("androidx.lifecycle:lifecycle-viewmodel-ktx:2.7.0")
 
+    // *** START: TENSORFLOW DEPENDENCIES ***
+    implementation("org.tensorflow:tensorflow-lite:2.13.0")
+    implementation("org.tensorflow:tensorflow-lite-support:0.4.4") // <-- ADD THIS LINE
+    // *** END: TENSORFLOW DEPENDENCIES ***
+
     testImplementation(libs.junit)
     testImplementation("org.jetbrains.kotlin:kotlin-test:1.9.22")
     testImplementation("org.jetbrains.kotlin:kotlin-test-junit:1.9.22")
     testImplementation("io.mockk:mockk:1.13.8")
-
-    // REMOVED: The mockwebserver dependency is now gone.
-    // testImplementation("com.squareup.okhttp3:mockwebserver:4.12.0")
 
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)

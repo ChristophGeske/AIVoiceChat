@@ -270,16 +270,17 @@ class FirstFragment : Fragment() {
 
         viewModel.generationPhase.observe(viewLifecycleOwner) { phase ->
             val prefs = requireContext().getSharedPreferences("ai_prefs", Context.MODE_PRIVATE)
-            if (prefs.getBoolean("use_whisper", false)) {
-                return@observe
-            }
+            val useWhisper = prefs.getBoolean("use_whisper", false)
 
             val generating = phase != GenerationPhase.IDLE
             val alreadyListening = viewModel.sttIsListening.value == true
-            if (generating && !alreadyListening && !isSettingsVisible()) {
+
+            if (generating && !alreadyListening && !isSettingsVisible() && !useWhisper) {
                 Log.i(TAG, "[${now()}][AutoSTT] Generation started - scheduling STT start in ${AUTO_STT_DELAY_MS}ms")
                 view?.postDelayed({
-                    if (viewModel.generationPhase.value != GenerationPhase.IDLE && viewModel.sttIsListening.value != true && viewModel.isSpeaking.value != true) {
+                    if (viewModel.generationPhase.value != GenerationPhase.IDLE &&
+                        viewModel.sttIsListening.value != true &&
+                        viewModel.isSpeaking.value != true) {
                         Log.i(TAG, "[${now()}][AutoSTT] Starting STT for interruption detection")
                         handleStartListeningRequest(delayMs = 0L)
                     }
@@ -299,31 +300,26 @@ class FirstFragment : Fragment() {
                 if (!autoContinue || isSettingsVisible()) return@let
 
                 Log.i(TAG, "[${now()}][AutoContinue] TTS finished - starting listen window")
-
-                val prefs = requireContext().getSharedPreferences("ai_prefs", Context.MODE_PRIVATE)
-                val useWhisper = prefs.getBoolean("use_whisper", false)
-
-                if (useWhisper) {
-                    // In Whisper mode, start listening immediately after TTS finishes
-                    startListenWindow("TTS (Whisper)")
-                    handleStartListeningRequest(delayMs = STT_GRACE_MS_AFTER_TTS)
-                } else {
-                    // Standard STT mode
-                    startListenWindow("TTS")
-                    handleStartListeningRequest(delayMs = STT_GRACE_MS_AFTER_TTS)
-                }
+                startListenWindow("TTS")
+                handleStartListeningRequest(delayMs = STT_GRACE_MS_AFTER_TTS)
             }
         }
 
         viewModel.sttNoMatch.observe(viewLifecycleOwner) { event ->
             event.getContentIfNotHandled()?.let {
-                val remain = remainingListenWindowMs()
-                if (autoContinue && isListenWindowActive() && !isSettingsVisible()) {
-                    listenRestartCount += 1
-                    Log.w(TAG, "[${now()}][ListenWindow] NO_MATCH within window. Restarting STT (count=$listenRestartCount, remaining=${remain}ms)")
-                    handleStartListeningRequest(delayMs = 50L)
-                } else {
-                    Log.i(TAG, "[${now()}][ListenWindow] NO_MATCH but window expired (remaining=${remain}ms, autoContinue=$autoContinue)")
+                val prefs = requireContext().getSharedPreferences("ai_prefs", Context.MODE_PRIVATE)
+                val useWhisper = prefs.getBoolean("use_whisper", false)
+
+                // Only use listen window restart for standard STT mode
+                if (!useWhisper) {
+                    val remain = remainingListenWindowMs()
+                    if (autoContinue && isListenWindowActive() && !isSettingsVisible()) {
+                        listenRestartCount += 1
+                        Log.w(TAG, "[${now()}][ListenWindow] NO_MATCH within window. Restarting STT (count=$listenRestartCount, remaining=${remain}ms)")
+                        handleStartListeningRequest(delayMs = 50L)
+                    } else {
+                        Log.i(TAG, "[${now()}][ListenWindow] NO_MATCH but window expired (remaining=${remain}ms, autoContinue=$autoContinue)")
+                    }
                 }
             }
         }
@@ -339,14 +335,23 @@ class FirstFragment : Fragment() {
             Log.i(TAG, "[${now()}][UI] Speak button pressed")
             autoContinue = true
             if (!ensureKeyAvailableForModelOrShow(currentModelName)) return@setOnClickListener
-            startListenWindow("Manual Speak")
+
+            val prefs = requireContext().getSharedPreferences("ai_prefs", Context.MODE_PRIVATE)
+            val useWhisper = prefs.getBoolean("use_whisper", false)
+            if (!useWhisper) {
+                startListenWindow("Manual Speak")
+            }
             handleStartListeningRequest(delayMs = 0L)
         }
 
         binding.newRecordingButton.setOnClickListener {
             Log.i(TAG, "[${now()}][UI] New Recording button pressed")
             autoContinue = true
-            startListenWindow("New Recording")
+            val prefs = requireContext().getSharedPreferences("ai_prefs", Context.MODE_PRIVATE)
+            val useWhisper = prefs.getBoolean("use_whisper", false)
+            if (!useWhisper) {
+                startListenWindow("New Recording")
+            }
             viewModel.stopTts()
             view?.postDelayed({ handleStartListeningRequest(delayMs = 0L) }, 250)
         }

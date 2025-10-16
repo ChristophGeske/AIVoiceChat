@@ -268,11 +268,10 @@ class FirstFragment : Fragment() {
             if (now != null) adapter.notifyItemChanged(now)
         }
 
-        // *** CHANGE #1: DISABLE AUTOMATIC BARGE-IN FOR WHISPER ***
         viewModel.generationPhase.observe(viewLifecycleOwner) { phase ->
             val prefs = requireContext().getSharedPreferences("ai_prefs", Context.MODE_PRIVATE)
             if (prefs.getBoolean("use_whisper", false)) {
-                return@observe // With Whisper, barge-in is manual (tap button), so disable this automatic listener.
+                return@observe
             }
 
             val generating = phase != GenerationPhase.IDLE
@@ -290,22 +289,26 @@ class FirstFragment : Fragment() {
 
         viewModel.isSpeaking.observe(viewLifecycleOwner) { isSpeaking ->
             if (isSpeaking && viewModel.sttIsListening.value == true) {
-                Log.i(TAG, "[${now()}][AutoStopSTT] TTS started speaking. Forcibly stopping any active listening session.")
-                viewModel.stopListening()
+                Log.i(TAG, "[${now()}][AutoStopSTT] TTS started speaking. Stopping listening only.")
+                viewModel.stopListeningOnly()
             }
         }
 
-        // *** CHANGE #2: DISABLE AUTOMATIC RE-RECORDING FOR WHISPER ***
         viewModel.ttsQueueFinishedEvent.observe(viewLifecycleOwner) { event ->
             event.getContentIfNotHandled()?.let {
-                val prefs = requireContext().getSharedPreferences("ai_prefs", Context.MODE_PRIVATE)
-                if (prefs.getBoolean("use_whisper", false)) {
-                    autoContinue = false // Ensure we don't auto-continue
-                    return@let
-                }
+                if (!autoContinue || isSettingsVisible()) return@let
 
-                if (autoContinue && !isSettingsVisible()) {
-                    Log.i(TAG, "[${now()}][AutoContinue] TTS finished - starting listen window")
+                Log.i(TAG, "[${now()}][AutoContinue] TTS finished - starting listen window")
+
+                val prefs = requireContext().getSharedPreferences("ai_prefs", Context.MODE_PRIVATE)
+                val useWhisper = prefs.getBoolean("use_whisper", false)
+
+                if (useWhisper) {
+                    // In Whisper mode, start listening immediately after TTS finishes
+                    startListenWindow("TTS (Whisper)")
+                    handleStartListeningRequest(delayMs = STT_GRACE_MS_AFTER_TTS)
+                } else {
+                    // Standard STT mode
                     startListenWindow("TTS")
                     handleStartListeningRequest(delayMs = STT_GRACE_MS_AFTER_TTS)
                 }
@@ -350,10 +353,10 @@ class FirstFragment : Fragment() {
 
         binding.stopButton.setOnClickListener {
             Log.i(TAG, "[${now()}][UI] Stop button pressed")
-            autoContinue = false // Explicitly stop auto-continue
+            autoContinue = false
             listenWindowDeadlineMs = 0L
             listenRestartCount = 0
-            viewModel.stopAll() // This will call stopListening(), which stops the Whisper recorder
+            viewModel.stopAll()
         }
 
         val prefs = requireContext().getSharedPreferences("ai_prefs", Context.MODE_PRIVATE)

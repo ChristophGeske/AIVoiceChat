@@ -1,9 +1,14 @@
 // In: app/src/main/java/com/example/advancedvoice/ConversationViewModel.kt
 package com.example.advancedvoice
 
+import android.Manifest
 import android.app.Application
 import android.content.Intent
 import android.content.SharedPreferences
+import android.content.pm.PackageManager
+import android.media.AudioFormat
+import android.media.AudioRecord
+import android.media.MediaRecorder
 import android.os.Bundle
 import android.os.SystemClock
 import android.speech.RecognitionListener
@@ -12,14 +17,19 @@ import android.speech.SpeechRecognizer
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
 import android.util.Log
+import androidx.core.app.ActivityCompat
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.LiveData
 import androidx.lifecycle.MediatorLiveData
 import androidx.lifecycle.MutableLiveData
 import androidx.lifecycle.viewModelScope
 import com.example.advancedvoice.whisper.WhisperService
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
+import java.io.ByteArrayOutputStream
 import java.text.SimpleDateFormat
 import java.util.ArrayDeque
 import java.util.Date
@@ -39,14 +49,21 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
 
     private fun now(): String = SimpleDateFormat("HH:mm:ss.SSS", Locale.US).format(Date())
 
-    // Whisper STT Service - Now public
     val whisperService: WhisperService by lazy {
         WhisperService(getApplication(), viewModelScope)
     }
 
-    // Flags to control which STT engine to use
     private var useWhisperStt = false
-    private var selectedWhisperModelIsMultilingual = true // Default to multilingual
+    private var selectedWhisperModelIsMultilingual = true
+
+    // --- AudioRecord implementation ---
+    private var audioRecord: AudioRecord? = null
+    private var recordingJob: Job? = null
+    private val audioBuffer = ByteArrayOutputStream()
+    private val audioSampleRate = 16000
+    private val audioChannel = AudioFormat.CHANNEL_IN_MONO
+    private val audioFormat = AudioFormat.ENCODING_PCM_16BIT
+    // ---
 
     // Conversation state
     private val entries = mutableListOf<ConversationEntry>()
@@ -218,7 +235,7 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
             onFinalResponse = { fullText ->
                 _generationPhase.postValue(GenerationPhase.IDLE)
                 _llmDelivered.postValue(true)
-                if (_sttIsListening.value == true) stopListening()
+                if (_sttIsListening.value == true) stopRecording()
 
                 val sentences = dedupeSentences(SentenceSplitter.splitIntoSentences(fullText))
                 val idx = currentAssistantEntryIndex
@@ -264,17 +281,11 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
 
         whisperService.transcriptionResult.observeForever { event ->
             event.getContentIfNotHandled()?.let { result ->
-                _sttIsListening.postValue(false)
                 if (result.isNotBlank()) {
                     handleSttResult(result)
                 } else {
                     _sttNoMatch.postValue(Event(Unit))
                 }
-            }
-        }
-        whisperService.isRecording.observeForever { isRecording ->
-            if (_sttIsListening.value != isRecording && useWhisperStt) {
-                _sttIsListening.postValue(isRecording)
             }
         }
     }
@@ -312,7 +323,7 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
                 Log.i(TAG, "[${now()}][STT] onBeginningOfSpeech")
                 if (_isSpeaking.value == true) {
                     Log.w(TAG, "[${now()}][STT] Ignored onBeginningOfSpeech because TTS is active. Stopping listening.")
-                    stopListening()
+                    stopRecording()
                     return
                 }
 
@@ -327,7 +338,8 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
             }
 
             override fun onResults(results: Bundle?) {
-                _sttIsListening.postValue(false)
+                if (useWhisperStt) return
+                stopRecording()
                 val matches = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
                 Log.d(TAG, "[${now()}][STT] onResults: ${matches?.firstOrNull()?.take(50)}")
                 if (!matches.isNullOrEmpty() && matches[0].isNotBlank()) {
@@ -336,12 +348,12 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
                 userInterruptedDuringGeneration = false
             }
 
+            // *** THE FIX IS HERE ***
             override fun onError(error: Int) {
-                _sttIsListening.postValue(false)
                 val wasInterrupting = userInterruptedDuringGeneration
                 userInterruptedDuringGeneration = false
 
-                val errorName = when(error) {
+                val errorName = when (error) {
                     SpeechRecognizer.ERROR_AUDIO -> "ERROR_AUDIO"
                     SpeechRecognizer.ERROR_CLIENT -> "ERROR_CLIENT"
                     SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> "ERROR_INSUFFICIENT_PERMISSIONS"
@@ -355,26 +367,74 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
                 }
                 Log.w(TAG, "[${now()}][STT] onError: $errorName")
 
+                if (error == SpeechRecognizer.ERROR_CLIENT) {
+                    Log.d(TAG, "[${now()}][STT] ERROR_CLIENT received (expected after manual stop)")
+                    return
+                }
+
+                // === WHISPER MODE HANDLING ===
+                if (useWhisperStt) {
+                    when (error) {
+                        SpeechRecognizer.ERROR_NO_MATCH,
+                        SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> {
+                            Log.i(TAG, "[${now()}][STT] Whisper mode: $errorName - treating as end of speech, stopping to transcribe")
+                            stopRecording()
+                        }
+                        else -> {
+                            Log.e(TAG, "[${now()}][STT] Whisper mode: Error $errorName, stopping recording")
+                            stopRecording()
+                            _sttError.postValue(Event("STT Error: $errorName"))
+                        }
+                    }
+                    return
+                }
+
+                // === STANDARD STT MODE HANDLING ===
                 if (error == SpeechRecognizer.ERROR_NO_MATCH) {
                     if (wasInterrupting) {
-                        Log.i(TAG, "[${now()}][STT] Interruption resulted in NO_MATCH. Restarting turn with previous input.")
-                        lastUserInput?.let {
-                            startTurnReplacingLast(it, currentModelName)
-                        }
+                        // User interrupted but then said nothing (NO_MATCH)
+                        // Just ignore this - don't restart the turn with old text
+                        Log.i(TAG, "[${now()}][STT] Interruption resulted in NO_MATCH. Ignoring (user said nothing).")
+                        // The assistant entry was already removed in onBeginningOfSpeech
+                        // Just post the no-match event
+                        _sttNoMatch.postValue(Event(Unit))
                     } else {
                         _sttNoMatch.postValue(Event(Unit))
                     }
                 } else {
+                    stopRecording()
                     _sttError.postValue(Event("STT Error: $errorName"))
                 }
             }
 
+            override fun onEndOfSpeech() {
+                Log.d(TAG, "[${now()}][STT] onEndOfSpeech detected")
+                stopRecording() // This works for both standard STT and Whisper mode
+            }
+
+            override fun onBufferReceived(buffer: ByteArray?) { /* Not used */ }
             override fun onRmsChanged(rmsdB: Float) {}
-            override fun onBufferReceived(buffer: ByteArray?) {}
-            override fun onEndOfSpeech() { Log.d(TAG, "[${now()}][STT] onEndOfSpeech") }
             override fun onPartialResults(partialResults: Bundle?) {}
             override fun onEvent(eventType: Int, params: Bundle?) {}
         })
+    }
+
+    fun stopListeningOnly() {
+        if (_sttIsListening.value == false && recordingJob == null) return
+
+        _sttIsListening.postValue(false)
+        speechRecognizer.stopListening()
+
+        if (useWhisperStt) {
+            if (audioRecord?.recordingState == AudioRecord.RECORDSTATE_RECORDING) {
+                audioRecord?.stop()
+            }
+            recordingJob?.cancel()
+            recordingJob = null
+            audioRecord?.release()
+            audioRecord = null
+            audioBuffer.reset()
+        }
     }
 
     private fun handleSttResult(newInput: String) {
@@ -407,55 +467,109 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
     }
 
     fun startListening() {
-        if (isSpeaking.value == true) {
+        if (_isSpeaking.value == true) {
             Log.i(TAG, "[${now()}][STT] Blocked - TTS is speaking")
             return
         }
-        Log.i(TAG, "[${now()}][STT] startListening() request received. Using Whisper: $useWhisperStt")
+        if (useWhisperStt && whisperService.isModelReady.value != true) {
+            addSystemEntry("Whisper model is not ready. Please check settings.")
+            return
+        }
+        if (_sttIsListening.value == true) {
+            Log.w(TAG, "[${now()}][STT] Already listening, ignoring request.")
+            return
+        }
+
+        Log.i(TAG, "[${now()}][STT] startListening() request received.")
 
         if (useWhisperStt) {
-            if (whisperService.isModelReady.value == true) {
-                val generating = engine.isActive()
-                val delivered = _llmDelivered.value == true
-                if (generating && !delivered) {
-                    Log.i(TAG, "[${now()}][STT] User wants to interrupt with Whisper - cleaning up and aborting")
-                    userInterruptedDuringGeneration = true
-                    removeAssistantEntryIfCurrent()
-                    abortEngineSilently()
-                }
-                whisperService.startRecording()
+            startRecording()
+        }
+
+        val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.getDefault())
+            putExtra(RecognizerIntent.EXTRA_PROMPT, "Listening...")
+
+            if (useWhisperStt) {
+                // Longer timeouts for Whisper mode to allow multi-sentence input
+                putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 3000L)
+                putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 3000L)
+                putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS, 2000L)
             } else {
-                addSystemEntry("Whisper model is not ready. Please check settings.")
+                putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 1500L)
+                putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 1500L)
+                putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS, 1000L)
             }
-        } else {
-            val silenceMs = 1500L
-            val minLengthMs = 1000L
-            val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
-                putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-                putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.getDefault())
-                putExtra(RecognizerIntent.EXTRA_PROMPT, "Listening...")
-                putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, silenceMs)
-                putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, silenceMs)
-                putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS, minLengthMs)
-                putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
-                putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
+
+            putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, false)
+            putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
+        }
+        speechRecognizer.startListening(intent)
+    }
+
+    private fun startRecording() {
+        if (ActivityCompat.checkSelfPermission(getApplication(), Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            _sttError.postValue(Event("RECORD_AUDIO permission not granted."))
+            return
+        }
+        val bufferSize = AudioRecord.getMinBufferSize(audioSampleRate, audioChannel, audioFormat)
+        if (bufferSize == AudioRecord.ERROR_BAD_VALUE) {
+            _sttError.postValue(Event("AudioRecord parameters are not supported on this device."))
+            return
+        }
+        audioBuffer.reset()
+        audioRecord = AudioRecord(MediaRecorder.AudioSource.VOICE_RECOGNITION, audioSampleRate, audioChannel, audioFormat, bufferSize)
+
+        if (audioRecord?.state != AudioRecord.STATE_INITIALIZED) {
+            _sttError.postValue(Event("AudioRecord failed to initialize."))
+            return
+        }
+
+        audioRecord?.startRecording()
+
+        recordingJob = viewModelScope.launch(Dispatchers.IO) {
+            Log.d(TAG, "[AudioRecord] Recording started.")
+            val data = ByteArray(bufferSize)
+            while (audioRecord?.recordingState == AudioRecord.RECORDSTATE_RECORDING) {
+                val read = audioRecord?.read(data, 0, bufferSize) ?: -1
+                if (read > 0) {
+                    audioBuffer.write(data, 0, read)
+                }
             }
-            speechRecognizer.startListening(intent)
         }
     }
 
-    fun stopListening() {
-        if (_sttIsListening.value != true) return
+    private fun stopRecording() {
+        if (_sttIsListening.value == false && recordingJob == null) return
+
+        _sttIsListening.postValue(false)
+
+        speechRecognizer.stopListening()
 
         if (useWhisperStt) {
-            Log.i(TAG, "[${now()}][STT] stopListening() for Whisper")
-            whisperService.stopRecording()
-        } else {
-            Log.i(TAG, "[${now()}][STT] stopListening() for standard recognizer")
-            try { speechRecognizer.stopListening() } catch (_: Exception) {}
-            _sttIsListening.postValue(false)
+            if (audioRecord?.recordingState == AudioRecord.RECORDSTATE_RECORDING) {
+                audioRecord?.stop()
+            }
+            recordingJob?.cancel()
+            recordingJob = null
+
+            val audioData = audioBuffer.toByteArray()
+            Log.d(TAG, "[AudioRecord] Recording stopped. Buffer size: ${audioData.size}")
+
+            // Add minimum length check (e.g., at least 0.5 seconds of audio)
+            val minimumBytes = audioSampleRate * 2 * 0.5 // 16kHz * 2 bytes/sample * 0.5 sec
+
+            if (whisperService.isModelReady.value == true && audioData.size >= minimumBytes) {
+                Log.i(TAG, "[Whisper] Transcribing ${audioData.size} bytes.")
+                whisperService.transcribeAudio(audioData)
+            } else {
+                Log.w(TAG, "[Whisper] Audio too short (${audioData.size} bytes) or model not ready. Skipping transcription.")
+                _sttNoMatch.postValue(Event(Unit))
+            }
+            audioRecord?.release()
+            audioRecord = null
         }
-        userInterruptedDuringGeneration = false
     }
 
     fun setCurrentModel(modelName: String) { this.currentModelName = modelName }
@@ -566,7 +680,7 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
     fun stopAll() {
         abortEngine()
         stopTts()
-        stopListening()
+        stopRecording()
     }
 
     fun stopTts() {
@@ -598,6 +712,7 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
     override fun onCleared() {
         super.onCleared()
         whisperService.release()
+        audioRecord?.release()
         try {
             tts.stop()
             tts.shutdown()

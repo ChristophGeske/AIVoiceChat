@@ -42,12 +42,12 @@ class FirstFragment : Fragment() {
 
     private var currentModelName = "gemini-2.5-pro"
 
-    // Listen window helpers
+    // Listen window helpers (for standard STT mode only)
     private val STT_GRACE_MS_AFTER_TTS = 500L
     private var listenWindowDeadlineMs: Long = 0L
     private var listenRestartCount: Int = 0
 
-    // Delay auto-start STT to avoid immediate sensitivity
+    // Delay auto-start STT to avoid immediate sensitivity during generation barge-in
     private val AUTO_STT_DELAY_MS = 800L
 
     private val requestPermissionLauncher =
@@ -271,16 +271,16 @@ class FirstFragment : Fragment() {
         viewModel.generationPhase.observe(viewLifecycleOwner) { phase ->
             val prefs = requireContext().getSharedPreferences("ai_prefs", Context.MODE_PRIVATE)
             val useWhisper = prefs.getBoolean("use_whisper", false)
+            if (useWhisper) {
+                return@observe // No barge-in for custom VAD Whisper mode
+            }
 
             val generating = phase != GenerationPhase.IDLE
             val alreadyListening = viewModel.sttIsListening.value == true
-
-            if (generating && !alreadyListening && !isSettingsVisible() && !useWhisper) {
+            if (generating && !alreadyListening && !isSettingsVisible()) {
                 Log.i(TAG, "[${now()}][AutoSTT] Generation started - scheduling STT start in ${AUTO_STT_DELAY_MS}ms")
                 view?.postDelayed({
-                    if (viewModel.generationPhase.value != GenerationPhase.IDLE &&
-                        viewModel.sttIsListening.value != true &&
-                        viewModel.isSpeaking.value != true) {
+                    if (viewModel.generationPhase.value != GenerationPhase.IDLE && viewModel.sttIsListening.value != true && viewModel.isSpeaking.value != true) {
                         Log.i(TAG, "[${now()}][AutoSTT] Starting STT for interruption detection")
                         handleStartListeningRequest(delayMs = 0L)
                     }
@@ -290,36 +290,48 @@ class FirstFragment : Fragment() {
 
         viewModel.isSpeaking.observe(viewLifecycleOwner) { isSpeaking ->
             if (isSpeaking && viewModel.sttIsListening.value == true) {
-                Log.i(TAG, "[${now()}][AutoStopSTT] TTS started speaking. Stopping listening only.")
+                Log.i(TAG, "[${now()}][AutoStopSTT] TTS started. Stopping listening only.")
                 viewModel.stopListeningOnly()
             }
         }
 
         viewModel.ttsQueueFinishedEvent.observe(viewLifecycleOwner) { event ->
             event.getContentIfNotHandled()?.let {
-                if (!autoContinue || isSettingsVisible()) return@let
+                val prefs = requireContext().getSharedPreferences("ai_prefs", Context.MODE_PRIVATE)
+                val useWhisper = prefs.getBoolean("use_whisper", false)
 
-                Log.i(TAG, "[${now()}][AutoContinue] TTS finished - starting listen window")
-                startListenWindow("TTS")
-                handleStartListeningRequest(delayMs = STT_GRACE_MS_AFTER_TTS)
+                // Don't auto-continue if generation is still active
+                val stillGenerating = viewModel.generationPhase.value != GenerationPhase.IDLE
+
+                if (autoContinue && !isSettingsVisible() && !stillGenerating) {
+                    if (useWhisper) {
+                        Log.i(TAG, "[${now()}][AutoContinue] All TTS finished & generation done - starting Whisper")
+                    } else {
+                        Log.i(TAG, "[${now()}][AutoContinue] All TTS finished & generation done - starting STT")
+                        startListenWindow("TTS")
+                    }
+                    handleStartListeningRequest(delayMs = STT_GRACE_MS_AFTER_TTS)
+                } else if (stillGenerating) {
+                    Log.d(TAG, "[${now()}][AutoContinue] Skipped - generation still active")
+                }
             }
         }
 
         viewModel.sttNoMatch.observe(viewLifecycleOwner) { event ->
             event.getContentIfNotHandled()?.let {
                 val prefs = requireContext().getSharedPreferences("ai_prefs", Context.MODE_PRIVATE)
-                val useWhisper = prefs.getBoolean("use_whisper", false)
+                if (prefs.getBoolean("use_whisper", false)) {
+                    // In custom VAD mode, no-match is final for that attempt.
+                    return@let
+                }
 
-                // Only use listen window restart for standard STT mode
-                if (!useWhisper) {
-                    val remain = remainingListenWindowMs()
-                    if (autoContinue && isListenWindowActive() && !isSettingsVisible()) {
-                        listenRestartCount += 1
-                        Log.w(TAG, "[${now()}][ListenWindow] NO_MATCH within window. Restarting STT (count=$listenRestartCount, remaining=${remain}ms)")
-                        handleStartListeningRequest(delayMs = 50L)
-                    } else {
-                        Log.i(TAG, "[${now()}][ListenWindow] NO_MATCH but window expired (remaining=${remain}ms, autoContinue=$autoContinue)")
-                    }
+                val remain = remainingListenWindowMs()
+                if (autoContinue && isListenWindowActive() && !isSettingsVisible()) {
+                    listenRestartCount += 1
+                    Log.w(TAG, "[${now()}][ListenWindow] NO_MATCH within window. Restarting STT (count=$listenRestartCount, remaining=${remain}ms)")
+                    handleStartListeningRequest(delayMs = 50L)
+                } else {
+                    Log.i(TAG, "[${now()}][ListenWindow] NO_MATCH but window expired (remaining=${remain}ms, autoContinue=$autoContinue)")
                 }
             }
         }
@@ -337,8 +349,7 @@ class FirstFragment : Fragment() {
             if (!ensureKeyAvailableForModelOrShow(currentModelName)) return@setOnClickListener
 
             val prefs = requireContext().getSharedPreferences("ai_prefs", Context.MODE_PRIVATE)
-            val useWhisper = prefs.getBoolean("use_whisper", false)
-            if (!useWhisper) {
+            if (!prefs.getBoolean("use_whisper", false)) {
                 startListenWindow("Manual Speak")
             }
             handleStartListeningRequest(delayMs = 0L)
@@ -348,8 +359,7 @@ class FirstFragment : Fragment() {
             Log.i(TAG, "[${now()}][UI] New Recording button pressed")
             autoContinue = true
             val prefs = requireContext().getSharedPreferences("ai_prefs", Context.MODE_PRIVATE)
-            val useWhisper = prefs.getBoolean("use_whisper", false)
-            if (!useWhisper) {
+            if (!prefs.getBoolean("use_whisper", false)) {
                 startListenWindow("New Recording")
             }
             viewModel.stopTts()
@@ -586,11 +596,8 @@ class FirstFragment : Fragment() {
 
         if (useWhisper && modelHasBeenSelected) {
             val isMultilingual = prefs.getBoolean("whisper_is_multilingual", true)
-            if (isMultilingual) {
-                binding.radioWhisperMultilingual.isChecked = true
-            } else {
-                binding.radioWhisperEnglish.isChecked = true
-            }
+            if (isMultilingual) binding.radioWhisperMultilingual.isChecked = true
+            else binding.radioWhisperEnglish.isChecked = true
             viewModel.setUseWhisper(true, isMultilingual)
             checkAndDownloadModel()
         } else {
@@ -600,7 +607,6 @@ class FirstFragment : Fragment() {
         binding.switchUseWhisper.setOnCheckedChangeListener { _, isChecked ->
             prefs.edit().putBoolean("use_whisper", isChecked).apply()
             binding.radioGroupWhisperModel.visibility = if (isChecked) View.VISIBLE else View.GONE
-
             if (!isChecked) {
                 viewModel.setUseWhisper(false, false)
             }
@@ -608,14 +614,11 @@ class FirstFragment : Fragment() {
 
         binding.radioGroupWhisperModel.setOnCheckedChangeListener { _, checkedId ->
             if (checkedId == -1) return@setOnCheckedChangeListener
-
             val isMultilingual = checkedId == R.id.radioWhisperMultilingual
-
             prefs.edit()
                 .putBoolean("whisper_model_selected", true)
                 .putBoolean("whisper_is_multilingual", isMultilingual)
                 .apply()
-
             viewModel.setUseWhisper(true, isMultilingual)
             checkAndDownloadModel()
         }

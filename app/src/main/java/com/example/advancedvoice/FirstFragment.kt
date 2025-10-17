@@ -47,7 +47,7 @@ class FirstFragment : Fragment() {
     private var listenWindowDeadlineMs: Long = 0L
     private var listenRestartCount: Int = 0
 
-    // Delay auto-start STT to avoid immediate sensitivity during generation barge-in
+    // Delay barge-in start slightly
     private val AUTO_STT_DELAY_MS = 800L
 
     private val requestPermissionLauncher =
@@ -226,15 +226,28 @@ class FirstFragment : Fragment() {
         val updateSpeakVisuals = {
             val speaking = viewModel.isSpeaking.value == true
             val listening = viewModel.sttIsListening.value == true
+            val transcribing = viewModel.isTranscribing.value == true
             val phase = viewModel.generationPhase.value ?: GenerationPhase.IDLE
             val generating = phase != GenerationPhase.IDLE
 
             binding.progressBar.visibility = View.GONE
 
             when {
+                listening && generating -> {
+                    binding.speakButton.text = "Recording (LLM generating)"
+                    binding.speakButton.setTextColor(0xFFF44336.toInt()) // red
+                }
+                listening && transcribing -> {
+                    binding.speakButton.text = "Recording (processing…)"
+                    binding.speakButton.setTextColor(0xFFF44336.toInt()) // red
+                }
                 listening -> {
                     binding.speakButton.text = "Recording - Agent Listening"
-                    binding.speakButton.setTextColor(0xFFF44336.toInt())
+                    binding.speakButton.setTextColor(0xFFF44336.toInt()) // red
+                }
+                transcribing -> {
+                    binding.speakButton.text = "Processing recording…"
+                    binding.speakButton.setTextColor(0xFFFFFFFF.toInt())
                 }
                 speaking && generating -> {
                     binding.speakButton.text = "Agent speaking + Generating next response"
@@ -258,6 +271,7 @@ class FirstFragment : Fragment() {
         viewModel.generationPhase.observe(viewLifecycleOwner) { updateSpeakVisuals() }
         viewModel.isSpeaking.observe(viewLifecycleOwner) { updateSpeakVisuals() }
         viewModel.sttIsListening.observe(viewLifecycleOwner) { updateSpeakVisuals() }
+        viewModel.isTranscribing.observe(viewLifecycleOwner) { updateSpeakVisuals() }
 
         viewModel.currentSpeaking.observe(viewLifecycleOwner) { speaking ->
             val adapter = binding.conversationRecyclerView.adapter as ConversationAdapter
@@ -271,18 +285,26 @@ class FirstFragment : Fragment() {
         viewModel.generationPhase.observe(viewLifecycleOwner) { phase ->
             val prefs = requireContext().getSharedPreferences("ai_prefs", Context.MODE_PRIVATE)
             val useWhisper = prefs.getBoolean("use_whisper", false)
-            if (useWhisper) {
-                return@observe // No barge-in for custom VAD Whisper mode
-            }
 
             val generating = phase != GenerationPhase.IDLE
             val alreadyListening = viewModel.sttIsListening.value == true
-            if (generating && !alreadyListening && !isSettingsVisible()) {
-                Log.i(TAG, "[${now()}][AutoSTT] Generation started - scheduling STT start in ${AUTO_STT_DELAY_MS}ms")
+            val delivered = viewModel.llmDelivered.value == true
+
+            if (generating && !alreadyListening && !delivered && !isSettingsVisible()) {
+                Log.i(TAG, "[${now()}][BargeIn] Generation started - scheduling barge-in detection in 800ms")
                 view?.postDelayed({
-                    if (viewModel.generationPhase.value != GenerationPhase.IDLE && viewModel.sttIsListening.value != true && viewModel.isSpeaking.value != true) {
-                        Log.i(TAG, "[${now()}][AutoSTT] Starting STT for interruption detection")
-                        handleStartListeningRequest(delayMs = 0L)
+                    val stillGenerating = viewModel.generationPhase.value != GenerationPhase.IDLE
+                    val stillNotDelivered = viewModel.llmDelivered.value != true
+                    val notListening = viewModel.sttIsListening.value != true
+                    val notSpeaking = viewModel.isSpeaking.value != true
+
+                    if (stillGenerating && stillNotDelivered && notListening && notSpeaking) {
+                        Log.i(TAG, "[${now()}][BargeIn] Starting barge-in detection (Whisper=$useWhisper)")
+                        if (useWhisper) {
+                            viewModel.startListeningForBargeIn()
+                        } else {
+                            handleStartListeningRequest(delayMs = 0L)
+                        }
                     }
                 }, AUTO_STT_DELAY_MS)
             }
@@ -290,21 +312,18 @@ class FirstFragment : Fragment() {
 
         viewModel.isSpeaking.observe(viewLifecycleOwner) { isSpeaking ->
             if (isSpeaking && viewModel.sttIsListening.value == true) {
-                Log.i(TAG, "[${now()}][AutoStopSTT] TTS started. Stopping listening only.")
-                viewModel.stopListeningOnly()
+                Log.i(TAG, "[${now()}][AutoStopSTT] TTS started. Stopping listening only (and not transcribing).")
+                // When TTS starts, we stop listening and discard any captured audio.
+                viewModel.stopListeningOnly(transcribe = false)
             }
         }
 
         viewModel.ttsQueueFinishedEvent.observe(viewLifecycleOwner) { event ->
             event.getContentIfNotHandled()?.let {
-                val prefs = requireContext().getSharedPreferences("ai_prefs", Context.MODE_PRIVATE)
-                val useWhisper = prefs.getBoolean("use_whisper", false)
-
-                // Don't auto-continue if generation is still active
                 val stillGenerating = viewModel.generationPhase.value != GenerationPhase.IDLE
-
                 if (autoContinue && !isSettingsVisible() && !stillGenerating) {
-                    if (useWhisper) {
+                    val prefs = requireContext().getSharedPreferences("ai_prefs", Context.MODE_PRIVATE)
+                    if (prefs.getBoolean("use_whisper", false)) {
                         Log.i(TAG, "[${now()}][AutoContinue] All TTS finished & generation done - starting Whisper")
                     } else {
                         Log.i(TAG, "[${now()}][AutoContinue] All TTS finished & generation done - starting STT")

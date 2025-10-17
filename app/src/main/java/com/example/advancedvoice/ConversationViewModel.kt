@@ -25,7 +25,6 @@ import androidx.lifecycle.viewModelScope
 import com.example.advancedvoice.whisper.WhisperService
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import okhttp3.OkHttpClient
 import java.io.ByteArrayOutputStream
@@ -35,7 +34,6 @@ import java.util.Date
 import java.util.Locale
 import java.util.UUID
 import java.util.concurrent.TimeUnit
-import kotlin.experimental.and
 import kotlin.math.sqrt
 
 enum class GenerationPhase {
@@ -66,11 +64,13 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
     private val audioFormat = AudioFormat.ENCODING_PCM_16BIT
 
     // VAD Parameters
-    private val VAD_SILENCE_THRESHOLD_RMS = 250.0 // Adjust this based on mic sensitivity
-    private val VAD_SPEECH_TIMEOUT_MS = 2000L     // How long to wait in silence before stopping
-    private val VAD_MIN_SPEECH_DURATION_MS = 500L // Minimum speech length to transcribe
+    private val VAD_SILENCE_THRESHOLD_RMS = 250.0
+    private val VAD_SPEECH_TIMEOUT_MS = 1000L // 1 second of silence to stop
+    private val VAD_MIN_SPEECH_DURATION_MS = 400L
     private var silenceStartTimestamp: Long = 0
     private var speechDetectedTimestamp: Long = 0
+    @Volatile private var isRecording = false
+    @Volatile private var isBargeInMode = false
     // ---
 
     // Conversation state
@@ -85,6 +85,10 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
     // Speaking flag
     private val _isSpeaking = MutableLiveData(false)
     val isSpeaking: LiveData<Boolean> = _isSpeaking
+
+    // Transcribing flag
+    private val _isTranscribing = MutableLiveData(false)
+    val isTranscribing: LiveData<Boolean> = _isTranscribing
 
     // Turn/tts events
     private val _turnFinishedEvent = MutableLiveData<Event<Unit>>()
@@ -141,7 +145,7 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
 
     private val MIN_INPUT_LENGTH = 8
 
-    // SpeechRecognizer (for standard STT mode only)
+    // SpeechRecognizer (standard STT mode only)
     private lateinit var speechRecognizer: SpeechRecognizer
     private var currentModelName: String = "gemini-1.5-pro"
 
@@ -238,7 +242,7 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
             onFinalResponse = { fullText ->
                 _generationPhase.postValue(GenerationPhase.IDLE)
                 _llmDelivered.postValue(true)
-                if (_sttIsListening.value == true) stopListeningOnly()
+                if (_sttIsListening.value == true) stopListeningOnly(transcribe = false)
 
                 val sentences = dedupeSentences(SentenceSplitter.splitIntoSentences(fullText))
                 val idx = currentAssistantEntryIndex
@@ -284,6 +288,7 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
 
         whisperService.transcriptionResult.observeForever { event ->
             event.getContentIfNotHandled()?.let { result ->
+                _isTranscribing.postValue(false)
                 if (result.isNotBlank()) {
                     handleSttResult(result)
                 } else {
@@ -322,12 +327,11 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
                 _sttIsListening.postValue(true)
                 Log.d(TAG, "[${now()}][STT] onReadyForSpeech")
             }
-
             override fun onBeginningOfSpeech() {
                 Log.i(TAG, "[${now()}][STT] onBeginningOfSpeech")
                 if (_isSpeaking.value == true) {
                     Log.w(TAG, "[${now()}][STT] TTS is active. Stopping listening.")
-                    stopListeningOnly()
+                    stopListeningOnly(transcribe = false)
                     return
                 }
                 val generating = engine.isActive()
@@ -339,7 +343,6 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
                     abortEngineSilently()
                 }
             }
-
             override fun onResults(results: Bundle?) {
                 _sttIsListening.postValue(false)
                 val matches = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
@@ -349,7 +352,6 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
                 }
                 userInterruptedDuringGeneration = false
             }
-
             override fun onError(error: Int) {
                 _sttIsListening.postValue(false)
                 val wasInterrupting = userInterruptedDuringGeneration
@@ -383,12 +385,10 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
                     _sttError.postValue(Event("STT Error: $errorName"))
                 }
             }
-
             override fun onEndOfSpeech() {
                 _sttIsListening.postValue(false)
                 Log.d(TAG, "[${now()}][STT] onEndOfSpeech")
             }
-
             override fun onBufferReceived(buffer: ByteArray?) {}
             override fun onRmsChanged(rmsdB: Float) {}
             override fun onPartialResults(partialResults: Bundle?) {}
@@ -428,23 +428,37 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
             Log.i(TAG, "[${now()}][STT] Blocked - TTS is speaking")
             return
         }
-        if (_sttIsListening.value == true) {
+        if (_sttIsListening.value == true || isRecording) {
             Log.w(TAG, "[${now()}][STT] Already listening, ignoring request.")
             return
         }
 
         Log.i(TAG, "[${now()}][STT] startListening() request received.")
 
-        // ROUTE LOGIC: Use custom VAD for Whisper, or standard STT
         if (useWhisperStt) {
             if (whisperService.isModelReady.value != true) {
                 addSystemEntry("Whisper model is not ready. Please check settings.")
                 return
             }
+            isBargeInMode = false
             startWhisperRecordingWithVAD()
         } else {
             startStandardSTT()
         }
+    }
+
+    fun startListeningForBargeIn() {
+        if (_llmDelivered.value == true) {
+            Log.d(TAG, "[BargeIn] Blocked - LLM already delivered response")
+            return
+        }
+        if (_sttIsListening.value == true || isRecording) {
+            Log.d(TAG, "[BargeIn] Already listening")
+            return
+        }
+        Log.i(TAG, "[BargeIn] Starting listening to detect user interruption")
+        isBargeInMode = true
+        startWhisperRecordingWithVAD()
     }
 
     private fun startStandardSTT() {
@@ -458,8 +472,6 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
         speechRecognizer.startListening(intent)
     }
 
-    @Volatile private var isRecording = false
-
     private fun startWhisperRecordingWithVAD() {
         if (ActivityCompat.checkSelfPermission(getApplication(), Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
             _sttError.postValue(Event("RECORD_AUDIO permission not granted."))
@@ -471,7 +483,8 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
             return
         }
 
-        Log.i(TAG, "[WhisperVAD] ━━━ Starting Whisper with custom VAD | bufferSize=$bufferSize")
+        val mode = if (isBargeInMode) "BARGE-IN" else "NORMAL"
+        Log.i(TAG, "[WhisperVAD] ━━━ Starting Whisper with custom VAD | Mode=$mode | Timeout=${VAD_SPEECH_TIMEOUT_MS}ms | bufferSize=$bufferSize")
 
         audioBuffer.reset()
         audioRecord = AudioRecord(MediaRecorder.AudioSource.MIC, audioSampleRate, audioChannel, audioFormat, bufferSize)
@@ -483,111 +496,137 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
 
         audioRecord?.startRecording()
         _sttIsListening.postValue(true)
-        isRecording = true  // Set volatile flag for background thread
+        isRecording = true
         silenceStartTimestamp = 0
         speechDetectedTimestamp = 0
 
         Log.i(TAG, "[WhisperVAD] AudioRecord started, isRecording=$isRecording")
 
         recordingJob = viewModelScope.launch(Dispatchers.IO) {
-            Log.i(TAG, "[WhisperVAD] ━━━ Background thread started | isRecording=$isRecording")
+            Log.i(TAG, "[WhisperVAD] ━━━ Background thread started | isRecording=$isRecording | BargeIn=$isBargeInMode")
             val data = ShortArray(bufferSize / 2)
-            var loopCount = 0
 
-            while (isRecording) {  // Use volatile flag instead of LiveData
-                loopCount++
+            while (isRecording) {
                 val read = audioRecord?.read(data, 0, data.size) ?: -1
-
-                if (read > 0) {
-                    val rms = calculateRms(data, read)
-                    val isSilent = rms < VAD_SILENCE_THRESHOLD_RMS
-                    val now = System.currentTimeMillis()
-
-                    if (loopCount % 50 == 0) {  // Log every 50 iterations (~1 second)
-                        Log.d(TAG, "[WhisperVAD] Loop #$loopCount | RMS=$rms | Silent=$isSilent | SpeechDetected=${speechDetectedTimestamp > 0}")
-                    }
-
-                    if (isSilent) {
-                        if (silenceStartTimestamp == 0L && speechDetectedTimestamp > 0L) {
-                            // First time entering silence after speech
-                            silenceStartTimestamp = now
-                            Log.i(TAG, "[WhisperVAD] ━━━ Silence started | Will timeout in ${VAD_SPEECH_TIMEOUT_MS}ms")
-                        }
-
-                        if (silenceStartTimestamp > 0L) {
-                            val silenceDuration = now - silenceStartTimestamp
-                            if (silenceDuration > VAD_SPEECH_TIMEOUT_MS) {
-                                Log.i(TAG, "[WhisperVAD] ━━━ Silence timeout reached (${silenceDuration}ms) | Stopping...")
-                                launch(Dispatchers.Main) { stopListeningOnly() }
-                                break
-                            }
-                        }
-                    } else {
-                        // Active speech
-                        if (speechDetectedTimestamp == 0L) {
-                            speechDetectedTimestamp = now
-                            Log.i(TAG, "[WhisperVAD] ━━━ SPEECH DETECTED! | RMS=$rms (threshold=$VAD_SILENCE_THRESHOLD_RMS)")
-                        }
-
-                        // Reset silence timer whenever we detect non-silent audio
-                        if (silenceStartTimestamp > 0L) {
-                            Log.d(TAG, "[WhisperVAD] Speech resumed after ${now - silenceStartTimestamp}ms of silence")
-                            silenceStartTimestamp = 0
-                        }
-
-                        // Write audio bytes to buffer
-                        val byteData = data.to16BitPcm()
-                        audioBuffer.write(byteData, 0, read * 2)
-                    }
-                } else if (read == 0) {
-                    Log.w(TAG, "[WhisperVAD] AudioRecord.read() returned 0")
-                } else {
-                    Log.e(TAG, "[WhisperVAD] AudioRecord.read() error: $read")
+                if (read <= 0) {
+                    Log.e(TAG, "[WhisperVAD] AudioRecord.read() error or end of stream: $read")
                     break
                 }
+
+                val rms = calculateRms(data, read)
+                val isSilent = rms < VAD_SILENCE_THRESHOLD_RMS
+                val now = System.currentTimeMillis()
+
+                if (isSilent) {
+                    if (silenceStartTimestamp == 0L && speechDetectedTimestamp > 0L) {
+                        silenceStartTimestamp = now
+                        Log.i(TAG, "[WhisperVAD] ━━━ Silence started | Will timeout in ${VAD_SPEECH_TIMEOUT_MS}ms")
+                    }
+
+                    if (silenceStartTimestamp > 0L) {
+                        val silenceDuration = now - silenceStartTimestamp
+                        if (silenceDuration > VAD_SPEECH_TIMEOUT_MS) {
+                            Log.i(TAG, "[WhisperVAD] ━━━ Silence timeout reached (${silenceDuration}ms) | Stopping to transcribe")
+                            launch(Dispatchers.Main) { stopAndTranscribe() }
+                            break
+                        }
+                    }
+                } else {
+                    if (speechDetectedTimestamp == 0L) {
+                        speechDetectedTimestamp = now
+                        Log.i(TAG, "[WhisperVAD] ━━━ SPEECH DETECTED! | RMS=$rms (threshold=$VAD_SILENCE_THRESHOLD_RMS)")
+
+                        if (isBargeInMode) {
+                            val generating = engine.isActive()
+                            val delivered = _llmDelivered.value == true
+                            if (generating && !delivered) {
+                                Log.i(TAG, "[WhisperVAD] ━━━ BARGE-IN! User interrupted generation - will abort and combine")
+                                launch(Dispatchers.Main) {
+                                    userInterruptedDuringGeneration = true
+                                    removeAssistantEntryIfCurrent()
+                                    abortEngineSilently()
+                                }
+                                isBargeInMode = false
+                            }
+                        }
+                    }
+
+                    if (silenceStartTimestamp > 0L) {
+                        Log.d(TAG, "[WhisperVAD] Speech resumed after ${now - silenceStartTimestamp}ms of silence")
+                        silenceStartTimestamp = 0
+                    }
+
+                    val byteData = data.to16BitPcm()
+                    audioBuffer.write(byteData, 0, read * 2)
+                }
             }
-            Log.i(TAG, "[WhisperVAD] ━━━ Recording loop finished | Total loops: $loopCount | isRecording=$isRecording")
+            Log.i(TAG, "[WhisperVAD] ━━━ Recording loop finished | isRecording=$isRecording")
         }
     }
 
-    // Replace stopListeningOnly():
-    fun stopListeningOnly() {
-        if (_sttIsListening.value == false && !isRecording) {
+    private fun stopAndTranscribe() {
+        if (!isRecording) return
+        val wasBargeIn = isBargeInMode
+        isBargeInMode = false
+
+        _sttIsListening.postValue(false)
+        isRecording = false
+
+        recordingJob?.cancel()
+        recordingJob = null
+        audioRecord?.stop()
+        audioRecord?.release()
+        audioRecord = null
+
+        val capturedDuration = if (speechDetectedTimestamp > 0L) System.currentTimeMillis() - speechDetectedTimestamp else 0L
+        val audioSize = audioBuffer.size()
+        Log.i(TAG, "[WhisperVAD] ━━━ StopAndTranscribe | Mode=${if (wasBargeIn) "BARGE-IN" else "NORMAL"} | AudioSize=${audioSize} bytes | SpeechDuration=${capturedDuration}ms")
+
+        if (speechDetectedTimestamp > 0L && capturedDuration > VAD_MIN_SPEECH_DURATION_MS) {
+            val audioData = audioBuffer.toByteArray()
+            _isTranscribing.postValue(true)
+            Log.i(TAG, "[Whisper] ━━━ Transcribing ${audioData.size} bytes.")
+            whisperService.transcribeAudio(audioData)
+        } else {
+            Log.i(TAG, "[Whisper] ━━━ No significant speech detected, not transcribing.")
+            _sttNoMatch.postValue(Event(Unit))
+        }
+    }
+
+    fun stopListeningOnly(transcribe: Boolean) {
+        if (!_sttIsListening.value!! && !isRecording) {
             Log.d(TAG, "[${now()}][STT] stopListeningOnly() - already stopped")
             return
         }
-        Log.i(TAG, "[${now()}][STT] ━━━ stopListeningOnly() called | useWhisper=$useWhisperStt | isRecording=$isRecording")
-
+        Log.i(TAG, "[${now()}][STT] ━━━ stopListeningOnly() called | useWhisper=$useWhisperStt | isRecording=$isRecording | transcribe=$transcribe")
         _sttIsListening.postValue(false)
 
         if (useWhisperStt) {
-            // Stop custom VAD recording
-            isRecording = false  // Signal background thread to stop
+            isRecording = false
             recordingJob?.cancel()
             recordingJob = null
+
+            // Immediately release resources
             audioRecord?.stop()
             audioRecord?.release()
             audioRecord = null
 
-            val capturedDuration = if (speechDetectedTimestamp > 0L) {
-                System.currentTimeMillis() - speechDetectedTimestamp
-            } else {
-                0L
-            }
+            if (transcribe) {
+                val capturedDuration = if (speechDetectedTimestamp > 0L) System.currentTimeMillis() - speechDetectedTimestamp else 0L
+                val audioSize = audioBuffer.size()
+                Log.i(TAG, "[WhisperVAD] ━━━ Hard Stop | AudioSize=${audioSize} bytes | SpeechDuration=${capturedDuration}ms")
 
-            val audioSize = audioBuffer.size()
-            Log.i(TAG, "[WhisperVAD] ━━━ Stopped | AudioSize=${audioSize} bytes | SpeechDuration=${capturedDuration}ms | MinDuration=${VAD_MIN_SPEECH_DURATION_MS}ms")
-
-            if (speechDetectedTimestamp > 0L && capturedDuration > VAD_MIN_SPEECH_DURATION_MS) {
-                val audioData = audioBuffer.toByteArray()
-                Log.i(TAG, "[Whisper] ━━━ Transcribing ${audioData.size} bytes.")
-                whisperService.transcribeAudio(audioData)
-            } else {
-                Log.i(TAG, "[Whisper] ━━━ No significant speech detected (duration=${capturedDuration}ms), not transcribing.")
-                _sttNoMatch.postValue(Event(Unit))
+                if (speechDetectedTimestamp > 0L && capturedDuration > VAD_MIN_SPEECH_DURATION_MS) {
+                    val audioData = audioBuffer.toByteArray()
+                    _isTranscribing.postValue(true)
+                    Log.i(TAG, "[Whisper] ━━━ Transcribing ${audioData.size} bytes.")
+                    whisperService.transcribeAudio(audioData)
+                } else {
+                    Log.i(TAG, "[Whisper] ━━━ No significant speech detected, not transcribing.")
+                    _sttNoMatch.postValue(Event(Unit))
+                }
             }
         } else {
-            // Stop standard STT
             try { speechRecognizer.stopListening() } catch (_: Exception) {}
         }
     }
@@ -603,7 +642,7 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
     private fun ShortArray.to16BitPcm(): ByteArray {
         val bytes = ByteArray(this.size * 2)
         for (i in this.indices) {
-            bytes[i * 2] = (this[i] and 0x00FF).toByte()
+            bytes[i * 2] = (this[i].toInt() and 0xFF).toByte()
             bytes[i * 2 + 1] = (this[i].toInt() shr 8).toByte()
         }
         return bytes
@@ -701,7 +740,7 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
     fun stopAll() {
         abortEngine()
         stopTts()
-        stopListeningOnly()
+        stopListeningOnly(transcribe = false)
     }
     fun stopTts() {
         try { tts.stop() } catch (_: Exception) {}
@@ -730,6 +769,8 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
     override fun onCleared() {
         super.onCleared()
         whisperService.release()
+        isRecording = false
+        recordingJob?.cancel()
         audioRecord?.release()
         try {
             tts.stop()
@@ -781,17 +822,23 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
             }
         }
     }
+
     private fun getEffectiveSystemPromptFromPrefs(): String {
         val base = prefs.getString("system_prompt", "").orEmpty().ifBlank { DEFAULT_BASE_PROMPT }
         val maxSent = prefs.getInt("max_sentences", 4).coerceIn(1, 10)
         val faster = prefs.getBoolean("faster_first", true)
         val extras = buildList {
             add("Return plain text only.")
-            if (maxSent >= 1) add("When appropriate, keep answers to at most $maxSent complete sentences.")
-            if (faster) add("Begin with a complete first sentence promptly, then continue.")
+            if (maxSent >= 1) {
+                add("Generally aim for concise responses of around $maxSent sentences, but always prioritize the user's explicit instructions about response length (e.g., 'in one sentence', 'briefly', 'in detail').")
+            }
+            if (faster) {
+                add("Begin with a complete first sentence promptly, then continue.")
+            }
         }.joinToString(" ")
         return if (extras.isBlank()) base else "$base\n\n$extras"
     }
+
     private fun getOpenAiOptionsFromPrefs(): OpenAiOptions {
         val effort = prefs.getString("gpt4_effort", "low") ?: "low"
         val verbosity = prefs.getString("gpt4_verbosity", "low") ?: "low"

@@ -65,7 +65,7 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
 
     // VAD Parameters
     private val VAD_SILENCE_THRESHOLD_RMS = 250.0
-    private val VAD_SPEECH_TIMEOUT_MS = 1000L // 1 second of silence to stop
+    private val VAD_SPEECH_TIMEOUT_MS = 600L
     private val VAD_MIN_SPEECH_DURATION_MS = 400L
     private var silenceStartTimestamp: Long = 0
     private var speechDetectedTimestamp: Long = 0
@@ -594,7 +594,7 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
     }
 
     fun stopListeningOnly(transcribe: Boolean) {
-        if (!_sttIsListening.value!! && !isRecording) {
+        if (_sttIsListening.value == false && !isRecording) {
             Log.d(TAG, "[${now()}][STT] stopListeningOnly() - already stopped")
             return
         }
@@ -606,7 +606,6 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
             recordingJob?.cancel()
             recordingJob = null
 
-            // Immediately release resources
             audioRecord?.stop()
             audioRecord?.release()
             audioRecord = null

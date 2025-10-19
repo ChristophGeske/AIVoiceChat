@@ -16,6 +16,7 @@ class SentenceTurnEngine(
     private val openAiKeyProvider: () -> String,
     private val systemPromptProvider: () -> String,
     private val openAiOptionsProvider: () -> OpenAiOptions,
+    private val prefsProvider: () -> android.content.SharedPreferences,
     val callbacks: Callbacks
 ) {
 
@@ -172,7 +173,8 @@ class SentenceTurnEngine(
                 http = http,
                 geminiKeyProvider = geminiKeyProvider,
                 openAiKeyProvider = openAiKeyProvider,
-                openAiOptionsProvider = openAiOptionsProvider
+                openAiOptionsProvider = openAiOptionsProvider,
+                prefsProvider = prefsProvider
             )
         } else {
             Log.i(TAG, "Strategy=RegularGenerationStrategy")

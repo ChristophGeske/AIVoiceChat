@@ -130,6 +130,7 @@ class FirstFragment : Fragment() {
     private fun setupPrefsBackedInputs() {
         val prefs = requireContext().getSharedPreferences("ai_prefs", Context.MODE_PRIVATE)
 
+        // API Keys
         binding.geminiApiKeyInput.hint = getString(R.string.gemini_api_key_hint)
         binding.openaiApiKeyInput.hint = getString(R.string.openai_api_key_hint)
         binding.geminiApiKeyInput.setText(prefs.getString("gemini_key", "") ?: "")
@@ -162,6 +163,7 @@ class FirstFragment : Fragment() {
             }
         }
 
+        // Base System Prompt
         val savedPrompt = prefs.getString("system_prompt", ConversationViewModel.DEFAULT_SYSTEM_PROMPT)
         binding.systemPromptInput.setText(savedPrompt)
         binding.systemPromptInput.doAfterTextChanged { editable ->
@@ -174,9 +176,48 @@ class FirstFragment : Fragment() {
             prefs.edit().putString("system_prompt", defaultPrompt).apply()
             Toast.makeText(context, "System prompt reset to default", Toast.LENGTH_SHORT).show()
         }
+        
+        // Phase 1 Prompt (Faster First - First Sentence)
+        val phase1Saved = prefs.getString("phase1_prompt", Prompts.getDefaultPhase1Prompt())
+        binding.phase1PromptInput.setText(phase1Saved)
+        binding.phase1PromptInput.doAfterTextChanged { editable ->
+            prefs.edit().putString("phase1_prompt", editable?.toString().orEmpty()).apply()
+        }
 
-        binding.systemPromptExtensionInput.visibility = View.GONE
+        binding.resetPhase1PromptButton.setOnClickListener {
+            binding.phase1PromptInput.setText(Prompts.getDefaultPhase1Prompt())
+            prefs.edit().putString("phase1_prompt", Prompts.getDefaultPhase1Prompt()).apply()
+            Toast.makeText(context, "Phase 1 prompt reset to default", Toast.LENGTH_SHORT).show()
+        }
 
+        // Phase 2 Prompt (Faster First - Continuation)
+        val phase2Saved = prefs.getString("phase2_prompt", Prompts.getDefaultPhase2Prompt())
+        binding.phase2PromptInput.setText(phase2Saved)
+        binding.phase2PromptInput.doAfterTextChanged { editable ->
+            prefs.edit().putString("phase2_prompt", editable?.toString().orEmpty()).apply()
+        }
+
+        binding.resetPhase2PromptButton.setOnClickListener {
+            binding.phase2PromptInput.setText(Prompts.getDefaultPhase2Prompt())
+            prefs.edit().putString("phase2_prompt", Prompts.getDefaultPhase2Prompt()).apply()
+            Toast.makeText(context, "Phase 2 prompt reset to default", Toast.LENGTH_SHORT).show()
+        }
+
+        // Function to show/hide phase prompts based on Faster First setting
+        val updatePhasePromptsVisibility = { fasterFirstEnabled: Boolean ->
+            val visibility = if (fasterFirstEnabled) View.VISIBLE else View.GONE
+            binding.phase1PromptTitle.visibility = visibility
+            binding.phase1PromptDesc.visibility = visibility
+            binding.phase1PromptLayout.visibility = visibility
+            binding.resetPhase1PromptButton.visibility = visibility
+            binding.phase2PromptTitle.visibility = visibility
+            binding.phase2PromptDesc.visibility = visibility
+            binding.phase2PromptLayout.visibility = visibility
+            binding.resetPhase2PromptButton.visibility = visibility
+            binding.systemPromptWarning.visibility = if (fasterFirstEnabled) View.VISIBLE else View.GONE
+        }
+
+        // Max Sentences
         val savedMax = prefs.getInt("max_sentences", 4).coerceIn(1, 10)
         binding.maxSentencesInput.setText(savedMax.toString())
         binding.maxSentencesInput.doAfterTextChanged { editable ->
@@ -187,13 +228,21 @@ class FirstFragment : Fragment() {
             }
         }
 
+        // Faster First Switch
         val faster = prefs.getBoolean("faster_first", true)
         binding.switchFasterFirst.isChecked = faster
+
+        // Set initial visibility
+        updatePhasePromptsVisibility(faster)
+
+        // Update visibility when switch changes
         binding.switchFasterFirst.setOnCheckedChangeListener { _, isChecked ->
             prefs.edit().putBoolean("faster_first", isChecked).apply()
             viewModel.applyEngineConfigFromPrefs(prefs)
+            updatePhasePromptsVisibility(isChecked)
         }
 
+        // Listen Window Duration
         val savedListen = prefs.getInt("listen_seconds", 5).coerceIn(1, 120)
         binding.listenSecondsInput?.setText(savedListen.toString())
         binding.listenSecondsInput?.doAfterTextChanged { editable ->

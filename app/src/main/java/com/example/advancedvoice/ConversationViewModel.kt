@@ -230,6 +230,7 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
             openAiKeyProvider = { prefs.getString("openai_key", "").orEmpty() },
             systemPromptProvider = { getEffectiveSystemPromptFromPrefs() },
             openAiOptionsProvider = { getOpenAiOptionsFromPrefs() },
+            prefsProvider = { prefs },
             callbacks = cb
         )
     }

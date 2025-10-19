@@ -321,6 +321,7 @@
                 <!-- END: WHISPER SETTINGS BLOCK -->
 
                 <!-- System Prompt -->
+                <!-- System Prompt Section -->
                 <LinearLayout
                     android:id="@+id/systemPromptGroup"
                     android:layout_width="match_parent"
@@ -328,6 +329,29 @@
                     android:layout_marginTop="12dp"
                     android:orientation="vertical">
 
+                    <!-- Base System Prompt Title -->
+                    <TextView
+                        android:id="@+id/systemPromptTitle"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="Base System Prompt"
+                        android:textAppearance="?attr/textAppearanceTitleMedium"
+                        android:textColor="#FFFFFF"/>
+
+                    <!-- Warning: shown when Faster First is enabled -->
+                    <TextView
+                        android:id="@+id/systemPromptWarning"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="4dp"
+                        android:layout_marginBottom="8dp"
+                        android:text="⚠️ This prompt is used as context in both phases when 'Faster First Response' is enabled."
+                        android:textColor="#FFA726"
+                        android:textSize="12sp"
+                        android:visibility="gone"
+                        tools:visibility="visible"/>
+
+                    <!-- Base System Prompt Input -->
                     <com.google.android.material.textfield.TextInputLayout
                         style="@style/Widget.MaterialComponents.TextInputLayout.OutlinedBox"
                         android:layout_width="match_parent"
@@ -344,24 +368,6 @@
                             android:minLines="3" />
                     </com.google.android.material.textfield.TextInputLayout>
 
-                    <com.google.android.material.textfield.TextInputLayout
-                        android:id="@+id/systemPromptExtensionLayout"
-                        style="@style/Widget.MaterialComponents.TextInputLayout.OutlinedBox"
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:layout_marginTop="8dp"
-                        android:hint="System prompt extension">
-
-                        <com.google.android.material.textfield.TextInputEditText
-                            android:id="@+id/systemPromptExtensionInput"
-                            android:layout_width="match_parent"
-                            android:layout_height="wrap_content"
-                            android:gravity="top"
-                            android:inputType="textMultiLine"
-                            android:minLines="2"
-                            android:maxLines="8" />
-                    </com.google.android.material.textfield.TextInputLayout>
-
                     <com.google.android.material.button.MaterialButton
                         android:id="@+id/resetSystemPromptButton"
                         style="@style/Widget.MaterialComponents.Button.TextButton"
@@ -369,6 +375,112 @@
                         android:layout_height="wrap_content"
                         android:layout_gravity="end"
                         android:text="@string/reset_prompt" />
+
+                    <!-- Phase 1 Prompt (Fast First Sentence) - Only visible when Faster First is ON -->
+                    <TextView
+                        android:id="@+id/phase1PromptTitle"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="24dp"
+                        android:text="Phase 1 Prompt (Fast First Sentence)"
+                        android:textAppearance="?attr/textAppearanceTitleMedium"
+                        android:textColor="#FFFFFF"
+                        android:visibility="gone"
+                        tools:visibility="visible"/>
+
+                    <TextView
+                        android:id="@+id/phase1PromptDesc"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="4dp"
+                        android:layout_marginBottom="8dp"
+                        android:text="This prompt is added as a user message to generate the first sentence quickly."
+                        android:textColor="#B0BEC5"
+                        android:textSize="12sp"
+                        android:visibility="gone"
+                        tools:visibility="visible"/>
+
+                    <com.google.android.material.textfield.TextInputLayout
+                        android:id="@+id/phase1PromptLayout"
+                        style="@style/Widget.MaterialComponents.TextInputLayout.OutlinedBox"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:hint="Phase 1 instructions"
+                        android:visibility="gone"
+                        tools:visibility="visible">
+
+                        <com.google.android.material.textfield.TextInputEditText
+                            android:id="@+id/phase1PromptInput"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:gravity="top"
+                            android:inputType="textMultiLine"
+                            android:minLines="4"
+                            android:maxLines="12" />
+                    </com.google.android.material.textfield.TextInputLayout>
+
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/resetPhase1PromptButton"
+                        style="@style/Widget.MaterialComponents.Button.TextButton"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_gravity="end"
+                        android:text="Reset Phase 1"
+                        android:visibility="gone"
+                        tools:visibility="visible"/>
+
+                    <!-- Phase 2 Prompt (Detailed Continuation) - Only visible when Faster First is ON -->
+                    <TextView
+                        android:id="@+id/phase2PromptTitle"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="24dp"
+                        android:text="Phase 2 Prompt (Detailed Continuation)"
+                        android:textAppearance="?attr/textAppearanceTitleMedium"
+                        android:textColor="#FFFFFF"
+                        android:visibility="gone"
+                        tools:visibility="visible"/>
+
+                    <TextView
+                        android:id="@+id/phase2PromptDesc"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="4dp"
+                        android:layout_marginBottom="8dp"
+                        android:text="This prompt is added as a user message to generate the remaining sentences with full detail. Use {FIRST_SENTENCE}, {REMAINING_COUNT}, and {PLURAL} as placeholders."
+                        android:textColor="#B0BEC5"
+                        android:textSize="12sp"
+                        android:visibility="gone"
+                        tools:visibility="visible"/>
+
+                    <com.google.android.material.textfield.TextInputLayout
+                        android:id="@+id/phase2PromptLayout"
+                        style="@style/Widget.MaterialComponents.TextInputLayout.OutlinedBox"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:hint="Phase 2 instructions"
+                        android:visibility="gone"
+                        tools:visibility="visible">
+
+                        <com.google.android.material.textfield.TextInputEditText
+                            android:id="@+id/phase2PromptInput"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:gravity="top"
+                            android:inputType="textMultiLine"
+                            android:minLines="6"
+                            android:maxLines="16" />
+                    </com.google.android.material.textfield.TextInputLayout>
+
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/resetPhase2PromptButton"
+                        style="@style/Widget.MaterialComponents.Button.TextButton"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_gravity="end"
+                        android:text="Reset Phase 2"
+                        android:visibility="gone"
+                        tools:visibility="visible"/>
                 </LinearLayout>
 
             </LinearLayout>

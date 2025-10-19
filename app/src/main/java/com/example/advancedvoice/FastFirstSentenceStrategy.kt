@@ -37,6 +37,7 @@ class FastFirstSentenceStrategy(
     private val geminiKeyProvider: () -> String,
     private val openAiKeyProvider: () -> String,
     private val openAiOptionsProvider: () -> OpenAiOptions,
+    private val prefsProvider: () -> android.content.SharedPreferences,
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO
 ) : IGenerationStrategy {
 
@@ -126,7 +127,7 @@ class FastFirstSentenceStrategy(
         val fastModel = chooseFastModel(originalModel)
         val temp = 0.2
 
-        val prompt = Prompts.getFastFirstPhase1Prompt()
+        val prompt = Prompts.getFastFirstPhase1Prompt(prefsProvider())
 
         Log.i(TAG, "[FastFirst:$turnId] Phase1 model=$fastModel (from $originalModel) temp=$temp")
 
@@ -152,8 +153,7 @@ class FastFirstSentenceStrategy(
         val isGemini = qualityModel.contains("gemini", ignoreCase = true)
         val temp = 0.7
 
-        // KORREKTUR: Ruft den neuen, zentralisierten Prompt auf.
-        val prompt = Prompts.getFastFirstPhase2Prompt(firstSentence, maxSentences)
+        val prompt = Prompts.getFastFirstPhase2Prompt(firstSentence, maxSentences, prefsProvider())
 
         val updatedHistory = history + Msg("assistant", firstSentence) + Msg("user", prompt)
 

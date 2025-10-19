@@ -312,6 +312,42 @@
                         android:text="English only (faster)" />
                 </RadioGroup>
 
+                <!-- ADD THIS NEW RADIOGROUP FOR LANGUAGE SELECTION -->
+                <RadioGroup
+                    android:id="@+id/radioGroupWhisperLanguage"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="32dp"
+                    android:layout_marginTop="4dp"
+                    android:orientation="horizontal"
+                    android:visibility="gone"
+                    tools:visibility="visible">
+
+                    <RadioButton
+                        android:id="@+id/radioWhisperLangAuto"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:text="Auto-detect"
+                        android:textColor="#FFFFFF" />
+
+                    <RadioButton
+                        android:id="@+id/radioWhisperLangEn"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:text="English"
+                        android:textColor="#FFFFFF" />
+
+                    <RadioButton
+                        android:id="@+id/radioWhisperLangDe"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:text="German"
+                        android:textColor="#FFFFFF" />
+                </RadioGroup>
+
                 <TextView
                     android:id="@+id/whisperDownloadStatus"
                     android:layout_width="match_parent"

@@ -610,30 +610,49 @@ class FirstFragment : Fragment() {
 
         binding.switchUseWhisper.isChecked = useWhisper
         binding.radioGroupWhisperModel.visibility = if (useWhisper) View.VISIBLE else View.GONE
-
         binding.radioGroupWhisperModel.clearCheck()
 
+        // Restore saved settings on startup
         if (useWhisper && modelHasBeenSelected) {
             val isMultilingual = prefs.getBoolean("whisper_is_multilingual", true)
-            if (isMultilingual) binding.radioWhisperMultilingual.isChecked = true
-            else binding.radioWhisperEnglish.isChecked = true
+            if (isMultilingual) {
+                binding.radioWhisperMultilingual.isChecked = true
+                binding.radioGroupWhisperLanguage.visibility = View.VISIBLE // Show language options
+                // Restore language selection
+                when (prefs.getString("whisper_language", "auto")) {
+                    "en" -> binding.radioWhisperLangEn.isChecked = true
+                    "de" -> binding.radioWhisperLangDe.isChecked = true
+                    else -> binding.radioWhisperLangAuto.isChecked = true
+                }
+            } else {
+                binding.radioWhisperEnglish.isChecked = true
+                binding.radioGroupWhisperLanguage.visibility = View.GONE // Hide language options
+            }
             viewModel.setUseWhisper(true, isMultilingual)
             checkAndDownloadModel()
         } else {
             viewModel.setUseWhisper(useWhisper, false)
+            binding.radioGroupWhisperLanguage.visibility = View.GONE
         }
 
+        // Listener for the main Whisper switch
         binding.switchUseWhisper.setOnCheckedChangeListener { _, isChecked ->
             prefs.edit().putBoolean("use_whisper", isChecked).apply()
             binding.radioGroupWhisperModel.visibility = if (isChecked) View.VISIBLE else View.GONE
             if (!isChecked) {
                 viewModel.setUseWhisper(false, false)
+                binding.radioGroupWhisperLanguage.visibility = View.GONE // Also hide language options
             }
         }
 
+        // Listener for the Whisper model selection (Multi-lingual vs. English)
         binding.radioGroupWhisperModel.setOnCheckedChangeListener { _, checkedId ->
             if (checkedId == -1) return@setOnCheckedChangeListener
             val isMultilingual = checkedId == R.id.radioWhisperMultilingual
+
+            // Show language options ONLY for the multilingual model
+            binding.radioGroupWhisperLanguage.visibility = if (isMultilingual) View.VISIBLE else View.GONE
+
             prefs.edit()
                 .putBoolean("whisper_model_selected", true)
                 .putBoolean("whisper_is_multilingual", isMultilingual)
@@ -641,7 +660,20 @@ class FirstFragment : Fragment() {
             viewModel.setUseWhisper(true, isMultilingual)
             checkAndDownloadModel()
         }
+
+        // Listener for the new language selection
+        binding.radioGroupWhisperLanguage.setOnCheckedChangeListener { _, checkedId ->
+            val langCode = when (checkedId) {
+                R.id.radioWhisperLangEn -> "en"
+                R.id.radioWhisperLangDe -> "de"
+                else -> "auto" // Default to auto-detect
+            }
+            prefs.edit().putString("whisper_language", langCode).apply()
+            viewModel.whisperService.setLanguage(langCode)
+            Log.d(TAG, "Whisper language preference set to: $langCode")
+        }
     }
+
 
     private fun checkAndDownloadModel() {
         if (binding.radioGroupWhisperModel.checkedRadioButtonId == -1) {

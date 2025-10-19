@@ -1,22 +1,28 @@
-package com.example.advancedvoice
+package com.example.advancedvoice;
 
-import android.util.Log
-import java.util.regex.Matcher
-import java.util.regex.Pattern
+import android.util.Log;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * Splits LLM responses into speakable sentences.
  * - [Restored] Minimum 20 characters per sentence (prevents splitting lists into tiny fragments).
  * - [Restored] Merges short trailing sentences with the previous one.
  * - Handles ., !, ? terminators robustly.
+ * - [FIXED] Does not split on periods that are part of numbers (e.g., 16.8).
  */
 object SentenceSplitter {
     private const val TAG = "SentenceSplitter"
     private const val MIN_SENTENCE_LENGTH = 20
 
-    // This regex finds segments of text that end with a sentence terminator.
-    // It's non-greedy to capture sentences one by one.
-    private val sentenceMatcher: Pattern = Pattern.compile(".*?([.!?])")
+    // --- ÄNDERUNG ---
+    // Der reguläre Ausdruck wurde verbessert.
+    // (?<!\\d)\\. bedeutet: Ein Punkt, dem KEINE Ziffer (\\d) vorangeht.
+    // [!?] erfasst weiterhin Frage- und Ausrufezeichen.
+    // Dies verhindert die Trennung bei Zahlen wie "16.8".
+    private val sentenceMatcher: Pattern = Pattern.compile(".*?((?<!\\d)\\.|[!?])")
+    // --- ENDE DER ÄNDERUNG ---
+
 
     /**
      * Splits text into sentences with the minimum length constraint.

@@ -132,10 +132,10 @@ class FastFirstSentenceStrategy(
         val fastModel = chooseFastModel(originalModel)
         val temp = 0.2
         val prompt = """
-            Answer the user's previous question with ONLY the first sentence of your response.
-            The sentence must be complete, factual, and concise. No greetings or slang.
-            Plain text only.
-        """.trimIndent()
+        Answer the user's previous question with ONLY the first sentence of your response.
+        The sentence must be complete, factual, and concise. No greetings or slang.
+        Plain text only.
+    """.trimIndent()
 
         Log.i(TAG, "[FastFirst:$turnId] Phase1 model=$fastModel (from $originalModel) temp=$temp")
 
@@ -145,7 +145,10 @@ class FastFirstSentenceStrategy(
             callOpenAi(systemPrompt, history + Msg("user", prompt), fastModel, temp, onGrounding, postSystem)
         }
 
-        val first = SentenceSplitter.extractFirstSentence(response).first
+        // Der SentenceSplitter wird nicht mehr verwendet.
+        // Die komplette Antwort des schnellen Modells wird ohne Kürzung übernommen.
+        val first = response.trim()
+
         return first.ifBlank { null }
     }
 

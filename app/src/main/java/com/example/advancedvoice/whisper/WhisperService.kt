@@ -1,4 +1,3 @@
-// In: app/src/main/java/com/example/advancedvoice/whisper/WhisperService.kt
 package com.example.advancedvoice.whisper
 
 import android.app.Application
@@ -99,6 +98,14 @@ class WhisperService(
         RecordBuffer.setOutputBuffer(audioData)
         whisper?.setAction(Whisper.Action.TRANSCRIBE)
         whisper?.start()
+    }
+
+    fun setLanguage(languageCode: String) {
+        scope.launch(Dispatchers.IO) {
+            val langToken = InputLang.getIdForLanguage(languageCode) // "auto" results in -1
+            whisper?.setLanguage(langToken)
+            Log.i(TAG, "Whisper language set to: $languageCode (token: $langToken)")
+        }
     }
 
     fun downloadModel(model: Model, onFinished: (Boolean) -> Unit) {

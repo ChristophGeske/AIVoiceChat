@@ -107,6 +107,8 @@ class SentenceTurnEngine(
 
         active = true
         addUser(userText)
+
+        Log.d(TAG, "System Prompt: ${systemPromptProvider()}")
         Log.i(TAG, "=== TURN START === model=$modelName fasterFirst=$fasterFirst historySize=${history.size} maxSentences=$maxSentencesPerTurn")
 
         currentStrategy = createStrategy()

@@ -19,7 +19,7 @@ class WhisperService(
     private val application: Application,
     private val scope: CoroutineScope
 ) {
-    private val TAG = "WhisperService" // Log tag
+    private val TAG = "WhisperService"
 
     private val _transcriptionResult = MutableLiveData<Event<String>>()
     val transcriptionResult: LiveData<Event<String>> = _transcriptionResult
@@ -34,8 +34,7 @@ class WhisperService(
     var activeModel: Model? = null
         private set
 
-    val multilingualModel = availableModels.find { it.fileName == "whisper-small.tflite" }!!
-    val englishModel = availableModels.find { it.fileName == "whisper-tiny.en.tflite" }!!
+    val multilingualModel = availableModels.first()
 
     fun initialize(model: Model) {
         if (activeModel?.fileName == model.fileName && _isModelReady.value == true) {
@@ -71,7 +70,6 @@ class WhisperService(
 
                 whisper = Whisper(application).apply {
                     loadModel(modelFile, vocabFile, model.isMultilingual)
-                    setLanguage(-1)
                     setListener(createWhisperListener())
                 }
                 Log.i(TAG, "Whisper engine initialized successfully with model: ${model.name}")
@@ -98,14 +96,6 @@ class WhisperService(
         RecordBuffer.setOutputBuffer(audioData)
         whisper?.setAction(Whisper.Action.TRANSCRIBE)
         whisper?.start()
-    }
-
-    fun setLanguage(languageCode: String) {
-        scope.launch(Dispatchers.IO) {
-            val langToken = InputLang.getIdForLanguage(languageCode) // "auto" results in -1
-            whisper?.setLanguage(langToken)
-            Log.i(TAG, "Whisper language set to: $languageCode (token: $langToken)")
-        }
     }
 
     fun downloadModel(model: Model, onFinished: (Boolean) -> Unit) {

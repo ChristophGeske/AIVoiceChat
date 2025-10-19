@@ -2,6 +2,7 @@ package com.example.advancedvoice
 
 import android.Manifest
 import android.content.Context
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Bundle
 import android.os.SystemClock
@@ -25,11 +26,11 @@ import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import android.provider.Settings
 
 class FirstFragment : Fragment() {
 
     private val TAG = "FirstFragment"
-
     private fun now(): String = SimpleDateFormat("HH:mm:ss.SSS", Locale.US).format(Date())
 
     private var _binding: FragmentFirstBinding? = null
@@ -39,15 +40,10 @@ class FirstFragment : Fragment() {
 
     private var autoContinue = true
     private var pendingStartAfterPermission = false
-
     private var currentModelName = "gemini-2.5-pro"
-
-    // Listen window helpers (for standard STT mode only)
     private val STT_GRACE_MS_AFTER_TTS = 500L
     private var listenWindowDeadlineMs: Long = 0L
     private var listenRestartCount: Int = 0
-
-    // Delay barge-in start slightly
     private val AUTO_STT_DELAY_MS = 800L
 
     private val requestPermissionLauncher =
@@ -75,6 +71,7 @@ class FirstFragment : Fragment() {
         observeViewModel()
         setupWhisperSettings()
         observeWhisperStatus()
+        setupTtsSettingsLink()
 
         val prefs = requireContext().getSharedPreferences("ai_prefs", Context.MODE_PRIVATE)
         var restoredModel = prefs.getString("selected_model", "gemini-2.5-pro") ?: "gemini-2.5-pro"
@@ -135,10 +132,8 @@ class FirstFragment : Fragment() {
 
         binding.geminiApiKeyInput.hint = getString(R.string.gemini_api_key_hint)
         binding.openaiApiKeyInput.hint = getString(R.string.openai_api_key_hint)
-
         binding.geminiApiKeyInput.setText(prefs.getString("gemini_key", "") ?: "")
         binding.openaiApiKeyInput.setText(prefs.getString("openai_key", "") ?: "")
-
         setupGeminiKeyHelpLink()
         refreshGeminiKeyHelpLinkVisibility()
 
@@ -167,17 +162,14 @@ class FirstFragment : Fragment() {
             }
         }
 
-        val savedPrompt = prefs.getString("system_prompt", getString(R.string.system_prompt_hint))
+        val savedPrompt = prefs.getString("system_prompt", ConversationViewModel.DEFAULT_SYSTEM_PROMPT)
         binding.systemPromptInput.setText(savedPrompt)
         binding.systemPromptInput.doAfterTextChanged { editable ->
             prefs.edit().putString("system_prompt", editable?.toString().orEmpty()).apply()
         }
 
         binding.resetSystemPromptButton.setOnClickListener {
-            val defaultPrompt = """
-                You are a helpful assistant. Answer the user's request in clear, complete sentences.
-                Do not use JSON or code fences unless explicitly requested.
-            """.trimIndent()
+            val defaultPrompt = ConversationViewModel.DEFAULT_SYSTEM_PROMPT
             binding.systemPromptInput.setText(defaultPrompt)
             prefs.edit().putString("system_prompt", defaultPrompt).apply()
             Toast.makeText(context, "System prompt reset to default", Toast.LENGTH_SHORT).show()
@@ -235,15 +227,15 @@ class FirstFragment : Fragment() {
             when {
                 listening && generating -> {
                     binding.speakButton.text = "Recording (LLM generating)"
-                    binding.speakButton.setTextColor(0xFFF44336.toInt()) // red
+                    binding.speakButton.setTextColor(0xFFF44336.toInt())
                 }
                 listening && transcribing -> {
                     binding.speakButton.text = "Recording (processing…)"
-                    binding.speakButton.setTextColor(0xFFF44336.toInt()) // red
+                    binding.speakButton.setTextColor(0xFFF44336.toInt())
                 }
                 listening -> {
                     binding.speakButton.text = "Recording - Agent Listening"
-                    binding.speakButton.setTextColor(0xFFF44336.toInt()) // red
+                    binding.speakButton.setTextColor(0xFFF44336.toInt())
                 }
                 transcribing -> {
                     binding.speakButton.text = "Processing recording…"
@@ -273,19 +265,9 @@ class FirstFragment : Fragment() {
         viewModel.sttIsListening.observe(viewLifecycleOwner) { updateSpeakVisuals() }
         viewModel.isTranscribing.observe(viewLifecycleOwner) { updateSpeakVisuals() }
 
-        viewModel.currentSpeaking.observe(viewLifecycleOwner) { speaking ->
-            val adapter = binding.conversationRecyclerView.adapter as ConversationAdapter
-            val prev = adapter.currentSpeaking?.entryIndex
-            adapter.currentSpeaking = speaking
-            if (prev != null) adapter.notifyItemChanged(prev)
-            val now = speaking?.entryIndex
-            if (now != null) adapter.notifyItemChanged(now)
-        }
-
         viewModel.generationPhase.observe(viewLifecycleOwner) { phase ->
             val prefs = requireContext().getSharedPreferences("ai_prefs", Context.MODE_PRIVATE)
             val useWhisper = prefs.getBoolean("use_whisper", false)
-
             val generating = phase != GenerationPhase.IDLE
             val alreadyListening = viewModel.sttIsListening.value == true
             val delivered = viewModel.llmDelivered.value == true
@@ -313,7 +295,6 @@ class FirstFragment : Fragment() {
         viewModel.isSpeaking.observe(viewLifecycleOwner) { isSpeaking ->
             if (isSpeaking && viewModel.sttIsListening.value == true) {
                 Log.i(TAG, "[${now()}][AutoStopSTT] TTS started. Stopping listening only (and not transcribing).")
-                // When TTS starts, we stop listening and discard any captured audio.
                 viewModel.stopListeningOnly(transcribe = false)
             }
         }
@@ -340,10 +321,8 @@ class FirstFragment : Fragment() {
             event.getContentIfNotHandled()?.let {
                 val prefs = requireContext().getSharedPreferences("ai_prefs", Context.MODE_PRIVATE)
                 if (prefs.getBoolean("use_whisper", false)) {
-                    // In custom VAD mode, no-match is final for that attempt.
                     return@let
                 }
-
                 val remain = remainingListenWindowMs()
                 if (autoContinue && isListenWindowActive() && !isSettingsVisible()) {
                     listenRestartCount += 1
@@ -366,7 +345,6 @@ class FirstFragment : Fragment() {
             Log.i(TAG, "[${now()}][UI] Speak button pressed")
             autoContinue = true
             if (!ensureKeyAvailableForModelOrShow(currentModelName)) return@setOnClickListener
-
             val prefs = requireContext().getSharedPreferences("ai_prefs", Context.MODE_PRIVATE)
             if (!prefs.getBoolean("use_whisper", false)) {
                 startListenWindow("Manual Speak")
@@ -531,12 +509,8 @@ class FirstFragment : Fragment() {
 
         val prefs = requireContext().getSharedPreferences("ai_prefs", Context.MODE_PRIVATE)
         when {
-            currentModelName.equals("gemini-2.5-flash", true)
-                    && binding.radioGeminiFlash.visibility == View.VISIBLE -> binding.radioGeminiFlash.isChecked = true
-
-            currentModelName.startsWith("gemini", true)
-                    && binding.radioGeminiPro.visibility == View.VISIBLE -> binding.radioGeminiPro.isChecked = true
-
+            currentModelName.equals("gemini-2.5-flash", true) && binding.radioGeminiFlash.visibility == View.VISIBLE -> binding.radioGeminiFlash.isChecked = true
+            currentModelName.startsWith("gemini", true) && binding.radioGeminiPro.visibility == View.VISIBLE -> binding.radioGeminiPro.isChecked = true
             currentModelName.equals("gpt-5", true) && binding.radioGpt5Low.visibility == View.VISIBLE -> {
                 val effort = prefs.getString("gpt5_effort", "low")?.lowercase() ?: "low"
                 when (effort) {
@@ -545,7 +519,6 @@ class FirstFragment : Fragment() {
                     else -> binding.radioGpt5Low.isChecked = true
                 }
             }
-
             currentModelName.equals("gpt-5-mini", true) -> {
                 val effort = prefs.getString("gpt5_effort", "medium")?.lowercase() ?: "medium"
                 when (effort) {
@@ -606,89 +579,24 @@ class FirstFragment : Fragment() {
     private fun setupWhisperSettings() {
         val prefs = requireContext().getSharedPreferences("ai_prefs", Context.MODE_PRIVATE)
         val useWhisper = prefs.getBoolean("use_whisper", false)
-        val modelHasBeenSelected = prefs.getBoolean("whisper_model_selected", false)
-
         binding.switchUseWhisper.isChecked = useWhisper
-        binding.radioGroupWhisperModel.visibility = if (useWhisper) View.VISIBLE else View.GONE
-        binding.radioGroupWhisperModel.clearCheck()
-
-        // Restore saved settings on startup
-        if (useWhisper && modelHasBeenSelected) {
-            val isMultilingual = prefs.getBoolean("whisper_is_multilingual", true)
-            if (isMultilingual) {
-                binding.radioWhisperMultilingual.isChecked = true
-                binding.radioGroupWhisperLanguage.visibility = View.VISIBLE // Show language options
-                // Restore language selection
-                when (prefs.getString("whisper_language", "auto")) {
-                    "en" -> binding.radioWhisperLangEn.isChecked = true
-                    "de" -> binding.radioWhisperLangDe.isChecked = true
-                    else -> binding.radioWhisperLangAuto.isChecked = true
-                }
-            } else {
-                binding.radioWhisperEnglish.isChecked = true
-                binding.radioGroupWhisperLanguage.visibility = View.GONE // Hide language options
-            }
-            viewModel.setUseWhisper(true, isMultilingual)
+        if (useWhisper) {
+            viewModel.setUseWhisper(true)
             checkAndDownloadModel()
-        } else {
-            viewModel.setUseWhisper(useWhisper, false)
-            binding.radioGroupWhisperLanguage.visibility = View.GONE
         }
-
-        // Listener for the main Whisper switch
         binding.switchUseWhisper.setOnCheckedChangeListener { _, isChecked ->
             prefs.edit().putBoolean("use_whisper", isChecked).apply()
-            binding.radioGroupWhisperModel.visibility = if (isChecked) View.VISIBLE else View.GONE
-            if (!isChecked) {
-                viewModel.setUseWhisper(false, false)
-                binding.radioGroupWhisperLanguage.visibility = View.GONE // Also hide language options
+            viewModel.setUseWhisper(isChecked)
+            if (isChecked) {
+                checkAndDownloadModel()
             }
-        }
-
-        // Listener for the Whisper model selection (Multi-lingual vs. English)
-        binding.radioGroupWhisperModel.setOnCheckedChangeListener { _, checkedId ->
-            if (checkedId == -1) return@setOnCheckedChangeListener
-            val isMultilingual = checkedId == R.id.radioWhisperMultilingual
-
-            // Show language options ONLY for the multilingual model
-            binding.radioGroupWhisperLanguage.visibility = if (isMultilingual) View.VISIBLE else View.GONE
-
-            prefs.edit()
-                .putBoolean("whisper_model_selected", true)
-                .putBoolean("whisper_is_multilingual", isMultilingual)
-                .apply()
-            viewModel.setUseWhisper(true, isMultilingual)
-            checkAndDownloadModel()
-        }
-
-        // Listener for the new language selection
-        binding.radioGroupWhisperLanguage.setOnCheckedChangeListener { _, checkedId ->
-            val langCode = when (checkedId) {
-                R.id.radioWhisperLangEn -> "en"
-                R.id.radioWhisperLangDe -> "de"
-                else -> "auto" // Default to auto-detect
-            }
-            prefs.edit().putString("whisper_language", langCode).apply()
-            viewModel.whisperService.setLanguage(langCode)
-            Log.d(TAG, "Whisper language preference set to: $langCode")
         }
     }
 
-
     private fun checkAndDownloadModel() {
-        if (binding.radioGroupWhisperModel.checkedRadioButtonId == -1) {
-            Log.d(TAG, "checkAndDownloadModel called, but no model is selected. Aborting.")
-            return
-        }
-
         lifecycleScope.launch {
             val whisperService = viewModel.whisperService
-            val modelToUse = if (binding.radioWhisperMultilingual.isChecked) {
-                whisperService.multilingualModel
-            } else {
-                whisperService.englishModel
-            }
-
+            val modelToUse = whisperService.multilingualModel
             if (!whisperService.isModelDownloaded(modelToUse)) {
                 binding.whisperDownloadStatus.text = "Downloading ${modelToUse.name}..."
                 binding.whisperDownloadStatus.visibility = View.VISIBLE
@@ -702,14 +610,15 @@ class FirstFragment : Fragment() {
                 }
             } else {
                 Log.d(TAG, "Model ${modelToUse.name} is already downloaded.")
-                whisperService.initialize(modelToUse)
+                if(viewModel.whisperService.isModelReady.value != true) {
+                    whisperService.initialize(modelToUse)
+                }
             }
         }
     }
 
     private fun observeWhisperStatus() {
         val whisperService = viewModel.whisperService
-
         whisperService.downloadProgress.observe(viewLifecycleOwner) { progress ->
             if (progress in 1..99) {
                 binding.whisperDownloadStatus.visibility = View.VISIBLE
@@ -720,7 +629,6 @@ class FirstFragment : Fragment() {
                 binding.whisperDownloadStatus.visibility = View.GONE
             }
         }
-
         whisperService.isModelReady.observe(viewLifecycleOwner) { isReady ->
             if (isReady) {
                 Log.d(TAG, "Whisper model is ready.")
@@ -732,4 +640,28 @@ class FirstFragment : Fragment() {
         super.onDestroyView()
         _binding = null
     }
+
+    private fun setupTtsSettingsLink() {
+        binding.ttsSettingsLink.setOnClickListener {
+            try {
+                // This Intent action directly opens the system's TTS settings screen.
+                val intent = Intent("com.android.settings.TTS_SETTINGS")
+                intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                startActivity(intent)
+            } catch (e: Exception) {
+                // As a fallback, open the general language settings if the specific TTS screen is not available.
+                Log.w(TAG, "Could not open direct TTS settings, opening language settings instead.", e)
+                Toast.makeText(context, "Could not open TTS settings directly.", Toast.LENGTH_SHORT).show()
+                try {
+                    val intent = Intent(Settings.ACTION_LOCALE_SETTINGS)
+                    intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    startActivity(intent)
+                } catch (fallbackError: Exception) {
+                    Log.e(TAG, "Could not open any language/TTS settings.", fallbackError)
+                    Toast.makeText(context, "Could not open any system language settings.", Toast.LENGTH_LONG).show()
+                }
+            }
+        }
+    }
+
 }

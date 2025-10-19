@@ -10,18 +10,21 @@ data class ControlsState(
 object ControlsLogic {
     // Centralized control logic for buttons
     fun derive(
-        isSpeaking: Boolean,
+        isSpeaking: Boolean, // This is true when TTS is active
         isListening: Boolean,
         engineActive: Boolean,
         settingsVisible: Boolean
     ): ControlsState {
-        val blocked = isSpeaking || isListening || engineActive
+        val blocked = isListening || engineActive
         val overlay = settingsVisible
 
-        val speakEnabled = !blocked && !overlay
-        val stopEnabled = blocked
+        val speakEnabled = !blocked && !isSpeaking && !overlay
+        val stopEnabled = isSpeaking || isListening || engineActive
+
+        // KORREKTUR: "New Recording" is enabled while the assistant is speaking
         val newRecordingEnabled = isSpeaking && !overlay
-        val clearEnabled = !blocked && !overlay
+
+        val clearEnabled = !blocked && !isSpeaking && !overlay
 
         return ControlsState(
             speakEnabled = speakEnabled,

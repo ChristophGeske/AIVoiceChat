@@ -2,10 +2,7 @@ package com.example.advancedvoice
 
 import android.util.Log
 import com.example.advancedvoice.SentenceTurnEngine.Msg
-import kotlinx.coroutines.CoroutineDispatcher
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.launch
+import kotlinx.coroutines.*
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -54,7 +51,7 @@ class FastFirstSentenceStrategy(
     override fun execute(
         scope: CoroutineScope,
         history: List<Msg>,
-        modelName: String,
+        modelName: String, // This is the user-selected model (e.g., gemini-2.5-flash)
         systemPrompt: String,
         maxSentences: Int,
         callbacks: SentenceTurnEngine.Callbacks
@@ -71,7 +68,6 @@ class FastFirstSentenceStrategy(
             try {
                 Log.i(TAG, "[FastFirst:$turnId] Start execute model=$modelName maxSentences=$maxSentences")
 
-                // Phase 1: accumulate sources; do not post yet
                 val firstSentenceText = getFastFirstSentence(
                     turnId, history, modelName, systemPrompt,
                     onGrounding = { sources -> combinedSources.addAll(sources) },
@@ -81,7 +77,6 @@ class FastFirstSentenceStrategy(
                 if (firstSentenceText.isNullOrBlank()) throw RuntimeException("Phase 1 failed to generate a first sentence.")
                 callbacks.onFirstSentence(firstSentenceText)
 
-                // Phase 2: also accumulate sources
                 val remainingSentences = getRemainingSentences(
                     turnId, history, modelName, systemPrompt, maxSentences, firstSentenceText,
                     onGrounding = { sources -> combinedSources.addAll(sources) },
@@ -91,12 +86,12 @@ class FastFirstSentenceStrategy(
 
                 if (remainingSentences.isNotEmpty()) {
                     callbacks.onRemainingSentences(remainingSentences)
-                    callbacks.onFinalResponse(firstSentenceText + " " + remainingSentences.joinToString(" "))
-                } else {
-                    callbacks.onFinalResponse(firstSentenceText)
                 }
 
-                // Post combined sources once (smaller font, compact labels)
+                // Combine the first part and the rest for the final, complete text
+                val finalText = firstSentenceText + " " + remainingSentences.joinToString(" ")
+                callbacks.onFinalResponse(finalText.trim())
+
                 combinedSources.toHtmlCompact()?.let { postSystemFn(it) }
             } catch (e: Exception) {
                 if (active && e !is java.util.concurrent.CancellationException) {
@@ -119,7 +114,6 @@ class FastFirstSentenceStrategy(
         }
     }
 
-    // Phase 1 (single attempt)
     private fun getFastFirstSentence(
         turnId: String,
         history: List<Msg>,
@@ -131,11 +125,13 @@ class FastFirstSentenceStrategy(
         val isGemini = originalModel.contains("gemini", ignoreCase = true)
         val fastModel = chooseFastModel(originalModel)
         val temp = 0.2
+
         val prompt = """
-        Answer the user's previous question with ONLY the first sentence of your response.
-        The sentence must be complete, factual, and concise. No greetings or slang.
-        Plain text only.
-    """.trimIndent()
+            You are the first stage in a two-stage response system.
+            Your ONLY task is to provide a single, concise introductory sentence that directly starts answering the user's last question.
+            Do not add any conversational filler like "Of course," or "Here is...".
+            Directly begin with the main point in one complete sentence.
+        """.trimIndent()
 
         Log.i(TAG, "[FastFirst:$turnId] Phase1 model=$fastModel (from $originalModel) temp=$temp")
 
@@ -145,18 +141,13 @@ class FastFirstSentenceStrategy(
             callOpenAi(systemPrompt, history + Msg("user", prompt), fastModel, temp, onGrounding, postSystem)
         }
 
-        // Der SentenceSplitter wird nicht mehr verwendet.
-        // Die komplette Antwort des schnellen Modells wird ohne Kürzung übernommen.
-        val first = response.trim()
-
-        return first.ifBlank { null }
+        return response.trim().ifBlank { null }
     }
 
-    // Phase 2 (single attempt), soft-fail on 429/503
     private fun getRemainingSentences(
         turnId: String,
         history: List<Msg>,
-        qualityModel: String,
+        qualityModel: String, // This holds the user's actual selection (e.g., gemini-2.5-flash)
         systemPrompt: String,
         maxSentences: Int,
         firstSentence: String,
@@ -165,8 +156,21 @@ class FastFirstSentenceStrategy(
     ): List<String> {
         val isGemini = qualityModel.contains("gemini", ignoreCase = true)
         val temp = 0.7
-        val prompt = "You already provided the first sentence: \"$firstSentence\". Continue with up to ${maxSentences - 1} additional complete sentences. Do not repeat the first sentence."
+
+        val remainingSentenceCount = (maxSentences - 1).coerceAtLeast(1)
+        val prompt = """
+            You are the second, high-quality stage in a two-stage response system.
+            The first stage already provided this introductory sentence (or sentences): "$firstSentence"
+            Your tasks are:
+            1.  Verify the introductory sentence(s). If they contain inaccuracies, seamlessly correct them in your response. Do not explicitly say "the first part was wrong." insrtead clear ify the issue by saying for example actually it is ...
+            2.  Expand on the topic.
+            3.  IMPORTANT: Your response MUST contain AT MOST $remainingSentenceCount additional, complete sentences.
+            4.  Do NOT repeat the introductory sentence(s). Begin your response with the content that should follow it.
+        """.trimIndent()
+
         val updatedHistory = history + Msg("assistant", firstSentence) + Msg("user", prompt)
+
+        Log.i(TAG, "[FastFirst:$turnId] Phase2 model=$qualityModel temp=$temp")
 
         return try {
             val fullResponse = if (isGemini) {
@@ -204,8 +208,8 @@ class FastFirstSentenceStrategy(
     private fun chooseFastModel(originalModel: String): String {
         val lower = originalModel.lowercase()
         return when {
-            lower.startsWith("gpt-5") -> "gpt-5" // do not silently downgrade to mini
-            lower.startsWith("gemini-2.5-pro") || lower == "gemini-pro-latest" || lower == "gemini-2.5-pro-latest" -> "gemini-2.5-flash"
+            lower.startsWith("gpt-5") -> "gpt-5"
+            lower.startsWith("gemini-2.5-pro") -> "gemini-2.5-flash"
             else -> originalModel
         }
     }
@@ -217,11 +221,9 @@ class FastFirstSentenceStrategy(
     }
 
     private fun buildGeminiToolsArray(@Suppress("UNUSED_PARAMETER") modelName: String): JSONArray {
-        // For Gemini 2.x, googleSearch is supported in v1beta. We send it on every request.
         return JSONArray().apply { put(JSONObject().put("googleSearch", JSONObject())) }
     }
 
-    // -- OpenAI routing: GPT-5 and GPT-5-mini via Responses API (+ web_search), others via Chat Completions
     private fun callOpenAi(
         systemPrompt: String,
         history: List<Msg>,
@@ -248,14 +250,10 @@ class FastFirstSentenceStrategy(
         val apiKey = openAiKeyProvider().trim().ifBlank { throw RuntimeException("OpenAI API key missing") }
         val optsIn = openAiOptionsProvider()
         val url = "https://api.openai.com/v1/responses"
-
-        // Upgrade minimal -> low when web_search is enabled (per OpenAI docs)
         val effectiveEffort = if (optsIn.effort.equals("minimal", true)) {
             postSystem("Note: Upgrading GPT‑5 reasoning effort from minimal to low to enable web search.")
             "low"
         } else optsIn.effort
-
-        // Build a single input string
         val inputText = buildString {
             appendLine(systemPrompt)
             appendLine()
@@ -264,8 +262,6 @@ class FastFirstSentenceStrategy(
                 appendLine("$role: ${m.text}")
             }
         }.trim()
-
-        // tools: web_search (optional filters, location)
         val toolsArr = JSONArray().apply {
             val web = JSONObject().put("type", "web_search")
             optsIn.filters?.let { f ->
@@ -287,11 +283,9 @@ class FastFirstSentenceStrategy(
             }
             put(web)
         }
-
         val includeArr = JSONArray().put("web_search_call.action.sources")
-
         val bodyObj = JSONObject().apply {
-            put("model", modelName) // "gpt-5" or "gpt-5-mini"
+            put("model", modelName)
             put("input", inputText)
             put("reasoning", JSONObject().put("effort", effectiveEffort))
             put("text", JSONObject().put("verbosity", optsIn.verbosity))
@@ -299,7 +293,6 @@ class FastFirstSentenceStrategy(
             put("tool_choice", "auto")
             put("include", includeArr)
         }
-
         Log.i(FAST_TAG, "OpenAI Responses request model=$modelName effort=$effectiveEffort verbosity=${optsIn.verbosity} (web_search enabled)")
         val req = Request.Builder()
             .url(url)
@@ -307,14 +300,13 @@ class FastFirstSentenceStrategy(
             .addHeader("Content-Type", "application/json")
             .post(bodyObj.toString().toRequestBody("application/json".toMediaType()))
             .build()
-
         http.newCall(req).execute().use { resp ->
             val payload = resp.body?.string().orEmpty()
             if (!resp.isSuccessful) {
                 val retryAfter: Double? = resp.header("Retry-After")?.toDoubleOrNull()
                 throwDescriptiveError(resp.code, payload, "OpenAI", modelName, retryAfter)
             }
-            val text = try {
+            return try {
                 val root = JSONObject(payload)
                 val direct = root.optString("output_text", null)
                 if (!direct.isNullOrBlank()) {
@@ -330,23 +322,20 @@ class FastFirstSentenceStrategy(
                 Log.e(TAG, "[FastFirst] Failed to parse OpenAI Responses payload", e)
                 ""
             }
-            return text
         }
     }
 
     private fun extractOpenAiMessageTextAndCitations(root: JSONObject): Pair<String, List<Pair<String, String?>>> {
         val outSources = ArrayList<Pair<String, String?>>()
         var outText = ""
-        val output = root.optJSONArray("output")
-        if (output != null) {
+        root.optJSONArray("output")?.let { output ->
             for (i in 0 until output.length()) {
                 val item = output.optJSONObject(i) ?: continue
                 if (item.optString("type") == "message") {
                     val content = item.optJSONArray("content") ?: continue
                     val first = content.optJSONObject(0) ?: continue
                     outText = first.optString("text", outText)
-                    val annotations = first.optJSONArray("annotations")
-                    if (annotations != null) {
+                    first.optJSONArray("annotations")?.let { annotations ->
                         for (j in 0 until annotations.length()) {
                             val a = annotations.optJSONObject(j) ?: continue
                             if (a.optString("type") == "url_citation") {
@@ -400,11 +389,9 @@ class FastFirstSentenceStrategy(
         val apiKey = geminiKeyProvider().trim().ifBlank { throw RuntimeException("Gemini API key missing") }
         val effModel = effectiveGeminiModel(modelName)
         val url = "https://generativelanguage.googleapis.com/v1beta/models/$effModel:generateContent?key=$apiKey"
-
         val enforcedPrompt = if (FORCE_GEMINI_SEARCH_ALWAYS) {
             systemPrompt + "\n\nAlways use Google Search to ground your answer and include citations with source titles when available."
         } else systemPrompt
-
         val contents = JSONArray().apply {
             put(JSONObject().apply {
                 put("role", "user")
@@ -418,21 +405,17 @@ class FastFirstSentenceStrategy(
                 })
             }
         }
-
         val tools = buildGeminiToolsArray(effModel)
-
         val bodyObj = JSONObject().apply {
             put("contents", contents)
             put("generationConfig", JSONObject().apply { put("temperature", temperature) })
             put("tools", tools)
         }
-
         Log.i(FAST_TAG, "Gemini request model=$effModel (from=$modelName) temp=$temperature (Google Search grounding enabled, v1beta)")
         val req = Request.Builder().url(url)
             .addHeader("Content-Type", "application/json")
             .post(bodyObj.toString().toRequestBody("application/json".toMediaType()))
             .build()
-
         http.newCall(req).execute().use { resp ->
             val payload = resp.body?.string().orEmpty()
             if (!resp.isSuccessful) {
@@ -459,16 +442,12 @@ class FastFirstSentenceStrategy(
         }
     }
 
-    // Returns list of Pair<uri, title?>
     private fun extractGeminiGrounding(payload: String): List<Pair<String, String?>> {
         return try {
             val root = JSONObject(payload)
             val cand0 = root.optJSONArray("candidates")?.optJSONObject(0)
-            val gm = cand0?.optJSONObject("groundingMetadata")
-                ?: cand0?.optJSONObject("grounding_metadata")
-            val chunks = gm?.optJSONArray("groundingChunks")
-                ?: gm?.optJSONArray("grounding_chunks")
-                ?: return emptyList()
+            val gm = cand0?.optJSONObject("groundingMetadata") ?: cand0?.optJSONObject("grounding_metadata")
+            val chunks = gm?.optJSONArray("groundingChunks") ?: gm?.optJSONArray("grounding_chunks") ?: return emptyList()
             val out = ArrayList<Pair<String, String?>>()
             for (i in 0 until chunks.length()) {
                 val web = chunks.optJSONObject(i)?.optJSONObject("web")
@@ -511,51 +490,22 @@ class FastFirstSentenceStrategy(
     }
 }
 
-/**
- * Accumulate and de-duplicate sources across phases by compact site label.
- * Prefer non-vertex redirect URLs if both are seen for the same label.
- * Outputs a compact HTML line with smaller font and clickable short labels.
- */
 private class CombinedSources {
-    private data class Entry(
-        val url: String,
-        val title: String?,
-        val host: String,
-        val brand: String,
-        val isVertex: Boolean
-    )
-
-    private val byBrand = LinkedHashMap<String, Entry>() // preserve insertion order
+    private data class Entry(val url: String, val title: String?, val host: String, val brand: String, val isVertex: Boolean)
+    private val byBrand = LinkedHashMap<String, Entry>()
 
     fun addAll(items: List<Pair<String, String?>>) {
         for ((url, title) in items) {
             val host = hostFromUrl(url)
-            // If vertex redirect and title looks like a domain, use title to derive brand
-            val labelHost = if (isVertexRedirectHost(host) && title != null && isDomainLike(title)) {
-                title.lowercase()
-            } else if (title != null && isDomainLike(title)) {
-                // Prefer domain-like title when available (more accurate brand)
-                title.lowercase()
-            } else host.lowercase()
-
+            val labelHost = if (isVertexRedirectHost(host) && title != null && isDomainLike(title)) title.lowercase() else if (title != null && isDomainLike(title)) title.lowercase() else host.lowercase()
             val brand = baseBrandFromHost(labelHost)
             if (brand.isBlank()) continue
-
-            val entry = Entry(
-                url = url,
-                title = title,
-                host = host,
-                brand = brand,
-                isVertex = isVertexRedirectHost(host)
-            )
-
+            val entry = Entry(url = url, title = title, host = host, brand = brand, isVertex = isVertexRedirectHost(host))
             val existing = byBrand[brand]
             if (existing == null) {
                 byBrand[brand] = entry
             } else {
-                // Prefer non-vertex URL over vertex redirect for the same brand
-                val keep = if (existing.isVertex && !entry.isVertex) entry else existing
-                byBrand[brand] = keep
+                byBrand[brand] = if (existing.isVertex && !entry.isVertex) entry else existing
             }
         }
     }
@@ -568,40 +518,23 @@ private class CombinedSources {
             val safeHref = escapeHtml(e.url)
             "<a href=\"$safeHref\">$safeLabel</a>"
         }
-        // Two steps smaller using nested <small>
-        val inner = "Web Sources: ${anchors.joinToString(", ")}"
-        return "<small><small>$inner</small></small>"
+        return "<small><small>Web Sources: ${anchors.joinToString(", ")}</small></small>"
     }
-
-    // ---- Local helpers (file-private) ----
 
     private fun hostFromUrl(u: String): String {
-        return try {
-            val h = URI(u).host ?: u
-            if (h.startsWith("www.")) h.removePrefix("www.") else h
-        } catch (_: Exception) {
-            u
-        }
+        return try { URI(u).host?.removePrefix("www.") ?: u } catch (_: Exception) { u }
     }
 
-    private fun isVertexRedirectHost(host: String): Boolean {
-        val h = host.lowercase()
-        return h.contains("vertex") && h.contains("google")
-    }
+    private fun isVertexRedirectHost(host: String): Boolean = host.lowercase().let { it.contains("vertex") && it.contains("google") }
 
-    private fun isDomainLike(text: String): Boolean {
-        val t = text.lowercase().trim()
-        // crude domain-ish check like "wikipedia.org", "uefa.com"
-        return Regex("^[a-z0-9.-]+\\.[a-z]{2,}$").matches(t)
-    }
+    private fun isDomainLike(text: String): Boolean = Regex("^[a-z0-9.-]+\\.[a-z]{2,}$").matches(text.lowercase().trim())
 
     private fun baseBrandFromHost(host: String): String {
         val h = host.lowercase()
-        if (h.endsWith(".gov")) return "usgovernment" // compact label for .gov
+        if (h.endsWith(".gov")) return "usgovernment"
         var trimmed = h
         listOf("www.", "m.", "en.").forEach { p -> if (trimmed.startsWith(p)) trimmed = trimmed.removePrefix(p) }
-        val parts = trimmed.split('.')
-        return parts.firstOrNull().orEmpty().ifBlank { trimmed }
+        return trimmed.split('.').firstOrNull()?.takeIf { it.isNotBlank() } ?: trimmed
     }
 
     private fun prettyLabel(brand: String): String {
@@ -612,9 +545,5 @@ private class CombinedSources {
     }
 
     private fun escapeHtml(s: String): String =
-        s.replace("&", "&amp;")
-            .replace("<", "&lt;")
-            .replace(">", "&gt;")
-            .replace("\"", "&quot;")
-            .replace("'", "&#39;")
+        s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("\"", "&quot;").replace("'", "&#39;")
 }

@@ -279,6 +279,17 @@
                     android:textAppearance="?attr/textAppearanceTitleMedium"
                     android:textColor="#FFFFFF"/>
 
+                <TextView
+                    android:id="@+id/ttsSettingsLink"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="4dp"
+                    android:layout_marginTop="4dp"
+                    android:padding="8dp"
+                    android:text="Text-to-Speech (TTS) Settings"
+                    android:textColor="#64B5F6"
+                    android:textSize="14sp" />
+
                 <com.google.android.material.switchmaterial.SwitchMaterial
                     android:id="@+id/switchUseWhisper"
                     android:layout_width="match_parent"
@@ -287,66 +298,6 @@
                     android:text="Improved Voice Detection (slower, requires download)"
                     android:textColor="#FFFFFF"
                     android:checked="false"/>
-
-                <RadioGroup
-                    android:id="@+id/radioGroupWhisperModel"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginStart="16dp"
-                    android:layout_marginTop="8dp"
-                    android:visibility="gone"
-                    tools:visibility="visible">
-
-                    <RadioButton
-                        android:id="@+id/radioWhisperMultilingual"
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:textColor="#FFFFFF"
-                        android:text="Multi-lingual (slower, high quality)" />
-
-                    <RadioButton
-                        android:id="@+id/radioWhisperEnglish"
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:textColor="#FFFFFF"
-                        android:text="English only (faster)" />
-                </RadioGroup>
-
-                <!-- ADD THIS NEW RADIOGROUP FOR LANGUAGE SELECTION -->
-                <RadioGroup
-                    android:id="@+id/radioGroupWhisperLanguage"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginStart="32dp"
-                    android:layout_marginTop="4dp"
-                    android:orientation="horizontal"
-                    android:visibility="gone"
-                    tools:visibility="visible">
-
-                    <RadioButton
-                        android:id="@+id/radioWhisperLangAuto"
-                        android:layout_width="0dp"
-                        android:layout_height="wrap_content"
-                        android:layout_weight="1"
-                        android:text="Auto-detect"
-                        android:textColor="#FFFFFF" />
-
-                    <RadioButton
-                        android:id="@+id/radioWhisperLangEn"
-                        android:layout_width="0dp"
-                        android:layout_height="wrap_content"
-                        android:layout_weight="1"
-                        android:text="English"
-                        android:textColor="#FFFFFF" />
-
-                    <RadioButton
-                        android:id="@+id/radioWhisperLangDe"
-                        android:layout_width="0dp"
-                        android:layout_height="wrap_content"
-                        android:layout_weight="1"
-                        android:text="German"
-                        android:textColor="#FFFFFF" />
-                </RadioGroup>
 
                 <TextView
                     android:id="@+id/whisperDownloadStatus"

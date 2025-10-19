@@ -1,4 +1,3 @@
-// In: app/src/main/java/com/whispertflite/utils/Downloader.kt
 package com.whispertflite.utils
 
 import android.content.Context
@@ -30,15 +29,7 @@ data class Model(
 
 val availableModels = listOf(
     Model(
-        name = "English - Tiny (Fast)",
-        fileName = "whisper-tiny.en.tflite",
-        url = "https://huggingface.co/DocWolle/whisper_tflite_models/resolve/main/whisper-tiny.en.tflite",
-        md5 = "2e745cdd5dfe2f868f47caa7a199f91a",
-        sizeInBytes = 41486616L,
-        isMultilingual = false
-    ),
-    Model(
-        name = "Multilingual - Small (Accurate)",
+        name = "Small multi-lingual Whisper (slow, more Accurate)",
         fileName = "whisper-small.tflite",
         url = "https://huggingface.co/DocWolle/whisper_tflite_models/resolve/main/whisper-small.tflite",
         md5 = "7b10527f410230cf09b553da0213bb6c",
@@ -149,7 +140,6 @@ private fun calculateMD5(file: File): String {
     return BigInteger(1, hashBytes).toString(16).padStart(32, '0')
 }
 
-// *** THIS FUNCTION IS NOW INTERNAL INSTEAD OF PRIVATE ***
 internal fun copyAllVocabAssets(context: Context) {
     val assetManager: AssetManager = context.assets
     val vocabFiles = listOf("filters_vocab_en.bin", "filters_vocab_multilingual.bin")

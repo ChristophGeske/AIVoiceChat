@@ -1,8 +1,8 @@
 package com.example.advancedvoice
 
+import android.graphics.Color
 import android.text.Html
 import android.text.method.LinkMovementMethod
-import android.util.Log
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
@@ -17,7 +17,7 @@ class ConversationAdapter(
     private val onReplayClicked: (Int) -> Unit
 ) : ListAdapter<ConversationEntry, ConversationAdapter.ConversationViewHolder>(ConversationDiffCallback()) {
 
-    var currentSpeaking: SpokenSentence? = null
+    // KORREKTUR: 'currentHighlight' property wurde entfernt.
 
     override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): ConversationViewHolder {
         val view = LayoutInflater.from(parent.context)
@@ -27,7 +27,8 @@ class ConversationAdapter(
 
     override fun onBindViewHolder(holder: ConversationViewHolder, position: Int) {
         val entry = getItem(position)
-        holder.bind(entry, position, currentSpeaking)
+        // KORREKTUR: Übergibt die property nicht mehr.
+        holder.bind(entry, position)
     }
 
     class ConversationViewHolder(
@@ -38,15 +39,8 @@ class ConversationAdapter(
         private val messageContent: TextView = itemView.findViewById(R.id.messageContent)
         private val replayButton: ImageButton = itemView.findViewById(R.id.replayButton)
 
-        fun bind(entry: ConversationEntry, entryIndex: Int, currentSpeaking: SpokenSentence?) {
-            // Logging
-            val speakingLog = if (currentSpeaking?.entryIndex == entryIndex) {
-                "highlighting sentence ${currentSpeaking.sentenceIndex}"
-            } else {
-                "not highlighted"
-            }
-            Log.d("ConvAdapter", "Binding item at index $entryIndex. State: $speakingLog")
-
+        // KORREKTUR: Nimmt die property nicht mehr an.
+        fun bind(entry: ConversationEntry, entryIndex: Int) {
             val colorLabelYou = "#1E88E5"
             val colorLabelAssistant = "#43A047"
             val colorLabelSystem = "#8E24AA"
@@ -59,61 +53,29 @@ class ConversationAdapter(
                 else -> "#CCCCCC"
             }
             speakerLabel.text = entry.speaker
-            speakerLabel.setTextColor(android.graphics.Color.parseColor(labelColor))
+            speakerLabel.setTextColor(Color.parseColor(labelColor))
 
             if (entry.isAssistant) {
-                renderAssistantMessage(entry, entryIndex, currentSpeaking)
+                // KORREKTUR: Ruft die vereinfachte Render-Methode auf.
+                renderAssistantMessage(entry)
                 replayButton.visibility = View.VISIBLE
                 replayButton.setOnClickListener { onReplayClicked(entryIndex) }
             } else {
-                // Non-assistant entries (You/System/Error/…)
                 if (entry.speaker.equals("System", ignoreCase = true)) {
-                    // Render System messages (e.g., "Web sources") as HTML with clickable links.
-                    // This is a special case where we need links, not just text selection.
                     val html = entry.sentences.joinToString(" ")
                     messageContent.text = Html.fromHtml(html, Html.FROM_HTML_MODE_COMPACT)
                     messageContent.movementMethod = LinkMovementMethod.getInstance()
                 } else {
-                    // Plain text for user/error or other roles.
-                    // We don't need to do anything special here; the `textIsSelectable`
-                    // attribute in the XML layout handles the copy behavior.
                     messageContent.text = entry.sentences.firstOrNull().orEmpty()
                 }
                 replayButton.visibility = View.GONE
             }
         }
 
-        private fun renderAssistantMessage(
-            entry: ConversationEntry,
-            entryIndex: Int,
-            currentSpeaking: SpokenSentence?
-        ) {
-            val colorSpeaking = "#D32F2F"
-            val colorContent = "#FFFFFF"
-            fun escapeHtml(s: String): String = s
-                .replace("<", "&lt;")
-                .replace(">", "&gt;")
-                .replace("\n", "<br/>")
-
-            val sb = StringBuilder()
-            val speaking = currentSpeaking?.takeIf { it.entryIndex == entryIndex }
-
-            entry.sentences.forEachIndexed { sentenceIndex, sentence ->
-                val isSpeaking = (speaking?.sentenceIndex == sentenceIndex)
-                val color = if (isSpeaking) colorSpeaking else colorContent
-                sb.append("<font color='$color'>${escapeHtml(sentence)}</font> ")
-            }
-
-            val inStream = entry.streamingText
-            if (inStream != null) {
-                val completeText = entry.sentences.joinToString(" ")
-                val lastSentenceEndIndexInStream = completeText.length
-                if (inStream.length > lastSentenceEndIndexInStream) {
-                    val remainder = inStream.substring(lastSentenceEndIndexInStream)
-                    sb.append("<font color='$colorContent'>${escapeHtml(remainder)}</font>")
-                }
-            }
-            messageContent.text = Html.fromHtml(sb.toString(), Html.FROM_HTML_MODE_COMPACT)
+        // KORREKTUR: Stark vereinfachte Methode. Zeigt nur noch den Text an.
+        private fun renderAssistantMessage(entry: ConversationEntry) {
+            val fullText = entry.sentences.joinToString(" ")
+            messageContent.text = fullText
         }
     }
 }
@@ -122,6 +84,7 @@ class ConversationDiffCallback : DiffUtil.ItemCallback<ConversationEntry>() {
     override fun areItemsTheSame(oldItem: ConversationEntry, newItem: ConversationEntry): Boolean {
         return oldItem === newItem
     }
+
     override fun areContentsTheSame(oldItem: ConversationEntry, newItem: ConversationEntry): Boolean {
         return oldItem == newItem
     }

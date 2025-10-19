@@ -116,6 +116,8 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
     private val httpClient by lazy { OkHttpClient.Builder().connectTimeout(25, TimeUnit.SECONDS).readTimeout(180, TimeUnit.SECONDS).build() }
     private val prefs by lazy { app.getSharedPreferences("ai_prefs", Application.MODE_PRIVATE) }
 
+
+
     private val utteranceListener = object : UtteranceProgressListener() {
         override fun onStart(utteranceId: String?) {
             _isSpeaking.postValue(true)
@@ -178,22 +180,34 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
                 entries.getOrNull(idx)?.let { cur ->
                     val updatedSentences = cur.sentences + sentences
                     entries[idx] = cur.copy(sentences = updatedSentences)
-                    queueTts(sentences.joinToString(" "), idx)
                     postList()
+                    queueTts(sentences.joinToString(" "), idx)
                 }
             },
             onFinalResponse = { fullText ->
                 _generationPhase.postValue(GenerationPhase.IDLE)
                 _llmDelivered.postValue(true)
                 if (_sttIsListening.value == true) stopListeningOnly(transcribe = false)
+
                 val sentences = dedupeSentences(SentenceSplitter.splitIntoSentences(fullText))
                 val idx = currentAssistantEntryIndex
+
                 if (idx != null && entries.getOrNull(idx)?.isAssistant == true) {
-                    val existingText = entries[idx].sentences.joinToString(" ")
-                    if (fullText.trim() != existingText.trim()) {
-                        entries[idx] = entries[idx].copy(sentences = sentences, streamingText = null)
+                    // This is a "Fast First" response that is now complete.
+                    val existingSentences = entries[idx].sentences
+
+                    // Find only the sentences that are genuinely new.
+                    val newSentences = sentences.filter { s -> existingSentences.none { it.trim() == s.trim() } }
+
+                    // Update the UI model with the complete text.
+                    entries[idx] = entries[idx].copy(sentences = existingSentences + newSentences, streamingText = null)
+
+                    // KORREKTUR: Nur die NEUEN Sätze der TTS-Queue hinzufügen.
+                    if (newSentences.isNotEmpty()) {
+                        queueTts(newSentences.joinToString(" "), idx)
                     }
                 } else {
+                    // This handles the regular (non-"Fast First") case.
                     val newEntry = ConversationEntry("Assistant", sentences, isAssistant = true)
                     entries.add(newEntry)
                     currentAssistantEntryIndex = entries.lastIndex
@@ -295,6 +309,10 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
             override fun onError(error: Int) {
                 _sttIsListening.postValue(false)
                 val wasInterrupting = userInterruptedDuringGeneration
+
+                // THIS IS THE CRUCIAL MISSING LINE:
+                userInterruptedDuringGeneration = false
+
                 val errorName = when (error) {
                     SpeechRecognizer.ERROR_AUDIO -> "ERROR_AUDIO"; SpeechRecognizer.ERROR_CLIENT -> "ERROR_CLIENT"
                     SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> "ERROR_INSUFFICIENT_PERMISSIONS"; SpeechRecognizer.ERROR_NETWORK -> "ERROR_NETWORK"
@@ -303,9 +321,18 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
                     SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> "ERROR_SPEECH_TIMEOUT"; else -> "UNKNOWN_$error"
                 }
                 Log.w(TAG, "[${now()}][STT] onError: $errorName")
-                if (error == SpeechRecognizer.ERROR_CLIENT) { Log.d(TAG, "[${now()}][STT] ERROR_CLIENT (from stopListening), ignoring"); return }
+
+                if (error == SpeechRecognizer.ERROR_CLIENT) {
+                    Log.d(TAG, "[${now()}][STT] ERROR_CLIENT (from stopListening), ignoring")
+                    return
+                }
+
                 if (error == SpeechRecognizer.ERROR_NO_MATCH) {
-                    if (wasInterrupting) Log.i(TAG, "[${now()}][STT] Interruption resulted in NO_MATCH. Ignoring.")
+                    if (wasInterrupting) {
+                        Log.i(TAG, "[${now()}][STT] Interruption resulted in NO_MATCH. Ignoring.")
+                    }
+
+                    // This logic is now correct because the flags are being set and reset properly.
                     if (wasInterruptedByStt) {
                         Log.i(TAG, "[${now()}][STT] Interruption resulted in NO_MATCH. Retrying original query.")
                         wasInterruptedByStt = false

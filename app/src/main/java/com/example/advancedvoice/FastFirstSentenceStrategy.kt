@@ -126,12 +126,7 @@ class FastFirstSentenceStrategy(
         val fastModel = chooseFastModel(originalModel)
         val temp = 0.2
 
-        val prompt = """
-            You are the first stage in a two-stage response system.
-            Your ONLY task is to provide a single, concise introductory sentence that directly starts answering the user's last question.
-            Do not add any conversational filler like "Of course," or "Here is...".
-            Directly begin with the main point in one complete sentence.
-        """.trimIndent()
+        val prompt = Prompts.getFastFirstPhase1Prompt()
 
         Log.i(TAG, "[FastFirst:$turnId] Phase1 model=$fastModel (from $originalModel) temp=$temp")
 
@@ -147,7 +142,7 @@ class FastFirstSentenceStrategy(
     private fun getRemainingSentences(
         turnId: String,
         history: List<Msg>,
-        qualityModel: String, // This holds the user's actual selection (e.g., gemini-2.5-flash)
+        qualityModel: String,
         systemPrompt: String,
         maxSentences: Int,
         firstSentence: String,
@@ -157,16 +152,8 @@ class FastFirstSentenceStrategy(
         val isGemini = qualityModel.contains("gemini", ignoreCase = true)
         val temp = 0.7
 
-        val remainingSentenceCount = (maxSentences - 1).coerceAtLeast(1)
-        val prompt = """
-            You are the second, high-quality stage in a two-stage response system.
-            The first stage already provided this introductory sentence (or sentences): "$firstSentence"
-            Your tasks are:
-            1.  Verify the introductory sentence(s). If they contain inaccuracies, seamlessly correct them in your response. Do not explicitly say "the first part was wrong." insrtead clear ify the issue by saying for example actually it is ...
-            2.  Expand on the topic.
-            3.  IMPORTANT: Your response MUST contain AT MOST $remainingSentenceCount additional, complete sentences.
-            4.  Do NOT repeat the introductory sentence(s). Begin your response with the content that should follow it.
-        """.trimIndent()
+        // KORREKTUR: Ruft den neuen, zentralisierten Prompt auf.
+        val prompt = Prompts.getFastFirstPhase2Prompt(firstSentence, maxSentences)
 
         val updatedHistory = history + Msg("assistant", firstSentence) + Msg("user", prompt)
 
@@ -546,4 +533,6 @@ private class CombinedSources {
 
     private fun escapeHtml(s: String): String =
         s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("\"", "&quot;").replace("'", "&#39;")
+
+
 }

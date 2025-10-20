@@ -320,7 +320,6 @@
                     android:visibility="gone"/>
                 <!-- END: WHISPER SETTINGS BLOCK -->
 
-                <!-- System Prompt -->
                 <!-- System Prompt Section -->
                 <LinearLayout
                     android:id="@+id/systemPromptGroup"
@@ -375,6 +374,51 @@
                         android:layout_height="wrap_content"
                         android:layout_gravity="end"
                         android:text="@string/reset_prompt" />
+
+                    <!-- System Prompt Extensions (Editable) -->
+                    <TextView
+                        android:id="@+id/promptExtensionsTitle"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="16dp"
+                        android:text="System Prompt Extensions"
+                        android:textAppearance="?attr/textAppearanceTitleMedium"
+                        android:textColor="#FFFFFF"/>
+
+                    <TextView
+                        android:id="@+id/promptExtensionsDesc"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="4dp"
+                        android:layout_marginBottom="8dp"
+                        android:text="These instructions are automatically appended to your base prompt. You can customize them here."
+                        android:textColor="#B0BEC5"
+                        android:textSize="12sp"/>
+
+                    <com.google.android.material.textfield.TextInputLayout
+                        android:id="@+id/promptExtensionsLayout"
+                        style="@style/Widget.MaterialComponents.TextInputLayout.OutlinedBox"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:hint="Auto-generated instructions">
+
+                        <com.google.android.material.textfield.TextInputEditText
+                            android:id="@+id/promptExtensionsInput"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:gravity="top"
+                            android:inputType="textMultiLine"
+                            android:minLines="3"
+                            android:maxLines="8" />
+                    </com.google.android.material.textfield.TextInputLayout>
+
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/resetPromptExtensionsButton"
+                        style="@style/Widget.MaterialComponents.Button.TextButton"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_gravity="end"
+                        android:text="Reset Extensions" />
 
                     <!-- Phase 1 Prompt (Fast First Sentence) - Only visible when Faster First is ON -->
                     <TextView
@@ -481,6 +525,7 @@
                         android:text="Reset Phase 2"
                         android:visibility="gone"
                         tools:visibility="visible"/>
+
                 </LinearLayout>
 
             </LinearLayout>

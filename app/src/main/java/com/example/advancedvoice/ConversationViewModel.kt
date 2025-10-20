@@ -696,22 +696,9 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
 
     private fun getEffectiveSystemPromptFromPrefs(): String {
         val base = prefs.getString("system_prompt", "").orEmpty().ifBlank { DEFAULT_SYSTEM_PROMPT }
-        val maxSent = prefs.getInt("max_sentences", 4).coerceIn(1, 10)
-        val faster = prefs.getBoolean("faster_first", true)
+        val extensions = prefs.getString("system_prompt_extensions", "").orEmpty()
 
-        // --- KORREKTUR: Strengere Anweisungen ---
-        val extras = buildList {
-            add("Return plain text only.")
-            if (maxSent >= 1) {
-                // This instruction is now much more forceful.
-                add("IMPORTANT: Your response MUST be AT MOST $maxSent sentences long, unless the user explicitly asks for a longer/shorter response (e.g., 'in detail', 'explain thoroughly'). Prioritize the user's explicit length requests over this general rule.")
-            }
-            if (faster) {
-                add("Begin with a complete first sentence promptly, then continue.")
-            }
-        }.joinToString(" ")
-
-        return if (extras.isBlank()) base else "$base\n\n$extras"
+        return if (extensions.isBlank()) base else "$base\n\n$extensions"
     }
 
     private fun getOpenAiOptionsFromPrefs(): OpenAiOptions {

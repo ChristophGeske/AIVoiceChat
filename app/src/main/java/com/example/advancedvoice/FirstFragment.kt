@@ -2,7 +2,6 @@ package com.example.advancedvoice
 
 import android.Manifest
 import android.content.Context
-import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Bundle
 import android.os.SystemClock
@@ -177,6 +176,22 @@ class FirstFragment : Fragment() {
             Toast.makeText(context, "System prompt reset to default", Toast.LENGTH_SHORT).show()
         }
 
+        // System Prompt Extensions (editable, but with smart defaults)
+        val defaultExtensions = buildDefaultPromptExtensions(prefs)
+        val savedExtensions = prefs.getString("system_prompt_extensions", defaultExtensions)
+        binding.promptExtensionsInput.setText(savedExtensions)
+
+        binding.promptExtensionsInput.doAfterTextChanged { editable ->
+            prefs.edit().putString("system_prompt_extensions", editable?.toString().orEmpty()).apply()
+        }
+
+        binding.resetPromptExtensionsButton.setOnClickListener {
+            val defaults = buildDefaultPromptExtensions(prefs)
+            binding.promptExtensionsInput.setText(defaults)
+            prefs.edit().putString("system_prompt_extensions", defaults).apply()
+            Toast.makeText(context, "Extensions reset to default", Toast.LENGTH_SHORT).show()
+        }
+
         // Phase 1 Prompt (Faster First - First Sentence)
         val phase1Saved = prefs.getString("phase1_prompt", Prompts.getDefaultPhase1Prompt())
         binding.phase1PromptInput.setText(phase1Saved)
@@ -253,6 +268,19 @@ class FirstFragment : Fragment() {
         }
 
         viewModel.applyEngineConfigFromPrefs(prefs)
+    }
+
+    private fun buildDefaultPromptExtensions(prefs: android.content.SharedPreferences): String {
+        val maxSent = prefs.getInt("max_sentences", 4).coerceIn(1, 10)
+        val faster = prefs.getBoolean("faster_first", true)
+
+        return buildList {
+            add("Return plain text only.")
+            add("IMPORTANT: Your response MUST be AT MOST $maxSent sentences long, unless the user explicitly asks for a longer/shorter response (e.g., 'in detail', 'explain thoroughly'). Prioritize the user's explicit length requests over this general rule.")
+            if (faster) {
+                add("Begin with a complete first sentence promptly, then continue.")
+            }
+        }.joinToString(" ")
     }
 
     private fun observeViewModel() {
@@ -693,17 +721,15 @@ class FirstFragment : Fragment() {
     private fun setupTtsSettingsLink() {
         binding.ttsSettingsLink.setOnClickListener {
             try {
-                // This Intent action directly opens the system's TTS settings screen.
-                val intent = Intent("com.android.settings.TTS_SETTINGS")
-                intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                val intent = android.content.Intent("com.android.settings.TTS_SETTINGS")
+                intent.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
                 startActivity(intent)
             } catch (e: Exception) {
-                // As a fallback, open the general language settings if the specific TTS screen is not available.
                 Log.w(TAG, "Could not open direct TTS settings, opening language settings instead.", e)
                 Toast.makeText(context, "Could not open TTS settings directly.", Toast.LENGTH_SHORT).show()
                 try {
-                    val intent = Intent(Settings.ACTION_LOCALE_SETTINGS)
-                    intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    val intent = android.content.Intent(Settings.ACTION_LOCALE_SETTINGS)
+                    intent.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
                     startActivity(intent)
                 } catch (fallbackError: Exception) {
                     Log.e(TAG, "Could not open any language/TTS settings.", fallbackError)
@@ -712,5 +738,4 @@ class FirstFragment : Fragment() {
             }
         }
     }
-
 }

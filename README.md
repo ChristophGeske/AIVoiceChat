@@ -7,8 +7,16 @@ When you have tried OpenAI's "Advanced Voice" or Google's "Gemini Live," you mig
 
 The reason for that is that when you use the voice option from these companies, they use a different model that is optimized for low-latency streaming rather than using the long “thinking” mode, which gives better answers but can take up to minutes.
 
-AIVoiceChat wants to fix that and allows you to talk directly to the stronger text models (Gemini 2.5 Pro and GPT-5) so you get the highest possible quality answers, with the disadvantage of slower response times. Also, you need to speak very clearly for the speech-to-text model used in your phone to work well. Another disadvantage is that all tone or emotion in your voice is lost and can't be picked up by this voice chat. The advantage is that you get much higher quality answers, and you can modify how the system should respond by simply changing the system prompt and adjusting the settings.
+AIVoiceChat wants to fix that and allows you to talk directly to the stronger text models (Gemini 2.5 Pro and GPT-5) so you get the highest possible quality answers, with the disadvantage of slower response times. 
 
+Alternative: The best alternative to this project currently available is the voice typing mode in the Gemini app. <img width="378" height="764" alt="gemini" src="https://github.com/user-attachments/assets/7d91b730-f915-4ce5-b92a-46390ebb47ff" />
+However the rate limitations of the Gemini app are very strict so you are almost required to buy a subscription and you have less control over the output like speed, length and style of answer which you can set in this project in the app.
+
+The Gemini app has the advantage of being more polished, and having better voice recognition software (stt) running in the cloud and more natural sounding text-to-speech (tts) output voice. These two features are something I hope to improve next as well. Also you can type as an alternative and insert files which this project doesn't support currently.
+
+Some further disadvantages of this project app is that you need to speak very clearly for the speech-to-text model to work well. 
+
+All tone or emotion in your voice is lost and can't be picked up by this voice chat app yet. 
 
 ## 🚀 Get Started (Early Alpha)
 

@@ -9,7 +9,7 @@ android {
 
     defaultConfig {
         applicationId = "com.example.advancedvoice"
-        minSdk = 24              //  24 for wider device support (Android 7.0+)
+        minSdk = 26              //  24 for wider device support (Android 7.0+)
         targetSdk = 34
         versionCode = 1
         versionName = "1.0"

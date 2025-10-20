@@ -9,7 +9,7 @@ android {
 
     defaultConfig {
         applicationId = "com.example.advancedvoice"
-        minSdk = 28
+        minSdk = 24              //  24 for wider device support (Android 7.0+)
         targetSdk = 34
         versionCode = 1
         versionName = "1.0"
@@ -31,9 +31,11 @@ android {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
+
     kotlinOptions {
         jvmTarget = "17"
     }
+
     buildFeatures {
         viewBinding = true
         buildConfig = true
@@ -61,8 +63,6 @@ android {
     }
 }
 
-// In: app/build.gradle
-
 dependencies {
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.appcompat)
@@ -82,10 +82,9 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.7.0")
     implementation("androidx.lifecycle:lifecycle-viewmodel-ktx:2.7.0")
 
-    // *** START: TENSORFLOW DEPENDENCIES ***
+    // TensorFlow Lite for Whisper
     implementation("org.tensorflow:tensorflow-lite:2.13.0")
-    implementation("org.tensorflow:tensorflow-lite-support:0.4.4") // <-- ADD THIS LINE
-    // *** END: TENSORFLOW DEPENDENCIES ***
+    implementation("org.tensorflow:tensorflow-lite-support:0.4.4")
 
     testImplementation(libs.junit)
     testImplementation("org.jetbrains.kotlin:kotlin-test:1.9.22")

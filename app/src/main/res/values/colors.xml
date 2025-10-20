@@ -1,5 +1,38 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <color name="black">#FF000000</color>
-    <color name="white">#FFFFFFFF</color>
+    <!-- Primary colors -->
+    <color name="primary">#90CAF9</color>           <!-- Light blue - main brand color -->
+    <color name="primary_dark">#42A5F5</color>      <!-- Darker blue -->
+    <color name="primary_variant">#64B5F6</color>   <!-- Blue variant -->
+
+    <!-- Secondary/Accent colors -->
+    <color name="secondary">#81C784</color>         <!-- Light green -->
+    <color name="secondary_dark">#66BB6A</color>    <!-- Darker green -->
+
+    <!-- Background colors (dark theme) -->
+    <color name="background">#101114</color>        <!-- Very dark gray (main background) -->
+    <color name="surface">#1A1C20</color>           <!-- Dark gray (cards, surfaces) -->
+    <color name="surface_variant">#2A2D32</color>   <!-- Lighter gray (elevated surfaces) -->
+
+    <!-- Text colors -->
+    <color name="text_primary">#FFFFFF</color>      <!-- White - primary text -->
+    <color name="text_secondary">#B0BEC5</color>    <!-- Light gray - secondary text -->
+    <color name="text_hint">#78909C</color>         <!-- Medium gray - hints -->
+    <color name="text_disabled">#546E7A</color>     <!-- Dark gray - disabled -->
+
+    <!-- Status colors -->
+    <color name="error">#EF5350</color>             <!-- Red - errors -->
+    <color name="warning">#FFA726</color>           <!-- Orange - warnings -->
+    <color name="success">#66BB6A</color>           <!-- Green - success -->
+    <color name="info">#42A5F5</color>              <!-- Blue - info -->
+
+    <!-- Toolbar/AppBar -->
+    <color name="toolbar_background">#1E2127</color>  <!-- Slightly lighter than background -->
+    <color name="toolbar_text">#FFFFFF</color>         <!-- White text -->
+    <color name="toolbar_icon">#FFFFFF</color>         <!-- White icons -->
+
+    <!-- Standard colors -->
+    <color name="black">#000000</color>
+    <color name="white">#FFFFFF</color>
+    <color name="transparent">#00000000</color>
 </resources>

@@ -15,7 +15,11 @@
         <com.google.android.material.appbar.MaterialToolbar
             android:id="@+id/toolbar"
             android:layout_width="match_parent"
-            android:layout_height="?attr/actionBarSize" />
+            android:layout_height="?attr/actionBarSize"
+            android:background="@color/toolbar_background"
+            android:elevation="4dp"
+            app:titleTextColor="@color/toolbar_text"
+            app:theme="@style/ThemeOverlay.App.ActionBar" />
     </com.google.android.material.appbar.AppBarLayout>
 
     <include layout="@layout/content_main" />

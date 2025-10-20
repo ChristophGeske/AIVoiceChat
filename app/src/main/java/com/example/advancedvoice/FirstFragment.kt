@@ -268,6 +268,21 @@ class FirstFragment : Fragment() {
         }
 
         viewModel.applyEngineConfigFromPrefs(prefs)
+
+        // Force scroll when keyboard-heavy inputs get focus
+        listOf(
+            binding.promptExtensionsInput,
+            binding.phase1PromptInput,
+            binding.phase2PromptInput
+        ).forEach { input ->
+            input.setOnFocusChangeListener { view, hasFocus ->
+                if (hasFocus) {
+                    binding.settingsContainerScrollView.postDelayed({
+                        binding.settingsContainerScrollView.smoothScrollTo(0, view.bottom + 200)
+                    }, 300)
+                }
+            }
+        }
     }
 
     private fun buildDefaultPromptExtensions(prefs: android.content.SharedPreferences): String {

@@ -9,7 +9,10 @@ The reason for that is that when you use the voice option from these companies, 
 
 AIVoiceChat wants to fix that and allows you to talk directly to the stronger text models (Gemini 2.5 Pro and GPT-5) so you get the highest possible quality answers, with the disadvantage of slower response times. 
 
-Alternative: The best alternative to this project currently available is the voice typing mode in the Gemini app. <img width="378" height="764" alt="gemini" src="https://github.com/user-attachments/assets/7d91b730-f915-4ce5-b92a-46390ebb47ff" />
+Alternative: The best alternative to this project currently available is the voice typing mode in the Gemini app. 
+
+<img width="208" height="384" alt="gemini" src="https://github.com/user-attachments/assets/7d91b730-f915-4ce5-b92a-46390ebb47ff" />
+
 However the rate limitations of the Gemini app are very strict so you are almost required to buy a subscription and you have less control over the output like speed, length and style of answer which you can set in this project in the app.
 
 The Gemini app has the advantage of being more polished, and having better voice recognition software (stt) running in the cloud and more natural sounding text-to-speech (tts) output voice. These two features are something I hope to improve next as well. Also you can type as an alternative and insert files which this project doesn't support currently.

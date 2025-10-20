@@ -127,7 +127,8 @@ class FastFirstSentenceStrategy(
         val fastModel = chooseFastModel(originalModel)
         val temp = 0.2
 
-        val prompt = Prompts.getFastFirstPhase1Prompt(prefsProvider())
+        val noCitationsInstruction = "\n\nDo NOT include citations or URLs in your text."
+        val prompt = Prompts.getFastFirstPhase1Prompt(prefsProvider()) + noCitationsInstruction  // ✅ PASS prefsProvider()
 
         Log.i(TAG, "[FastFirst:$turnId] Phase1 model=$fastModel (from $originalModel) temp=$temp")
 
@@ -153,7 +154,8 @@ class FastFirstSentenceStrategy(
         val isGemini = qualityModel.contains("gemini", ignoreCase = true)
         val temp = 0.7
 
-        val prompt = Prompts.getFastFirstPhase2Prompt(firstSentence, maxSentences, prefsProvider())
+        val noCitationsInstruction = "\n\nDo NOT include citations or URLs in your text."
+        val prompt = Prompts.getFastFirstPhase2Prompt(firstSentence, maxSentences, prefsProvider()) + noCitationsInstruction  // ✅ PASS prefsProvider()
 
         val updatedHistory = history + Msg("assistant", firstSentence) + Msg("user", prompt)
 
@@ -313,33 +315,11 @@ class FastFirstSentenceStrategy(
     }
 
     private fun extractOpenAiMessageTextAndCitations(root: JSONObject): Pair<String, List<Pair<String, String?>>> {
-        val outSources = ArrayList<Pair<String, String?>>()
-        var outText = ""
-        root.optJSONArray("output")?.let { output ->
-            for (i in 0 until output.length()) {
-                val item = output.optJSONObject(i) ?: continue
-                if (item.optString("type") == "message") {
-                    val content = item.optJSONArray("content") ?: continue
-                    val first = content.optJSONObject(0) ?: continue
-                    outText = first.optString("text", outText)
-                    first.optJSONArray("annotations")?.let { annotations ->
-                        for (j in 0 until annotations.length()) {
-                            val a = annotations.optJSONObject(j) ?: continue
-                            if (a.optString("type") == "url_citation") {
-                                val url = a.optString("url").orEmpty()
-                                val title = a.optString("title").takeIf { it.isNotBlank() }
-                                if (url.isNotBlank()) outSources.add(url to title)
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        return outText to outSources
+        return OpenAiResponseParser.extractMessageAndCitations(root)
     }
 
     private fun extractOpenAiCitationsFromMessage(root: JSONObject): List<Pair<String, String?>> {
-        return extractOpenAiMessageTextAndCitations(root).second
+        return OpenAiResponseParser.extractMessageAndCitations(root).second
     }
 
     private fun callOpenAiChat(systemPrompt: String, history: List<Msg>, modelName: String, temperature: Double): String {

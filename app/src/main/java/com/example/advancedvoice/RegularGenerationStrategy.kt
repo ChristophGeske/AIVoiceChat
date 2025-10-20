@@ -13,15 +13,6 @@ import java.net.URI
 import java.util.Locale
 import java.util.regex.Pattern
 
-/**
- * Regular strategy: one model call (no "fast first") and NO retries.
- * - If the call succeeds, emit onFinalResponse(fullText).
- * - If the call fails with 429/503, emit an informative system note (no popup) and finish.
- * - For other errors (401/404/etc.), propagate onError to show the error dialog.
- * - OpenAI GPT-5 uses Responses API with web_search tool and (effort, verbosity).
- * - Other OpenAI models use Chat Completions.
- * - Gemini: Google Search grounding is enabled on every call (v1beta).
- */
 class RegularGenerationStrategy(
     private val http: OkHttpClient,
     private val geminiKeyProvider: () -> String,
@@ -34,7 +25,6 @@ class RegularGenerationStrategy(
 
     companion object {
         private const val TAG = "RegularStrategy"
-        // Always include web grounding tools for Gemini requests
         private const val FORCE_GEMINI_SEARCH_ALWAYS = true
     }
 
@@ -59,17 +49,16 @@ class RegularGenerationStrategy(
 
                 val isGemini = modelName.contains("gemini", ignoreCase = true)
 
-                // Single attempt, no retries
                 val fullText = if (isGemini) {
                     callGeminiOnce(systemPrompt, history, modelName, 0.7) { items ->
                         if (items.isNotEmpty()) {
-                            postSystem(formatWebSourcesHtml(items, "Web sources"))
+                            postSystem(formatWebSourcesCompact(items))
                         }
                     }
                 } else {
                     callOpenAiOnce(systemPrompt, history, modelName, 0.7, { items ->
                         if (items.isNotEmpty()) {
-                            postSystem(formatWebSourcesHtml(items, "Web sources"))
+                            postSystem(formatWebSourcesCompact(items))
                         }
                     }, ::postSystem)
                 }
@@ -124,8 +113,6 @@ class RegularGenerationStrategy(
         }
     }
 
-    // ---------- OpenAI ----------
-
     private fun callOpenAiOnce(
         systemPrompt: String,
         history: List<Msg>,
@@ -153,14 +140,16 @@ class RegularGenerationStrategy(
         val optsIn = openAiOptionsProvider()
         val url = "https://api.openai.com/v1/responses"
 
-        // Upgrade minimal -> low when web_search is enabled (per OpenAI docs)
         val effectiveEffort = if (optsIn.effort.equals("minimal", true)) {
             postSystem("Note: Upgrading GPT‑5 reasoning effort from minimal to low to enable web search.")
             "low"
         } else optsIn.effort
 
+        // Explicit instruction to not include citations in text
+        val noCitationsInstruction = "\n\nIMPORTANT: Do NOT include any citations, source references, URLs, or bracketed references in your response text. Sources will be displayed separately."
+
         val inputText = buildString {
-            appendLine(systemPrompt)
+            appendLine(systemPrompt + noCitationsInstruction)  // ✅ CHANGED THIS LINE
             appendLine()
             history.forEach { m ->
                 val role = if (m.role == "assistant") "Assistant" else "User"
@@ -237,35 +226,11 @@ class RegularGenerationStrategy(
     }
 
     private fun extractOpenAiMessageTextAndCitations(root: JSONObject): Pair<String, List<Pair<String, String?>>> {
-        val outSources = ArrayList<Pair<String, String?>>()
-        var outText = ""
-        val output = root.optJSONArray("output")
-        if (output != null) {
-            for (i in 0 until output.length()) {
-                val item = output.optJSONObject(i) ?: continue
-                if (item.optString("type") == "message") {
-                    val content = item.optJSONArray("content") ?: continue
-                    val first = content.optJSONObject(0) ?: continue
-                    outText = first.optString("text", outText)
-                    val annotations = first.optJSONArray("annotations")
-                    if (annotations != null) {
-                        for (j in 0 until annotations.length()) {
-                            val a = annotations.optJSONObject(j) ?: continue
-                            if (a.optString("type") == "url_citation") {
-                                val url = a.optString("url").orEmpty()
-                                val title = a.optString("title").takeIf { it.isNotBlank() }
-                                if (url.isNotBlank()) outSources.add(url to title)
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        return outText to outSources
+        return OpenAiResponseParser.extractMessageAndCitations(root)
     }
 
     private fun extractOpenAiCitationsFromMessage(root: JSONObject): List<Pair<String, String?>> {
-        return extractOpenAiMessageTextAndCitations(root).second
+        return OpenAiResponseParser.extractMessageAndCitations(root).second
     }
 
     private fun callOpenAiChat(systemPrompt: String, history: List<Msg>, modelName: String, temperature: Double): String {
@@ -312,8 +277,6 @@ class RegularGenerationStrategy(
         }
     }
 
-    // ---------- Gemini ----------
-
     private fun effectiveGeminiModel(name: String): String = when (name.lowercase()) {
         "gemini-pro-latest", "gemini-2.5-pro-latest" -> "gemini-2.5-pro"
         "gemini-flash-latest", "gemini-2.5-flash-latest" -> "gemini-2.5-flash"
@@ -321,16 +284,11 @@ class RegularGenerationStrategy(
     }
 
     private fun buildGeminiToolsArray(modelName: String): JSONArray {
-        // For Gemini 2.x, googleSearch is supported in v1beta. We send it on every request.
         return JSONArray().apply {
             put(JSONObject().put("googleSearch", JSONObject()))
         }
     }
 
-    /**
-     * Single non-stream Gemini call with Google Search tool enabled (v1beta).
-     * onGrounding receives list of Pair<uri, title?> for sources if present.
-     */
     private fun callGeminiOnce(
         systemPrompt: String,
         history: List<Msg>,
@@ -351,7 +309,6 @@ class RegularGenerationStrategy(
                 put("role", "user")
                 put("parts", JSONArray().put(JSONObject().put("text", enforcedPrompt)))
             })
-            // Keep history as alternating user/model turns
             history.forEach { m ->
                 val role = if (m.role == "assistant") "model" else "user"
                 put(JSONObject().apply {
@@ -393,8 +350,6 @@ class RegularGenerationStrategy(
         }
     }
 
-    // ---------- Shared helpers ----------
-
     private fun extractGeminiText(payload: String): String {
         return try {
             val root = JSONObject(payload)
@@ -409,7 +364,6 @@ class RegularGenerationStrategy(
         }
     }
 
-    // Returns list of Pair<uri, title?>
     private fun extractGeminiGrounding(payload: String): List<Pair<String, String?>> {
         return try {
             val root = JSONObject(payload)
@@ -459,7 +413,33 @@ class RegularGenerationStrategy(
         throw ModelServiceException(code, service, model, retryAfterSec, body, msg)
     }
 
-    // ---- Formatting helpers for "Web sources" ----
+    private data class SourceEntry(val url: String, val title: String?, val host: String, val brand: String)
+
+    private fun formatWebSourcesCompact(items: List<Pair<String, String?>>): String {
+        if (items.isEmpty()) return ""
+
+        val byBrand = LinkedHashMap<String, SourceEntry>()
+
+        for ((url, title) in items) {
+            val host = hostFromUrl(url)
+            val brand = baseBrandFromHost(host)
+            if (brand.isBlank()) continue
+
+            val entry = SourceEntry(url = url, title = title, host = host, brand = brand)
+            if (!byBrand.containsKey(brand)) {
+                byBrand[brand] = entry
+            }
+        }
+
+        val anchors = byBrand.values.take(5).map { e ->
+            val label = prettyLabel(e.brand)
+            val safeLabel = escapeHtml(label)
+            val safeHref = escapeHtml(e.url)
+            "<a href=\"$safeHref\">$safeLabel</a>"
+        }
+
+        return "<small><small>Web Sources: ${anchors.joinToString(", ")}</small></small>"
+    }
 
     private fun hostFromUrl(u: String): String {
         return try {
@@ -470,20 +450,25 @@ class RegularGenerationStrategy(
         }
     }
 
+    private fun baseBrandFromHost(host: String): String {
+        val h = host.lowercase()
+        if (h.endsWith(".gov")) return "usgovernment"
+        var trimmed = h
+        listOf("www.", "m.", "en.").forEach { p -> if (trimmed.startsWith(p)) trimmed = trimmed.removePrefix(p) }
+        return trimmed.split('.').firstOrNull()?.takeIf { it.isNotBlank() } ?: trimmed
+    }
+
+    private fun prettyLabel(brand: String): String {
+        return when (brand.lowercase()) {
+            "usgovernment" -> "USGovernment"
+            else -> brand.replaceFirstChar { if (it.isLowerCase()) it.titlecase() else it.toString() }
+        }
+    }
+
     private fun escapeHtml(s: String): String =
         s.replace("&", "&amp;")
             .replace("<", "&lt;")
             .replace(">", "&gt;")
             .replace("\"", "&quot;")
             .replace("'", "&#39;")
-
-    private fun formatWebSourcesHtml(items: List<Pair<String, String?>>, title: String): String {
-        val parts = items.take(5).mapIndexed { i, it ->
-            val url = it.first
-            val label = it.second?.takeIf { t -> t.isNotBlank() } ?: hostFromUrl(url)
-            val safeLabel = escapeHtml(label)
-            "${i + 1}. <a href=\"${escapeHtml(url)}\">$safeLabel</a>"
-        }
-        return "$title: ${parts.joinToString("  ")}"
-    }
 }

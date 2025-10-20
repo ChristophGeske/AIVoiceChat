@@ -176,7 +176,7 @@ class FirstFragment : Fragment() {
             prefs.edit().putString("system_prompt", defaultPrompt).apply()
             Toast.makeText(context, "System prompt reset to default", Toast.LENGTH_SHORT).show()
         }
-        
+
         // Phase 1 Prompt (Faster First - First Sentence)
         val phase1Saved = prefs.getString("phase1_prompt", Prompts.getDefaultPhase1Prompt())
         binding.phase1PromptInput.setText(phase1Saved)

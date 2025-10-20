@@ -13,7 +13,7 @@ AIVoiceChat wants to fix that and allows you to talk directly to the stronger te
 ## 🚀 Get Started (Early Alpha)
 
 1. Download the APK  
-   - Go to the latest releases: https://github.com/your-user/AIVoiceChat/releases  
+   - Go to the latest releases: [https://github.com/your-user/AIVoiceChat/releases](https://github.com/ChristophGeske/AIVoiceChat/tags)  
    - Download and install the APK `app-release.apk`
 
 2. Get your free Gemini API key  

@@ -533,19 +533,23 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
         val audioSize = audioBuffer.size()
         Log.i(TAG, "[VAD] ━━━ StopAndTranscribe | AudioSize=${audioSize} bytes | SpeechDuration=${capturedDuration}ms")
 
-        if (currentSttSystem == SttSystem.WHISPER) {
-            if (speechDetectedTimestamp > 0L && capturedDuration > VAD_MIN_SPEECH_DURATION_MS) {
+        // --- START OF CHANGES ---
+
+        if (speechDetectedTimestamp > 0L && capturedDuration > VAD_MIN_SPEECH_DURATION_MS) {
+            if (currentSttSystem == SttSystem.WHISPER) {
                 val audioData = audioBuffer.toByteArray()
                 _isTranscribing.postValue(true)
                 Log.i(TAG, "[STT] ━━━ Transcribing ${audioData.size} bytes with Whisper.")
                 whisperService.transcribeAudio(audioData)
-            } else {
-                handleNoSignificantSpeech()
+            } else if (currentSttSystem == SttSystem.GEMINI_LIVE) {
+                // THIS IS THE CRUCIAL NEW LOGIC
+                Log.i(TAG, "[STT] Signaled end of audio stream to Gemini Live.")
+                geminiLiveService.sendAudioStreamEnd()
             }
-        }
-        else if (speechDetectedTimestamp == 0L) {
+        } else {
             handleNoSignificantSpeech()
         }
+        // --- END OF CHANGES ---
     }
 
     private fun handleNoSignificantSpeech() {
@@ -558,6 +562,8 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
             _sttNoMatch.postValue(Event(Unit))
         }
     }
+
+    // In ConversationViewModel.kt
 
     fun stopListeningOnly(transcribe: Boolean) {
         if (!_sttIsListening.value!! && !isRecording) { return }
@@ -572,13 +578,22 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
                 isRecording = false
                 recordingJob?.cancel(); recordingJob = null
                 audioRecord?.stop(); audioRecord?.release(); audioRecord = null
-                if (transcribe && currentSttSystem == SttSystem.WHISPER) {
+
+                // --- START OF CHANGES ---
+                if (transcribe) {
                     if (speechDetectedTimestamp > 0L && System.currentTimeMillis() - speechDetectedTimestamp > VAD_MIN_SPEECH_DURATION_MS) {
-                        stopAndTranscribe()
+                        if (currentSttSystem == SttSystem.WHISPER) {
+                            stopAndTranscribe()
+                        } else if (currentSttSystem == SttSystem.GEMINI_LIVE) {
+                            // THIS IS THE CRUCIAL NEW LOGIC
+                            Log.i(TAG, "[STT] Manually signaling end of stream to Gemini Live.")
+                            geminiLiveService.sendAudioStreamEnd()
+                        }
                     } else {
                         _sttNoMatch.postValue(Event(Unit))
                     }
                 }
+                // --- END OF CHANGES ---
             }
         }
     }

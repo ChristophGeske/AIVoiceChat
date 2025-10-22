@@ -22,6 +22,7 @@ import androidx.lifecycle.LiveData
 import androidx.lifecycle.MediatorLiveData
 import androidx.lifecycle.MutableLiveData
 import androidx.lifecycle.viewModelScope
+import com.example.advancedvoice.gemini.GeminiLiveService
 import com.example.advancedvoice.whisper.WhisperService
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -43,12 +44,19 @@ enum class GenerationPhase {
     SINGLE_SHOT_GENERATING
 }
 
+enum class SttSystem {
+    STANDARD,
+    WHISPER,
+    GEMINI_LIVE
+}
+
 class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpeech.OnInitListener {
     private val TAG = "ConversationVM"
     private fun now(): String = SimpleDateFormat("HH:mm:ss.SSS", Locale.US).format(Date())
 
     val whisperService: WhisperService by lazy { WhisperService(getApplication(), viewModelScope) }
-    private var useWhisperStt = false
+    val geminiLiveService: GeminiLiveService by lazy { GeminiLiveService(viewModelScope) }
+    private var currentSttSystem = SttSystem.STANDARD
 
     private var audioRecord: AudioRecord? = null
     private var recordingJob: Job? = null
@@ -58,7 +66,7 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
     private val audioFormat = AudioFormat.ENCODING_PCM_16BIT
 
     private val VAD_SILENCE_THRESHOLD_RMS = 250.0
-    private val VAD_SPEECH_TIMEOUT_MS = 1000L
+    private val VAD_SPEECH_TIMEOUT_MS = 1500L // Increased timeout for streaming
     private val VAD_MIN_SPEECH_DURATION_MS = 400L
     private var silenceStartTimestamp: Long = 0
     private var speechDetectedTimestamp: Long = 0
@@ -108,7 +116,7 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
     private var userInterruptedDuringGeneration = false
     private var wasInterruptedByStt = false
 
-    private val MIN_INPUT_LENGTH = 8
+    private val MIN_INPUT_LENGTH = 2 // Lowered for short transcriptions
     private lateinit var speechRecognizer: SpeechRecognizer
     private var currentModelName: String = "gemini-2.5-pro"
     private var fasterFirstEnabled: Boolean = true
@@ -193,21 +201,13 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
                 val idx = currentAssistantEntryIndex
 
                 if (idx != null && entries.getOrNull(idx)?.isAssistant == true) {
-                    // This is a "Fast First" response that is now complete.
                     val existingSentences = entries[idx].sentences
-
-                    // Find only the sentences that are genuinely new.
                     val newSentences = sentences.filter { s -> existingSentences.none { it.trim() == s.trim() } }
-
-                    // Update the UI model with the complete text.
                     entries[idx] = entries[idx].copy(sentences = existingSentences + newSentences, streamingText = null)
-
-                    // KORREKTUR: Nur die NEUEN Sätze der TTS-Queue hinzufügen.
                     if (newSentences.isNotEmpty()) {
                         queueTts(newSentences.joinToString(" "), idx)
                     }
                 } else {
-                    // This handles the regular (non-"Fast First") case.
                     val newEntry = ConversationEntry("Assistant", sentences, isAssistant = true)
                     entries.add(newEntry)
                     currentAssistantEntryIndex = entries.lastIndex
@@ -240,21 +240,32 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
         tts = TextToSpeech(getApplication(), this)
         setupSpeechRecognizer()
         setupControlsMediator()
+
         whisperService.transcriptionResult.observeForever { event ->
             event.getContentIfNotHandled()?.let { result ->
-                _isTranscribing.postValue(false)
-                if (result.isNotBlank()) {
-                    handleSttResult(result)
-                } else {
-                    Log.w(TAG, "[${now()}][Whisper] Empty transcription result")
-                    if (wasInterruptedByStt) {
-                        Log.i(TAG, "[${now()}][Whisper] Interruption resulted in NO_MATCH. Retrying original query.")
-                        wasInterruptedByStt = false
-                        lastUserInput?.let { startTurn(it, currentModelName) }
-                    } else {
-                        _sttNoMatch.postValue(Event(Unit))
-                    }
-                }
+                handleTranscriptionResult(result, "Whisper")
+            }
+        }
+
+        geminiLiveService.transcriptionResult.observeForever { event ->
+            event.getContentIfNotHandled()?.let { result ->
+                handleTranscriptionResult(result, "Gemini Live")
+            }
+        }
+    }
+
+    private fun handleTranscriptionResult(result: String, source: String) {
+        _isTranscribing.postValue(false)
+        if (result.isNotBlank()) {
+            handleSttResult(result)
+        } else {
+            Log.w(TAG, "[${now()}][$source] Empty transcription result")
+            if (wasInterruptedByStt) {
+                Log.i(TAG, "[${now()}][$source] Interruption resulted in NO_MATCH. Retrying original query.")
+                wasInterruptedByStt = false
+                lastUserInput?.let { startTurn(it, currentModelName) }
+            } else {
+                _sttNoMatch.postValue(Event(Unit))
             }
         }
     }
@@ -310,10 +321,7 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
             override fun onError(error: Int) {
                 _sttIsListening.postValue(false)
                 val wasInterrupting = userInterruptedDuringGeneration
-
-                // THIS IS THE CRUCIAL MISSING LINE:
                 userInterruptedDuringGeneration = false
-
                 val errorName = when (error) {
                     SpeechRecognizer.ERROR_AUDIO -> "ERROR_AUDIO"; SpeechRecognizer.ERROR_CLIENT -> "ERROR_CLIENT"
                     SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> "ERROR_INSUFFICIENT_PERMISSIONS"; SpeechRecognizer.ERROR_NETWORK -> "ERROR_NETWORK"
@@ -332,8 +340,6 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
                     if (wasInterrupting) {
                         Log.i(TAG, "[${now()}][STT] Interruption resulted in NO_MATCH. Ignoring.")
                     }
-
-                    // This logic is now correct because the flags are being set and reset properly.
                     if (wasInterruptedByStt) {
                         Log.i(TAG, "[${now()}][STT] Interruption resulted in NO_MATCH. Retrying original query.")
                         wasInterruptedByStt = false
@@ -388,25 +394,50 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
     }
 
     fun startListening() {
-        if (_isSpeaking.value == true) { Log.i(TAG, "[${now()}][STT] Blocked - TTS is speaking"); return }
-        if (_sttIsListening.value == true || isRecording) { Log.w(TAG, "[${now()}][STT] Already listening, ignoring request."); return }
-        Log.i(TAG, "[${now()}][STT] startListening() request received.")
+        if (_isSpeaking.value == true) {
+            Log.i(TAG, "[${now()}][STT] Blocked - TTS is speaking")
+            return
+        }
+        if (_sttIsListening.value == true || isRecording) {
+            Log.w(TAG, "[${now()}][STT] Already listening, ignoring request.")
+            return
+        }
+        Log.i(TAG, "[${now()}][STT] startListening() request received for system: $currentSttSystem")
         wasInterruptedByStt = false
-        if (useWhisperStt) {
-            if (whisperService.isModelReady.value != true) { addSystemEntry("Whisper model is not ready. Please check settings."); return }
-            isBargeInMode = false
-            startWhisperRecordingWithVAD()
-        } else {
-            startStandardSTT()
+
+        when (currentSttSystem) {
+            SttSystem.STANDARD -> startStandardSTT()
+            SttSystem.WHISPER -> {
+                if (whisperService.isModelReady.value != true) {
+                    Log.w(TAG, "[STT] Blocked - Whisper model is not ready.")
+                    addSystemEntry("Whisper model is not ready. Please check settings.")
+                    return
+                }
+                isBargeInMode = false
+                startCustomVadRecording()
+            }
+            SttSystem.GEMINI_LIVE -> {
+                if (geminiLiveService.isModelReady.value != true) {
+                    Log.w(TAG, "[STT] Blocked - Gemini Live service is not ready.")
+                    addSystemEntry("Gemini Live service not ready. Check API Key or network.")
+                    return
+                }
+                isBargeInMode = false
+                startCustomVadRecording()
+            }
         }
     }
 
     fun startListeningForBargeIn() {
         if (_llmDelivered.value == true) { Log.d(TAG, "[BargeIn] Blocked - LLM already delivered response"); return }
         if (_sttIsListening.value == true || isRecording) { Log.d(TAG, "[BargeIn] Already listening"); return }
-        Log.i(TAG, "[BargeIn] Starting listening to detect user interruption")
+        Log.i(TAG, "[BargeIn] Starting listening to detect user interruption with $currentSttSystem")
         isBargeInMode = true
-        startWhisperRecordingWithVAD()
+        if (currentSttSystem == SttSystem.WHISPER || currentSttSystem == SttSystem.GEMINI_LIVE) {
+            startCustomVadRecording()
+        } else {
+            Log.w(TAG, "[BargeIn] Barge-in not supported for Standard STT. Ignoring.")
+        }
     }
 
     private fun startStandardSTT() {
@@ -420,12 +451,12 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
         speechRecognizer.startListening(intent)
     }
 
-    private fun startWhisperRecordingWithVAD() {
+    private fun startCustomVadRecording() {
         if (ActivityCompat.checkSelfPermission(getApplication(), Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) { _sttError.postValue(Event("RECORD_AUDIO permission not granted.")); return }
         val bufferSize = AudioRecord.getMinBufferSize(audioSampleRate, audioChannel, audioFormat)
         if (bufferSize == AudioRecord.ERROR_BAD_VALUE) { _sttError.postValue(Event("AudioRecord parameters are not supported on this device.")); return }
         val mode = if (isBargeInMode) "BARGE-IN" else "NORMAL"
-        Log.i(TAG, "[WhisperVAD] ━━━ Starting Whisper with custom VAD | Mode=$mode | Timeout=${VAD_SPEECH_TIMEOUT_MS}ms | bufferSize=$bufferSize")
+        Log.i(TAG, "[VAD] ━━━ Starting Custom VAD for $currentSttSystem | Mode=$mode | Timeout=${VAD_SPEECH_TIMEOUT_MS}ms | bufferSize=$bufferSize")
         audioBuffer.reset()
         audioRecord = AudioRecord(MediaRecorder.AudioSource.MIC, audioSampleRate, audioChannel, audioFormat, bufferSize)
         if (audioRecord?.state != AudioRecord.STATE_INITIALIZED) { _sttError.postValue(Event("AudioRecord failed to initialize.")); return }
@@ -434,48 +465,60 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
         isRecording = true
         silenceStartTimestamp = 0
         speechDetectedTimestamp = 0
-        Log.i(TAG, "[WhisperVAD] AudioRecord started, isRecording=$isRecording")
+        Log.i(TAG, "[VAD] AudioRecord started, isRecording=$isRecording")
         recordingJob = viewModelScope.launch(Dispatchers.IO) {
-            Log.i(TAG, "[WhisperVAD] ━━━ Background thread started | isRecording=$isRecording | BargeIn=$isBargeInMode")
+            Log.i(TAG, "[VAD] ━━━ Background thread started | isRecording=$isRecording | BargeIn=$isBargeInMode")
             val data = ShortArray(bufferSize / 2)
             while (isRecording) {
                 val read = audioRecord?.read(data, 0, data.size) ?: -1
                 if (read <= 0) {
-                    if (isRecording) Log.e(TAG, "[WhisperVAD] AudioRecord.read() error or end of stream: $read")
+                    if (isRecording) Log.e(TAG, "[VAD] AudioRecord.read() error or end of stream: $read")
                     break
                 }
+
+                // **CORRECTED LOGIC HERE**
+                val byteData = data.to16BitPcm(read) // Convert only the part of the buffer with new data
+
+                // For streaming models, send chunks immediately.
+                if (currentSttSystem == SttSystem.GEMINI_LIVE) {
+                    geminiLiveService.transcribeAudio(byteData)
+                }
+
+                // For buffering models (or any barge-in), add to the buffer.
+                if (currentSttSystem == SttSystem.WHISPER || isBargeInMode) {
+                    audioBuffer.write(byteData)
+                }
+
                 val rms = calculateRms(data, read)
                 val isSilent = rms < VAD_SILENCE_THRESHOLD_RMS
                 val now = System.currentTimeMillis()
                 if (isSilent) {
                     if (silenceStartTimestamp == 0L && speechDetectedTimestamp > 0L) {
                         silenceStartTimestamp = now
-                        Log.i(TAG, "[WhisperVAD] ━━━ Silence started | Will timeout in ${VAD_SPEECH_TIMEOUT_MS}ms")
+                        Log.i(TAG, "[VAD] ━━━ Silence started | Will timeout in ${VAD_SPEECH_TIMEOUT_MS}ms")
                     }
                     if (silenceStartTimestamp > 0L && now - silenceStartTimestamp > VAD_SPEECH_TIMEOUT_MS) {
-                        Log.i(TAG, "[WhisperVAD] ━━━ Silence timeout reached (${now - silenceStartTimestamp}ms) | Stopping to transcribe")
+                        Log.i(TAG, "[VAD] ━━━ Silence timeout reached (${now - silenceStartTimestamp}ms) | Stopping to transcribe")
                         launch(Dispatchers.Main) { stopAndTranscribe() }
                         break
                     }
                 } else {
                     if (speechDetectedTimestamp == 0L) {
                         speechDetectedTimestamp = now
-                        Log.i(TAG, "[WhisperVAD] ━━━ SPEECH DETECTED! | RMS=$rms (threshold=$VAD_SILENCE_THRESHOLD_RMS)")
+                        Log.i(TAG, "[VAD] ━━━ SPEECH DETECTED! | RMS=$rms (threshold=$VAD_SILENCE_THRESHOLD_RMS)")
                         if (isBargeInMode && engine.isActive() && _llmDelivered.value != true) {
-                            Log.i(TAG, "[WhisperVAD] ━━━ BARGE-IN! User interrupted generation - will abort and combine")
+                            Log.i(TAG, "[VAD] ━━━ BARGE-IN! User interrupted generation - will abort and combine")
                             launch(Dispatchers.Main) { userInterruptedDuringGeneration = true; wasInterruptedByStt = true; abortEngineSilently() }
                             isBargeInMode = false
                         }
                     }
                     if (silenceStartTimestamp > 0L) {
-                        Log.d(TAG, "[WhisperVAD] Speech resumed after ${now - silenceStartTimestamp}ms of silence")
+                        Log.d(TAG, "[VAD] Speech resumed after ${now - silenceStartTimestamp}ms of silence")
                         silenceStartTimestamp = 0
                     }
-                    val byteData = data.to16BitPcm()
-                    audioBuffer.write(byteData, 0, read * 2)
                 }
             }
-            Log.i(TAG, "[WhisperVAD] ━━━ Recording loop finished | isRecording=$isRecording")
+            Log.i(TAG, "[VAD] ━━━ Recording loop finished | isRecording=$isRecording")
         }
     }
 
@@ -488,43 +531,55 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
         audioRecord?.stop(); audioRecord?.release(); audioRecord = null
         val capturedDuration = if (speechDetectedTimestamp > 0L) System.currentTimeMillis() - speechDetectedTimestamp else 0L
         val audioSize = audioBuffer.size()
-        Log.i(TAG, "[WhisperVAD] ━━━ StopAndTranscribe | AudioSize=${audioSize} bytes | SpeechDuration=${capturedDuration}ms")
-        if (speechDetectedTimestamp > 0L && capturedDuration > VAD_MIN_SPEECH_DURATION_MS) {
-            val audioData = audioBuffer.toByteArray()
-            _isTranscribing.postValue(true)
-            Log.i(TAG, "[Whisper] ━━━ Transcribing ${audioData.size} bytes.")
-            whisperService.transcribeAudio(audioData)
-        } else {
-            Log.i(TAG, "[Whisper] ━━━ No significant speech detected, not transcribing.")
-            if (wasInterruptedByStt) {
-                Log.i(TAG, "[Whisper] Interruption resulted in NO_MATCH. Retrying original query.")
-                wasInterruptedByStt = false
-                lastUserInput?.let { startTurn(it, currentModelName) }
+        Log.i(TAG, "[VAD] ━━━ StopAndTranscribe | AudioSize=${audioSize} bytes | SpeechDuration=${capturedDuration}ms")
+
+        if (currentSttSystem == SttSystem.WHISPER) {
+            if (speechDetectedTimestamp > 0L && capturedDuration > VAD_MIN_SPEECH_DURATION_MS) {
+                val audioData = audioBuffer.toByteArray()
+                _isTranscribing.postValue(true)
+                Log.i(TAG, "[STT] ━━━ Transcribing ${audioData.size} bytes with Whisper.")
+                whisperService.transcribeAudio(audioData)
             } else {
-                _sttNoMatch.postValue(Event(Unit))
+                handleNoSignificantSpeech()
             }
+        }
+        else if (speechDetectedTimestamp == 0L) {
+            handleNoSignificantSpeech()
+        }
+    }
+
+    private fun handleNoSignificantSpeech() {
+        Log.i(TAG, "[STT] ━━━ No significant speech detected, not transcribing.")
+        if (wasInterruptedByStt) {
+            Log.i(TAG, "[STT] Interruption resulted in NO_MATCH. Retrying original query.")
+            wasInterruptedByStt = false
+            lastUserInput?.let { startTurn(it, currentModelName) }
+        } else {
+            _sttNoMatch.postValue(Event(Unit))
         }
     }
 
     fun stopListeningOnly(transcribe: Boolean) {
         if (!_sttIsListening.value!! && !isRecording) { return }
-        Log.i(TAG, "[${now()}][STT] ━━━ stopListeningOnly() called | useWhisper=$useWhisperStt | isRecording=$isRecording | transcribe=$transcribe")
+        Log.i(TAG, "[${now()}][STT] ━━━ stopListeningOnly() called | System=$currentSttSystem | isRecording=$isRecording | transcribe=$transcribe")
         _sttIsListening.postValue(false)
-        if (useWhisperStt) {
-            isRecording = false
-            recordingJob?.cancel(); recordingJob = null
-            audioRecord?.stop(); audioRecord?.release(); audioRecord = null
-            if (transcribe) {
-                if (speechDetectedTimestamp > 0L && System.currentTimeMillis() - speechDetectedTimestamp > VAD_MIN_SPEECH_DURATION_MS) {
-                    val audioData = audioBuffer.toByteArray()
-                    _isTranscribing.postValue(true)
-                    whisperService.transcribeAudio(audioData)
-                } else {
-                    _sttNoMatch.postValue(Event(Unit))
+
+        when (currentSttSystem) {
+            SttSystem.STANDARD -> {
+                try { speechRecognizer.stopListening() } catch (_: Exception) {}
+            }
+            SttSystem.WHISPER, SttSystem.GEMINI_LIVE -> {
+                isRecording = false
+                recordingJob?.cancel(); recordingJob = null
+                audioRecord?.stop(); audioRecord?.release(); audioRecord = null
+                if (transcribe && currentSttSystem == SttSystem.WHISPER) {
+                    if (speechDetectedTimestamp > 0L && System.currentTimeMillis() - speechDetectedTimestamp > VAD_MIN_SPEECH_DURATION_MS) {
+                        stopAndTranscribe()
+                    } else {
+                        _sttNoMatch.postValue(Event(Unit))
+                    }
                 }
             }
-        } else {
-            try { speechRecognizer.stopListening() } catch (_: Exception) {}
         }
     }
 
@@ -534,9 +589,10 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
         return if (readSize > 0) sqrt(sum / readSize) else 0.0
     }
 
-    private fun ShortArray.to16BitPcm(): ByteArray {
-        val bytes = ByteArray(this.size * 2)
-        for (i in this.indices) {
+    // **CORRECTED HELPER FUNCTION**
+    private fun ShortArray.to16BitPcm(readSize: Int): ByteArray {
+        val bytes = ByteArray(readSize * 2)
+        for (i in 0 until readSize) {
             bytes[i * 2] = (this[i].toInt() and 0xFF).toByte()
             bytes[i * 2 + 1] = (this[i].toInt() shr 8).toByte()
         }
@@ -672,6 +728,7 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
     override fun onCleared() {
         super.onCleared()
         whisperService.release()
+        geminiLiveService.release()
         isRecording = false
         recordingJob?.cancel()
         audioRecord?.release()
@@ -718,12 +775,34 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
 
     fun setSettingsVisible(visible: Boolean) { _settingsVisible.postValue(visible) }
 
-    fun setUseWhisper(enabled: Boolean) {
-        useWhisperStt = enabled
-        if (enabled) {
-            whisperService.initialize(whisperService.multilingualModel)
-        } else {
-            whisperService.release()
+    fun setSttSystem(system: SttSystem, onWhisperNeedsDownload: () -> Unit) {
+        if (currentSttSystem == system && system != SttSystem.GEMINI_LIVE) return
+
+        Log.i(TAG, "Switching STT system to: $system")
+        currentSttSystem = system
+
+        if (system != SttSystem.WHISPER) whisperService.release()
+        if (system != SttSystem.GEMINI_LIVE) geminiLiveService.release()
+
+        when (system) {
+            SttSystem.WHISPER -> {
+                viewModelScope.launch {
+                    if (whisperService.isModelDownloaded(whisperService.multilingualModel)) {
+                        whisperService.initialize(whisperService.multilingualModel)
+                    } else {
+                        onWhisperNeedsDownload()
+                    }
+                }
+            }
+            SttSystem.GEMINI_LIVE -> {
+                val apiKey = prefs.getString("gemini_key", "").orEmpty()
+                if (apiKey.isBlank()) {
+                    addSystemEntry("Gemini API Key is missing. Please add it in the settings.")
+                    return
+                }
+                geminiLiveService.initialize(apiKey)
+            }
+            SttSystem.STANDARD -> { /* No special initialization needed */ }
         }
     }
 

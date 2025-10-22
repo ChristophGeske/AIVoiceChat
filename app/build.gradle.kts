@@ -9,7 +9,7 @@ android {
 
     defaultConfig {
         applicationId = "com.example.advancedvoice"
-        minSdk = 26              //  24 for wider device support (Android 7.0+)
+        minSdk = 26
         targetSdk = 34
         versionCode = 1
         versionName = "1.0"
@@ -24,7 +24,9 @@ android {
                 "proguard-rules.pro"
             )
         }
-        debug { }
+        debug {
+            applicationIdSuffix = ""
+        }
     }
 
     compileOptions {
@@ -41,25 +43,13 @@ android {
         buildConfig = true
     }
 
-    testOptions {
-        unitTests {
-            isIncludeAndroidResources = true
-            isReturnDefaultValues = true
-        }
-        unitTests.all {
-            it.testLogging {
-                events("passed", "skipped", "failed", "standardOut", "standardError")
-                showStandardStreams = true
-                showExceptions = true
-                showCauses = true
-                showStackTraces = true
-            }
-        }
-    }
-
+    // Packaging rules are no longer needed since we removed the conflicting libraries
     packaging {
-        resources.excludes.add("META-INF/AL2.0")
-        resources.excludes.add("META-INF/LGPL2.1")
+        resources.excludes.apply {
+            // These are still good practice to keep
+            add("META-INF/AL2.0")
+            add("META-INF/LGPL2.1")
+        }
     }
 }
 
@@ -71,6 +61,7 @@ dependencies {
     implementation(libs.androidx.navigation.fragment.ktx)
     implementation(libs.androidx.navigation.ui.ktx)
 
+    // This is the key dependency for WebSockets
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
 
     val coroutinesVersion = "1.8.1"
@@ -85,6 +76,8 @@ dependencies {
     // TensorFlow Lite for Whisper
     implementation("org.tensorflow:tensorflow-lite:2.13.0")
     implementation("org.tensorflow:tensorflow-lite-support:0.4.4")
+
+    // The other google-cloud-* and google-auth-* libraries have been removed.
 
     testImplementation(libs.junit)
     testImplementation("org.jetbrains.kotlin:kotlin-test:1.9.22")

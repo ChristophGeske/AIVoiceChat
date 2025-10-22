@@ -275,7 +275,7 @@
                         android:textSize="12sp" />
                 </LinearLayout>
 
-                <!-- START: WHISPER SETTINGS BLOCK -->
+                <!-- START: SPEECH RECOGNITION BLOCK -->
                 <TextView
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
@@ -295,20 +295,40 @@
                     android:textColor="#64B5F6"
                     android:textSize="14sp" />
 
-                <com.google.android.material.switchmaterial.SwitchMaterial
-                    android:id="@+id/switchUseWhisper"
+                <RadioGroup
+                    android:id="@+id/sttSystemRadioGroup"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:layout_marginTop="8dp"
-                    android:text="Improved Voice Detection (slower, requires download)"
-                    android:textColor="#FFFFFF"
-                    android:checked="false"/>
+                    android:layout_marginTop="8dp">
+
+                    <RadioButton
+                        android:id="@+id/radioSttStandard"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:text="Standard (On-device)"
+                        android:textColor="#FFFFFF"/>
+
+                    <RadioButton
+                        android:id="@+id/radioSttWhisper"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:text="Whisper (Slower, requires download)"
+                        android:textColor="#FFFFFF"/>
+
+                    <RadioButton
+                        android:id="@+id/radioSttGeminiLive"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:text="Gemini Live (Fast, requires internet)"
+                        android:textColor="#FFFFFF"/>
+
+                </RadioGroup>
 
                 <TextView
                     android:id="@+id/whisperDownloadStatus"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:layout_marginStart="16dp"
+                    android:layout_marginStart="32dp"
                     android:layout_marginTop="8dp"
                     android:visibility="gone"
                     android:textColor="#B0BEC5"
@@ -319,11 +339,11 @@
                     style="?android:attr/progressBarStyleHorizontal"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:layout_marginStart="16dp"
+                    android:layout_marginStart="32dp"
                     android:layout_marginEnd="16dp"
                     android:layout_marginTop="4dp"
                     android:visibility="gone"/>
-                <!-- END: WHISPER SETTINGS BLOCK -->
+                <!-- END: SPEECH RECOGNITION BLOCK -->
 
                 <!-- System Prompt Section -->
                 <LinearLayout

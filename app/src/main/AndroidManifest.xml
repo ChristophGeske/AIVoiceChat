@@ -2,7 +2,7 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
 
-    <!-- Add Internet and Record Audio permissions -->
+    <!-- Permissions required by the application -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
 
@@ -16,6 +16,12 @@
         android:supportsRtl="true"
         android:theme="@style/Theme.AIVoiceChat"
         tools:targetApi="31">
+
+        <!--
+          This is the essential declaration for your MainActivity.
+          It registers the activity with the Android system and marks it
+          as the main entry point that can be launched from the home screen.
+        -->
         <activity
             android:name=".MainActivity"
             android:exported="true"
@@ -23,10 +29,10 @@
             android:theme="@style/Theme.AIVoiceChat">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
-
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
     </application>
 
 </manifest>

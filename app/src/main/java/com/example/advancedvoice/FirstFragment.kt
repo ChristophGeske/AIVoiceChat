@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.pm.PackageManager
 import android.os.Bundle
 import android.os.SystemClock
+import android.provider.Settings
 import android.text.Html
 import android.text.method.LinkMovementMethod
 import android.util.Log
@@ -25,7 +26,6 @@ import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
-import android.provider.Settings
 
 class FirstFragment : Fragment() {
 
@@ -68,7 +68,7 @@ class FirstFragment : Fragment() {
         setupUI()
         setupPrefsBackedInputs()
         observeViewModel()
-        setupWhisperSettings()
+        setupSttSystemSelection()
         observeWhisperStatus()
         setupTtsSettingsLink()
 
@@ -359,7 +359,7 @@ class FirstFragment : Fragment() {
 
         viewModel.generationPhase.observe(viewLifecycleOwner) { phase ->
             val prefs = requireContext().getSharedPreferences("ai_prefs", Context.MODE_PRIVATE)
-            val useWhisper = prefs.getBoolean("use_whisper", false)
+            val sttSystem = SttSystem.valueOf(prefs.getString("stt_system", SttSystem.STANDARD.name) ?: SttSystem.STANDARD.name)
             val generating = phase != GenerationPhase.IDLE
             val alreadyListening = viewModel.sttIsListening.value == true
             val delivered = viewModel.llmDelivered.value == true
@@ -373,8 +373,8 @@ class FirstFragment : Fragment() {
                     val notSpeaking = viewModel.isSpeaking.value != true
 
                     if (stillGenerating && stillNotDelivered && notListening && notSpeaking) {
-                        Log.i(TAG, "[${now()}][BargeIn] Starting barge-in detection (Whisper=$useWhisper)")
-                        if (useWhisper) {
+                        Log.i(TAG, "[${now()}][BargeIn] Starting barge-in detection (System=$sttSystem)")
+                        if (sttSystem != SttSystem.STANDARD) {
                             viewModel.startListeningForBargeIn()
                         } else {
                             handleStartListeningRequest(delayMs = 0L)
@@ -396,11 +396,13 @@ class FirstFragment : Fragment() {
                 val stillGenerating = viewModel.generationPhase.value != GenerationPhase.IDLE
                 if (autoContinue && !isSettingsVisible() && !stillGenerating) {
                     val prefs = requireContext().getSharedPreferences("ai_prefs", Context.MODE_PRIVATE)
-                    if (prefs.getBoolean("use_whisper", false)) {
-                        Log.i(TAG, "[${now()}][AutoContinue] All TTS finished & generation done - starting Whisper")
-                    } else {
-                        Log.i(TAG, "[${now()}][AutoContinue] All TTS finished & generation done - starting STT")
+                    val sttSystem = SttSystem.valueOf(prefs.getString("stt_system", SttSystem.STANDARD.name) ?: SttSystem.STANDARD.name)
+
+                    if (sttSystem == SttSystem.STANDARD) {
+                        Log.i(TAG, "[${now()}][AutoContinue] All TTS finished & generation done - starting Standard STT")
                         startListenWindow("TTS")
+                    } else {
+                        Log.i(TAG, "[${now()}][AutoContinue] All TTS finished & generation done - starting ${sttSystem.name}")
                     }
                     handleStartListeningRequest(delayMs = STT_GRACE_MS_AFTER_TTS)
                 } else if (stillGenerating) {
@@ -412,7 +414,8 @@ class FirstFragment : Fragment() {
         viewModel.sttNoMatch.observe(viewLifecycleOwner) { event ->
             event.getContentIfNotHandled()?.let {
                 val prefs = requireContext().getSharedPreferences("ai_prefs", Context.MODE_PRIVATE)
-                if (prefs.getBoolean("use_whisper", false)) {
+                val sttSystem = SttSystem.valueOf(prefs.getString("stt_system", SttSystem.STANDARD.name) ?: SttSystem.STANDARD.name)
+                if (sttSystem != SttSystem.STANDARD) {
                     return@let
                 }
                 val remain = remainingListenWindowMs()
@@ -438,7 +441,8 @@ class FirstFragment : Fragment() {
             autoContinue = true
             if (!ensureKeyAvailableForModelOrShow(currentModelName)) return@setOnClickListener
             val prefs = requireContext().getSharedPreferences("ai_prefs", Context.MODE_PRIVATE)
-            if (!prefs.getBoolean("use_whisper", false)) {
+            val sttSystem = SttSystem.valueOf(prefs.getString("stt_system", SttSystem.STANDARD.name) ?: SttSystem.STANDARD.name)
+            if (sttSystem == SttSystem.STANDARD) {
                 startListenWindow("Manual Speak")
             }
             handleStartListeningRequest(delayMs = 0L)
@@ -448,7 +452,8 @@ class FirstFragment : Fragment() {
             Log.i(TAG, "[${now()}][UI] New Recording button pressed")
             autoContinue = true
             val prefs = requireContext().getSharedPreferences("ai_prefs", Context.MODE_PRIVATE)
-            if (!prefs.getBoolean("use_whisper", false)) {
+            val sttSystem = SttSystem.valueOf(prefs.getString("stt_system", SttSystem.STANDARD.name) ?: SttSystem.STANDARD.name)
+            if (sttSystem == SttSystem.STANDARD) {
                 startListenWindow("New Recording")
             }
             viewModel.stopTts()
@@ -520,8 +525,6 @@ class FirstFragment : Fragment() {
 
     private fun ensureKeyAvailableForModelOrShow(modelName: String): Boolean {
         val prefs = requireContext().getSharedPreferences("ai_prefs", Context.MODE_PRIVATE)
-        val useWhisper = prefs.getBoolean("use_whisper", false)
-        if (useWhisper) return true
 
         val isGpt = modelName.startsWith("gpt-", ignoreCase = true)
         val key = if (isGpt) prefs.getString("openai_key", "").orEmpty() else prefs.getString("gemini_key", "").orEmpty()
@@ -668,18 +671,47 @@ class FirstFragment : Fragment() {
         binding.geminiApiKeyHelpLink.visibility = if (empty) View.VISIBLE else View.GONE
     }
 
-    private fun setupWhisperSettings() {
+    private fun setupSttSystemSelection() {
         val prefs = requireContext().getSharedPreferences("ai_prefs", Context.MODE_PRIVATE)
-        val useWhisper = prefs.getBoolean("use_whisper", false)
-        binding.switchUseWhisper.isChecked = useWhisper
-        if (useWhisper) {
-            viewModel.setUseWhisper(true)
-            checkAndDownloadModel()
+        val savedSystemName = prefs.getString("stt_system", SttSystem.STANDARD.name) ?: SttSystem.STANDARD.name
+        val savedSystem = try { SttSystem.valueOf(savedSystemName) } catch (_: Exception) { SttSystem.STANDARD }
+
+
+        when (savedSystem) {
+            SttSystem.STANDARD -> binding.radioSttStandard.isChecked = true
+            SttSystem.WHISPER -> binding.radioSttWhisper.isChecked = true
+            SttSystem.GEMINI_LIVE -> binding.radioSttGeminiLive.isChecked = true
         }
-        binding.switchUseWhisper.setOnCheckedChangeListener { _, isChecked ->
-            prefs.edit().putBoolean("use_whisper", isChecked).apply()
-            viewModel.setUseWhisper(isChecked)
-            if (isChecked) {
+
+        // Set initial state in ViewModel. The lambda will be empty on initial load
+        // to prevent a download prompt from appearing immediately.
+        viewModel.setSttSystem(savedSystem) { /* Do nothing on initial load */ }
+        if (savedSystem == SttSystem.WHISPER) {
+            // Check if model is downloaded but don't trigger download on startup
+            lifecycleScope.launch {
+                if (viewModel.whisperService.isModelDownloaded(viewModel.whisperService.multilingualModel)) {
+                    viewModel.whisperService.initialize(viewModel.whisperService.multilingualModel)
+                }
+            }
+        }
+
+
+        binding.sttSystemRadioGroup.setOnCheckedChangeListener { _, checkedId ->
+            val selectedSystem = when (checkedId) {
+                R.id.radioSttWhisper -> SttSystem.WHISPER
+                R.id.radioSttGeminiLive -> SttSystem.GEMINI_LIVE
+                else -> SttSystem.STANDARD
+            }
+
+            prefs.edit().putString("stt_system", selectedSystem.name).apply()
+
+            viewModel.setSttSystem(selectedSystem) {
+                // This lambda is called by the ViewModel if it determines Whisper needs a download
+                checkAndDownloadModel()
+            }
+
+            // If the user manually selects Whisper, immediately check for the model
+            if (selectedSystem == SttSystem.WHISPER) {
                 checkAndDownloadModel()
             }
         }

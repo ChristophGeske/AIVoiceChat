@@ -19,10 +19,8 @@ import androidx.core.content.ContextCompat
 import androidx.core.widget.doAfterTextChanged
 import androidx.fragment.app.Fragment
 import androidx.fragment.app.viewModels
-import androidx.lifecycle.lifecycleScope
 import com.example.advancedvoice.databinding.FragmentFirstBinding
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
-import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -43,7 +41,6 @@ class FirstFragment : Fragment() {
     private val STT_GRACE_MS_AFTER_TTS = 500L
     private var listenWindowDeadlineMs: Long = 0L
     private var listenRestartCount: Int = 0
-    private val AUTO_STT_DELAY_MS = 800L
 
     private val requestPermissionLauncher =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { isGranted ->
@@ -69,7 +66,6 @@ class FirstFragment : Fragment() {
         setupPrefsBackedInputs()
         observeViewModel()
         setupSttSystemSelection()
-        observeWhisperStatus()
         setupTtsSettingsLink()
 
         val prefs = requireContext().getSharedPreferences("ai_prefs", Context.MODE_PRIVATE)
@@ -305,141 +301,30 @@ class FirstFragment : Fragment() {
             binding.newRecordingButton.visibility = if (state.newRecordingEnabled) View.VISIBLE else View.GONE
             binding.newRecordingButton.isEnabled = state.newRecordingEnabled
             binding.clearButton.isEnabled = state.clearEnabled
-        }
 
-        val updateSpeakVisuals = {
-            val speaking = viewModel.isSpeaking.value == true
-            val listening = viewModel.sttIsListening.value == true
-            val transcribing = viewModel.isTranscribing.value == true
-            val phase = viewModel.generationPhase.value ?: GenerationPhase.IDLE
-            val generating = phase != GenerationPhase.IDLE
+            binding.speakButton.text = state.speakButtonText
 
-            binding.progressBar.visibility = View.GONE
-
-            when {
-                listening && generating -> {
-                    binding.speakButton.text = "Recording (LLM generating)"
-                    binding.speakButton.setTextColor(0xFFF44336.toInt())
-                }
-                listening && transcribing -> {
-                    binding.speakButton.text = "Recording (processing…)"
-                    binding.speakButton.setTextColor(0xFFF44336.toInt())
-                }
-                listening -> {
-                    binding.speakButton.text = "Recording - Agent Listening"
-                    binding.speakButton.setTextColor(0xFFF44336.toInt())
-                }
-                transcribing -> {
-                    binding.speakButton.text = "Processing recording…"
-                    binding.speakButton.setTextColor(0xFFFFFFFF.toInt())
-                }
-                speaking && generating -> {
-                    binding.speakButton.text = "Agent speaking + Generating next response"
-                    binding.speakButton.setTextColor(0xFF42A5F5.toInt())
-                }
-                speaking -> {
-                    binding.speakButton.text = "Agent speaking"
-                    binding.speakButton.setTextColor(0xFFFFFFFF.toInt())
-                }
-                generating -> {
-                    binding.speakButton.text = "Response gets Generated"
-                    binding.speakButton.setTextColor(0xFF4CAF50.toInt())
-                }
-                else -> {
-                    binding.speakButton.text = getString(R.string.start_conversation)
-                    binding.speakButton.setTextColor(0xFFFFFFFF.toInt())
-                }
+            val color = when (state.speakButtonText) {
+                "Listening..." -> 0xFFF44336.toInt()
+                "Processing & Listening..." -> 0xFFF44336.toInt() // Red for listening while processing
+                "Processing..." -> 0xFF42A5F5.toInt()
+                "Generating..." -> 0xFF4CAF50.toInt()
+                "Assistant Speaking..." -> 0xFFF44336.toInt()
+                else -> 0xFFFFFFFF.toInt()
             }
-        }
-
-        viewModel.generationPhase.observe(viewLifecycleOwner) { updateSpeakVisuals() }
-        viewModel.isSpeaking.observe(viewLifecycleOwner) { updateSpeakVisuals() }
-        viewModel.sttIsListening.observe(viewLifecycleOwner) { updateSpeakVisuals() }
-        viewModel.isTranscribing.observe(viewLifecycleOwner) { updateSpeakVisuals() }
-
-        viewModel.generationPhase.observe(viewLifecycleOwner) { phase ->
-            val prefs = requireContext().getSharedPreferences("ai_prefs", Context.MODE_PRIVATE)
-            val sttSystem = SttSystem.valueOf(prefs.getString("stt_system", SttSystem.STANDARD.name) ?: SttSystem.STANDARD.name)
-            val generating = phase != GenerationPhase.IDLE
-            val alreadyListening = viewModel.sttIsListening.value == true
-            val delivered = viewModel.llmDelivered.value == true
-
-            if (generating && !alreadyListening && !delivered && !isSettingsVisible()) {
-                Log.i(TAG, "[${now()}][BargeIn] Generation started - scheduling barge-in detection in 800ms")
-                view?.postDelayed({
-                    val stillGenerating = viewModel.generationPhase.value != GenerationPhase.IDLE
-                    val stillNotDelivered = viewModel.llmDelivered.value != true
-                    val notListening = viewModel.sttIsListening.value != true
-                    val notSpeaking = viewModel.isSpeaking.value != true
-
-                    if (stillGenerating && stillNotDelivered && notListening && notSpeaking) {
-                        Log.i(TAG, "[${now()}][BargeIn] Starting barge-in detection (System=$sttSystem)")
-                        if (sttSystem != SttSystem.STANDARD) {
-                            viewModel.startListeningForBargeIn()
-                        } else {
-                            handleStartListeningRequest(delayMs = 0L)
-                        }
-                    }
-                }, AUTO_STT_DELAY_MS)
-            }
-        }
-
-        viewModel.isSpeaking.observe(viewLifecycleOwner) { isSpeaking ->
-            if (isSpeaking && viewModel.sttIsListening.value == true) {
-                Log.i(TAG, "[${now()}][AutoStopSTT] TTS started. Stopping listening only (and not transcribing).")
-                viewModel.stopListeningOnly(transcribe = false)
-            }
-        }
-
-        viewModel.ttsQueueFinishedEvent.observe(viewLifecycleOwner) { event ->
-            event.getContentIfNotHandled()?.let {
-                val stillGenerating = viewModel.generationPhase.value != GenerationPhase.IDLE
-                if (autoContinue && !isSettingsVisible() && !stillGenerating) {
-                    val prefs = requireContext().getSharedPreferences("ai_prefs", Context.MODE_PRIVATE)
-                    val sttSystem = SttSystem.valueOf(prefs.getString("stt_system", SttSystem.STANDARD.name) ?: SttSystem.STANDARD.name)
-
-                    if (sttSystem == SttSystem.STANDARD) {
-                        Log.i(TAG, "[${now()}][AutoContinue] All TTS finished & generation done - starting Standard STT")
-                        startListenWindow("TTS")
-                    } else {
-                        Log.i(TAG, "[${now()}][AutoContinue] All TTS finished & generation done - starting ${sttSystem.name}")
-                    }
-                    handleStartListeningRequest(delayMs = STT_GRACE_MS_AFTER_TTS)
-                } else if (stillGenerating) {
-                    Log.d(TAG, "[${now()}][AutoContinue] Skipped - generation still active")
-                }
-            }
-        }
-
-        viewModel.sttNoMatch.observe(viewLifecycleOwner) { event ->
-            event.getContentIfNotHandled()?.let {
-                val prefs = requireContext().getSharedPreferences("ai_prefs", Context.MODE_PRIVATE)
-                val sttSystem = SttSystem.valueOf(prefs.getString("stt_system", SttSystem.STANDARD.name) ?: SttSystem.STANDARD.name)
-                if (sttSystem != SttSystem.STANDARD) {
-                    return@let
-                }
-                val remain = remainingListenWindowMs()
-                if (autoContinue && isListenWindowActive() && !isSettingsVisible()) {
-                    listenRestartCount += 1
-                    Log.w(TAG, "[${now()}][ListenWindow] NO_MATCH within window. Restarting STT (count=$listenRestartCount, remaining=${remain}ms)")
-                    handleStartListeningRequest(delayMs = 50L)
-                } else {
-                    Log.i(TAG, "[${now()}][ListenWindow] NO_MATCH but window expired (remaining=${remain}ms, autoContinue=$autoContinue)")
-                }
-            }
+            binding.speakButton.setTextColor(color)
         }
     }
 
     private fun setupUI() {
         binding.clearButton.setOnClickListener {
-            Log.i(TAG, "[${now()}][UI] Clear button pressed")
             viewModel.clearConversation()
         }
 
         binding.speakButton.setOnClickListener {
-            Log.i(TAG, "[${now()}][UI] Speak button pressed")
             autoContinue = true
             if (!ensureKeyAvailableForModelOrShow(currentModelName)) return@setOnClickListener
+
             val prefs = requireContext().getSharedPreferences("ai_prefs", Context.MODE_PRIVATE)
             val sttSystem = SttSystem.valueOf(prefs.getString("stt_system", SttSystem.STANDARD.name) ?: SttSystem.STANDARD.name)
             if (sttSystem == SttSystem.STANDARD) {
@@ -449,7 +334,6 @@ class FirstFragment : Fragment() {
         }
 
         binding.newRecordingButton.setOnClickListener {
-            Log.i(TAG, "[${now()}][UI] New Recording button pressed")
             autoContinue = true
             val prefs = requireContext().getSharedPreferences("ai_prefs", Context.MODE_PRIVATE)
             val sttSystem = SttSystem.valueOf(prefs.getString("stt_system", SttSystem.STANDARD.name) ?: SttSystem.STANDARD.name)
@@ -461,7 +345,6 @@ class FirstFragment : Fragment() {
         }
 
         binding.stopButton.setOnClickListener {
-            Log.i(TAG, "[${now()}][UI] Stop button pressed")
             autoContinue = false
             listenWindowDeadlineMs = 0L
             listenRestartCount = 0
@@ -642,11 +525,6 @@ class FirstFragment : Fragment() {
         Log.d(TAG, "[${now()}][ListenWindow] Started: reason='$reason', duration=${secs}s")
     }
 
-    private fun remainingListenWindowMs(): Long =
-        (listenWindowDeadlineMs - SystemClock.elapsedRealtime()).coerceAtLeast(0L)
-
-    private fun isListenWindowActive(): Boolean = SystemClock.elapsedRealtime() < listenWindowDeadlineMs
-
     private fun isSettingsVisible(): Boolean = binding.settingsContainerScrollView.visibility == View.VISIBLE
 
     private fun migrateLegacyOpenAiModelName(name: String): String {
@@ -679,84 +557,20 @@ class FirstFragment : Fragment() {
 
         when (savedSystem) {
             SttSystem.STANDARD -> binding.radioSttStandard.isChecked = true
-            SttSystem.WHISPER -> binding.radioSttWhisper.isChecked = true
             SttSystem.GEMINI_LIVE -> binding.radioSttGeminiLive.isChecked = true
         }
 
-        // Set initial state in ViewModel. The lambda will be empty on initial load
-        // to prevent a download prompt from appearing immediately.
-        viewModel.setSttSystem(savedSystem) { /* Do nothing on initial load */ }
-        if (savedSystem == SttSystem.WHISPER) {
-            // Check if model is downloaded but don't trigger download on startup
-            lifecycleScope.launch {
-                if (viewModel.whisperService.isModelDownloaded(viewModel.whisperService.multilingualModel)) {
-                    viewModel.whisperService.initialize(viewModel.whisperService.multilingualModel)
-                }
-            }
-        }
-
+        viewModel.setSttSystem(savedSystem)
 
         binding.sttSystemRadioGroup.setOnCheckedChangeListener { _, checkedId ->
             val selectedSystem = when (checkedId) {
-                R.id.radioSttWhisper -> SttSystem.WHISPER
                 R.id.radioSttGeminiLive -> SttSystem.GEMINI_LIVE
                 else -> SttSystem.STANDARD
             }
 
             prefs.edit().putString("stt_system", selectedSystem.name).apply()
 
-            viewModel.setSttSystem(selectedSystem) {
-                // This lambda is called by the ViewModel if it determines Whisper needs a download
-                checkAndDownloadModel()
-            }
-
-            // If the user manually selects Whisper, immediately check for the model
-            if (selectedSystem == SttSystem.WHISPER) {
-                checkAndDownloadModel()
-            }
-        }
-    }
-
-    private fun checkAndDownloadModel() {
-        lifecycleScope.launch {
-            val whisperService = viewModel.whisperService
-            val modelToUse = whisperService.multilingualModel
-            if (!whisperService.isModelDownloaded(modelToUse)) {
-                binding.whisperDownloadStatus.text = "Downloading ${modelToUse.name}..."
-                binding.whisperDownloadStatus.visibility = View.VISIBLE
-                binding.whisperDownloadProgress.visibility = View.VISIBLE
-                whisperService.downloadModel(modelToUse) { success ->
-                    if (success) {
-                        Toast.makeText(context, "${modelToUse.name} downloaded.", Toast.LENGTH_SHORT).show()
-                    } else {
-                        Toast.makeText(context, "Download failed.", Toast.LENGTH_LONG).show()
-                    }
-                }
-            } else {
-                Log.d(TAG, "Model ${modelToUse.name} is already downloaded.")
-                if(viewModel.whisperService.isModelReady.value != true) {
-                    whisperService.initialize(modelToUse)
-                }
-            }
-        }
-    }
-
-    private fun observeWhisperStatus() {
-        val whisperService = viewModel.whisperService
-        whisperService.downloadProgress.observe(viewLifecycleOwner) { progress ->
-            if (progress in 1..99) {
-                binding.whisperDownloadStatus.visibility = View.VISIBLE
-                binding.whisperDownloadProgress.visibility = View.VISIBLE
-                binding.whisperDownloadProgress.progress = progress
-            } else {
-                binding.whisperDownloadProgress.visibility = View.GONE
-                binding.whisperDownloadStatus.visibility = View.GONE
-            }
-        }
-        whisperService.isModelReady.observe(viewLifecycleOwner) { isReady ->
-            if (isReady) {
-                Log.d(TAG, "Whisper model is ready.")
-            }
+            viewModel.setSttSystem(selectedSystem)
         }
     }
 

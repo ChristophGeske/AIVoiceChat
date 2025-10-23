@@ -29,9 +29,12 @@ class GeminiLiveService(
     private val _isModelReady = MutableLiveData(false)
     val isModelReady: LiveData<Boolean> = _isModelReady
 
+    private val _error = MutableLiveData<Event<String>>()
+    val error: LiveData<Event<String>> = _error
+
     private var webSocket: WebSocket? = null
     private val client = OkHttpClient.Builder()
-        .readTimeout(30, TimeUnit.SECONDS)  // Changed from 0
+        .readTimeout(30, TimeUnit.SECONDS)
         .writeTimeout(30, TimeUnit.SECONDS)
         .connectTimeout(30, TimeUnit.SECONDS)
         .pingInterval(20, TimeUnit.SECONDS)
@@ -39,171 +42,86 @@ class GeminiLiveService(
 
     private var setupComplete = false
     private var accumulatedTranscript = StringBuilder()
-    private var messageCount = 0
 
     fun initialize(apiKey: String) {
         val trimmedKey = apiKey.trim()
         Log.i(TAG, "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
         Log.i(TAG, "━━━ Initializing Gemini Live WebSocket ━━━")
         Log.i(TAG, "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-        Log.d(TAG, "API Key length: ${trimmedKey.length} (should be 39)")
-        Log.d(TAG, "API Key starts with: ${trimmedKey.take(10)}...")
 
         if (webSocket != null) {
-            Log.w(TAG, "⚠️ WebSocket already exists, releasing first")
+            Log.w(TAG, "WebSocket already exists, releasing first.")
             release()
         }
 
         setupComplete = false
         accumulatedTranscript.clear()
-        messageCount = 0
         _isModelReady.postValue(false)
 
         val requestUrl = "$WS_URL?key=$trimmedKey"
-        val request = Request.Builder()
-            .url(requestUrl)
-            .build()
-
-        Log.d(TAG, "🌐 Connecting to: $WS_URL")
-        Log.d(TAG, "📡 Request URL length: ${requestUrl.length}")
+        val request = Request.Builder().url(requestUrl).build()
 
         webSocket = client.newWebSocket(request, object : WebSocketListener() {
-
             override fun onOpen(webSocket: WebSocket, response: Response) {
-                Log.i(TAG, "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
                 Log.i(TAG, "✅ WebSocket OPENED Successfully!")
-                Log.i(TAG, "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-                Log.d(TAG, "HTTP Response code: ${response.code}")
-                Log.d(TAG, "Protocol: ${response.protocol}")
                 sendSetupMessage(webSocket)
             }
 
             override fun onMessage(webSocket: WebSocket, text: String) {
-                messageCount++
-                Log.i(TAG, "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-                Log.i(TAG, "📨 MESSAGE #$messageCount RECEIVED (TEXT)")
-                Log.i(TAG, "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-                Log.d(TAG, "Length: ${text.length}")
-                Log.d(TAG, "Full content:\n$text")
-
                 try {
                     handleServerMessage(text)
                 } catch (e: Exception) {
                     Log.e(TAG, "❌ EXCEPTION in handleServerMessage", e)
-                    Log.e(TAG, "Stack trace:", e)
                 }
             }
 
             override fun onMessage(webSocket: WebSocket, bytes: ByteString) {
-                messageCount++
-                Log.i(TAG, "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-                Log.i(TAG, "📨 MESSAGE #$messageCount RECEIVED (BYTES)")
-                Log.i(TAG, "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-                // Log.d(TAG, "Byte length: ${bytes.size()}")
-                // Try to decode as UTF-8 text
-                try {
-                    val text = bytes.utf8()
-                    Log.d(TAG, "Decoded as text:\n$text")
-                    handleServerMessage(text)
-                } catch (e: Exception) {
-                    Log.e(TAG, "❌ Could not decode binary message as UTF-8", e)
-                }
+                onMessage(webSocket, bytes.utf8())
             }
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-                Log.e(TAG, "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-                Log.e(TAG, "❌❌❌ WebSocket FAILURE ❌❌❌")
-                Log.e(TAG, "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-                Log.e(TAG, "Exception type: ${t.javaClass.simpleName}")
-                Log.e(TAG, "Exception message: ${t.message}")
-                Log.e(TAG, "Full stack trace:", t)
-
-                if (response != null) {
-                    Log.e(TAG, "HTTP ${response.code}: ${response.message}")
-                    Log.e(TAG, "Response protocol: ${response.protocol}")
-                    response.body?.let { body ->
-                        try {
-                            val bodyString = body.string()
-                            Log.e(TAG, "Response body:\n$bodyString")
-                        } catch (e: Exception) {
-                            Log.e(TAG, "Could not read response body", e)
-                        }
-                    }
+                Log.e(TAG, "❌❌❌ WebSocket FAILURE: ${t.javaClass.simpleName} - ${t.message}")
+                val friendlyMessage = when (t) {
+                    is java.net.UnknownHostException -> "Network error. Please check your internet connection."
+                    is java.net.SocketTimeoutException -> "Connection timed out. Please try again."
+                    else -> "WebSocket error: ${t.message}"
                 }
-
+                _error.postValue(Event(friendlyMessage))
                 setupComplete = false
                 _isModelReady.postValue(false)
             }
 
             override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
-                Log.w(TAG, "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-                Log.w(TAG, "⚠️ WebSocket CLOSING")
-                Log.w(TAG, "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-                Log.w(TAG, "Code: $code")
-                Log.w(TAG, "Reason: $reason")
+                Log.w(TAG, "⚠️ WebSocket CLOSING - Code: $code, Reason: $reason")
                 setupComplete = false
                 _isModelReady.postValue(false)
             }
 
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
-                Log.i(TAG, "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-                Log.i(TAG, "🔌 WebSocket CLOSED")
-                Log.i(TAG, "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-                Log.i(TAG, "Code: $code")
-                Log.i(TAG, "Reason: $reason")
-                Log.i(TAG, "Total messages received: $messageCount")
+                Log.i(TAG, "🔌 WebSocket CLOSED - Code: $code, Reason: $reason")
                 setupComplete = false
                 _isModelReady.postValue(false)
             }
         })
-
-        Log.d(TAG, "🔄 WebSocket creation initiated (async)")
     }
 
     private fun sendSetupMessage(ws: WebSocket) {
-        Log.i(TAG, "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-        Log.i(TAG, "📤 Preparing to send SETUP message")
-        Log.i(TAG, "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-
         val setupJson = JSONObject().apply {
             put("setup", JSONObject().apply {
                 put("model", "models/gemini-2.5-flash-native-audio-preview-09-2025")
-
                 put("generationConfig", JSONObject().apply {
                     put("responseModalities", JSONArray().put("AUDIO"))
                 })
-
                 put("inputAudioTranscription", JSONObject())
                 put("outputAudioTranscription", JSONObject())
             })
         }
-
-        val jsonString = setupJson.toString()
-        Log.d(TAG, "Setup message content:\n${setupJson.toString(2)}")
-        Log.d(TAG, "Message length: ${jsonString.length} bytes")
-
-        val sent = ws.send(jsonString)
-
-        if (sent) {
-            Log.i(TAG, "✅ Setup message SENT successfully")
-            Log.d(TAG, "⏳ Now waiting for server response...")
-        } else {
-            Log.e(TAG, "❌ Setup message FAILED to send!")
-        }
+        ws.send(setupJson.toString())
+        Log.i(TAG, "✅ Setup message SENT.")
     }
 
     fun transcribeAudio(audioData: ByteArray) {
-        if (!setupComplete) {
-            Log.w(TAG, "⚠️ Setup not complete, skipping audio chunk")
-            return
-        }
-
-        val ws = webSocket
-        if (ws == null) {
-            Log.e(TAG, "❌ Cannot transcribe: WebSocket is null")
-            return
-        }
-
+        if (!setupComplete || webSocket == null) return
         try {
             val audioMessage = JSONObject().apply {
                 put("realtimeInput", JSONObject().apply {
@@ -213,13 +131,7 @@ class GeminiLiveService(
                     })
                 })
             }
-
-            val sent = ws.send(audioMessage.toString())
-            if (sent) {
-                Log.v(TAG, "📤 Audio chunk sent (${audioData.size} bytes)")
-            } else {
-                Log.e(TAG, "❌ Failed to send audio chunk")
-            }
+            webSocket?.send(audioMessage.toString())
         } catch (e: Exception) {
             Log.e(TAG, "❌ Error sending audio", e)
         }
@@ -227,72 +139,47 @@ class GeminiLiveService(
 
     fun sendAudioStreamEnd() {
         val sent = webSocket?.send("""{"realtimeInput":{"audioStreamEnd":true}}""") ?: false
-        Log.d(TAG, "📤 audioStreamEnd signal sent: $sent")
+        if (sent) Log.i(TAG, "📤 audioStreamEnd signal sent.")
     }
 
     private fun handleServerMessage(text: String) {
-        Log.d(TAG, "🔍 Parsing server message...")
-
         val json = JSONObject(text)
-        val keys = json.keys().asSequence().toList()
-        Log.d(TAG, "🔑 JSON keys: $keys")
 
-        // Check for setupComplete
         if (json.has("setupComplete")) {
             setupComplete = true
-            Log.i(TAG, "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-            Log.i(TAG, "✅✅✅ SETUP COMPLETED SUCCESSFULLY! ✅✅✅")
-            Log.i(TAG, "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
             _isModelReady.postValue(true)
+            Log.i(TAG, "✅✅✅ SETUP COMPLETED SUCCESSFULLY! ✅✅✅")
             return
         }
 
-        // Handle serverContent
         if (json.has("serverContent")) {
             val serverContent = json.getJSONObject("serverContent")
-            Log.d(TAG, "📦 serverContent keys: ${serverContent.keys().asSequence().toList()}")
-
-            // Input transcription
             if (serverContent.has("inputTranscription")) {
                 val transcript = serverContent.getJSONObject("inputTranscription").optString("text", "")
                 if (transcript.isNotBlank()) {
                     accumulatedTranscript.append(transcript)
-                    Log.i(TAG, "📝 Input: '$transcript'")
+                    Log.i(TAG, "📝 Transcript Part: '$transcript'")
                 }
             }
 
-            // Output transcription
-            if (serverContent.has("outputTranscription")) {
-                val transcript = serverContent.getJSONObject("outputTranscription").optString("text", "")
-                if (transcript.isNotBlank()) {
-                    Log.d(TAG, "🤖 Output: '$transcript'")
-                }
-            }
-
-            // Turn complete
             if (serverContent.optBoolean("turnComplete", false)) {
-                Log.i(TAG, "━━━ Turn complete ━━━")
                 val final = accumulatedTranscript.toString().trim()
                 if (final.isNotBlank()) {
-                    Log.i(TAG, "✅ Final: '$final'")
+                    Log.i(TAG, "✅ Final Transcript: '$final'")
                     _transcriptionResult.postValue(Event(final))
                 } else {
-                    Log.w(TAG, "⚠️ No transcription")
+                    Log.w(TAG, "⚠️ No transcription received for this turn.")
+                    _transcriptionResult.postValue(Event(""))
                 }
                 accumulatedTranscript.clear()
             }
         }
 
-        // Check for errors
         if (json.has("error")) {
             val error = json.getJSONObject("error")
-            Log.e(TAG, "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-            Log.e(TAG, "❌ SERVER ERROR")
-            Log.e(TAG, "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-            Log.e(TAG, "Code: ${error.optInt("code", -1)}")
-            Log.e(TAG, "Message: ${error.optString("message", "")}")
-            Log.e(TAG, "Status: ${error.optString("status", "")}")
-            Log.e(TAG, "Full error:\n${error.toString(2)}")
+            val errorMessage = "Server Error: ${error.optString("message", "Unknown error")}"
+            Log.e(TAG, "❌ SERVER ERROR: $errorMessage")
+            _error.postValue(Event(errorMessage))
         }
     }
 
@@ -300,8 +187,7 @@ class GeminiLiveService(
         Log.i(TAG, "🔌 Releasing WebSocket")
         setupComplete = false
         accumulatedTranscript.clear()
-        messageCount = 0
-        webSocket?.close(1000, "User switched mode")
+        webSocket?.close(1000, "User released resources")
         webSocket = null
         _isModelReady.postValue(false)
     }

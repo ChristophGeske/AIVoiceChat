@@ -309,13 +309,6 @@
                         android:textColor="#FFFFFF"/>
 
                     <RadioButton
-                        android:id="@+id/radioSttWhisper"
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:text="Whisper (Slower, requires download)"
-                        android:textColor="#FFFFFF"/>
-
-                    <RadioButton
                         android:id="@+id/radioSttGeminiLive"
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
@@ -323,26 +316,6 @@
                         android:textColor="#FFFFFF"/>
 
                 </RadioGroup>
-
-                <TextView
-                    android:id="@+id/whisperDownloadStatus"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginStart="32dp"
-                    android:layout_marginTop="8dp"
-                    android:visibility="gone"
-                    android:textColor="#B0BEC5"
-                    tools:text="Downloading model..."/>
-
-                <ProgressBar
-                    android:id="@+id/whisperDownloadProgress"
-                    style="?android:attr/progressBarStyleHorizontal"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginStart="32dp"
-                    android:layout_marginEnd="16dp"
-                    android:layout_marginTop="4dp"
-                    android:visibility="gone"/>
                 <!-- END: SPEECH RECOGNITION BLOCK -->
 
                 <!-- System Prompt Section -->

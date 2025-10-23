@@ -4,33 +4,42 @@ data class ControlsState(
     val speakEnabled: Boolean,
     val stopEnabled: Boolean,
     val newRecordingEnabled: Boolean,
-    val clearEnabled: Boolean
+    val clearEnabled: Boolean,
+    val speakButtonText: String
 )
 
 object ControlsLogic {
-    // Centralized control logic for buttons
     fun derive(
-        isSpeaking: Boolean, // This is true when TTS is active
+        isSpeaking: Boolean,
         isListening: Boolean,
-        engineActive: Boolean,
+        isTranscribing: Boolean,
+        generationPhase: GenerationPhase,
         settingsVisible: Boolean
     ): ControlsState {
-        val blocked = isListening || engineActive
-        val overlay = settingsVisible
+        val isProcessing = isTranscribing || generationPhase != GenerationPhase.IDLE
+        val activityInProgress = isListening || isProcessing || isSpeaking
+        val settingsAreOpen = settingsVisible
 
-        val speakEnabled = !blocked && !isSpeaking && !overlay
-        val stopEnabled = isSpeaking || isListening || engineActive
+        val buttonText = when {
+            isListening && isProcessing -> "Processing & Listening..."
+            isListening -> "Listening..."
+            isTranscribing -> "Processing..."
+            generationPhase != GenerationPhase.IDLE -> "Generating..."
+            isSpeaking -> "Assistant Speaking..."
+            else -> "Tap to Speak"
+        }
 
-        // KORREKTUR: "New Recording" is enabled while the assistant is speaking
-        val newRecordingEnabled = isSpeaking && !overlay
-
-        val clearEnabled = !blocked && !isSpeaking && !overlay
+        val speakEnabled = !activityInProgress && !settingsAreOpen
+        val stopEnabled = activityInProgress && !settingsAreOpen
+        val newRecordingEnabled = isSpeaking && !settingsAreOpen
+        val clearEnabled = !activityInProgress && !settingsAreOpen
 
         return ControlsState(
             speakEnabled = speakEnabled,
             stopEnabled = stopEnabled,
             newRecordingEnabled = newRecordingEnabled,
-            clearEnabled = clearEnabled
+            clearEnabled = clearEnabled,
+            speakButtonText = buttonText
         )
     }
 }

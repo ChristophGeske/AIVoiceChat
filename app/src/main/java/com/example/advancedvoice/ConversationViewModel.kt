@@ -24,6 +24,7 @@ import androidx.lifecycle.viewModelScope
 import com.example.advancedvoice.gemini.GeminiLiveService
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import okhttp3.OkHttpClient
 import java.text.SimpleDateFormat
@@ -58,14 +59,14 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
     private val audioChannel = AudioFormat.CHANNEL_IN_MONO
     private val audioFormat = AudioFormat.ENCODING_PCM_16BIT
 
-    // Increased timeout to allow multiple sentences with pauses
     private val VAD_SILENCE_THRESHOLD_RMS = 250.0
-    private val VAD_SPEECH_TIMEOUT_MS = 3000L  // Increased from 1500ms
+    private val VAD_SPEECH_TIMEOUT_MS = 3000L
     private val VAD_MIN_SPEECH_DURATION_MS = 400L
     private var silenceStartTimestamp: Long = 0
     private var speechDetectedTimestamp: Long = 0
     @Volatile private var isRecording = false
     @Volatile private var isBargeInMode = false
+    @Volatile private var autoListenEnabled = true
 
     private val entries = mutableListOf<ConversationEntry>()
     private val _conversation = MutableLiveData<List<ConversationEntry>>(emptyList())
@@ -107,7 +108,7 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
 
     private var lastUserInput: String? = null
     private var lastUserEntryIndex: Int? = null
-    private var accumulatedUserInput = StringBuilder()  // Accumulate multiple transcripts
+    private var accumulatedUserInput = StringBuilder()
     private var userInterruptedDuringGeneration = false
     private var wasInterruptedByStt = false
 
@@ -126,7 +127,6 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
             Log.i(TAG, "[${now()}][TTS] ━━━ Started speaking: utteranceId=$utteranceId")
             _isSpeaking.postValue(true)
 
-            // Stop any active listening when TTS starts
             if (_sttIsListening.value == true) {
                 Log.i(TAG, "[${now()}][TTS] ━━━ Stopping listening because TTS started")
                 stopListeningOnly(transcribe = false)
@@ -146,9 +146,35 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
                     Log.i(TAG, "[${now()}][TTS] ━━━ Speaking next in queue (${ttsQueue.size} remaining)")
                     speakNext()
                 } else {
+                    Log.i(TAG, "[${now()}][TTS] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
                     Log.i(TAG, "[${now()}][TTS] ━━━ Queue finished, TTS complete")
+                    Log.i(TAG, "[${now()}][TTS] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
                     _isSpeaking.postValue(false)
                     _ttsQueueFinishedEvent.postValue(Event(Unit))
+
+                    // *** AUTO-RESTART LISTENING FOR CONTINUOUS CONVERSATION ***
+                    if (currentSttSystem == SttSystem.GEMINI_LIVE &&
+                        _settingsVisible.value != true &&
+                        autoListenEnabled) {
+
+                        Log.i(TAG, "[${now()}][AUTO-LISTEN] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+                        Log.i(TAG, "[${now()}][AUTO-LISTEN] ━━━ TTS finished, auto-restarting listening")
+                        Log.i(TAG, "[${now()}][AUTO-LISTEN] ━━━ System: $currentSttSystem")
+                        Log.i(TAG, "[${now()}][AUTO-LISTEN] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+
+                        delay(500)
+
+                        if (_isSpeaking.value != true &&
+                            _settingsVisible.value != true &&
+                            !isRecording &&
+                            autoListenEnabled) {
+
+                            Log.i(TAG, "[${now()}][AUTO-LISTEN] ━━━ Starting listening NOW")
+                            startListening()
+                        } else {
+                            Log.w(TAG, "[${now()}][AUTO-LISTEN] ⚠️ Conditions changed, NOT restarting | speaking=${_isSpeaking.value} | settings=${_settingsVisible.value} | recording=$isRecording | autoListen=$autoListenEnabled")
+                        }
+                    }
                 }
             }
         }
@@ -186,7 +212,6 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
                 Log.i(TAG, "[${now()}][ENGINE] ━━━ First sentence received: '${textBlock.take(100)}'")
                 _generationPhase.postValue(GenerationPhase.GENERATING_REMAINDER)
 
-                // Continue barge-in listening during remainder generation
                 if (currentSttSystem == SttSystem.GEMINI_LIVE && !isRecording) {
                     Log.i(TAG, "[${now()}][ENGINE] ━━━ Starting barge-in for remainder phase")
                     startListeningForBargeIn()
@@ -217,8 +242,6 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
                 _generationPhase.postValue(GenerationPhase.IDLE)
                 _llmDelivered.postValue(true)
 
-                // DON'T stop listening here if in barge-in mode
-                // Let the TTS onStart handle stopping the listener
                 if (_sttIsListening.value == true && !isBargeInMode) {
                     Log.i(TAG, "[${now()}][ENGINE] ━━━ Stopping normal STT session")
                     stopListeningOnly(transcribe = false)
@@ -285,7 +308,6 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
             }
         }
 
-        // Start barge-in when TTS starts or when generation starts
         isSpeaking.observeForever { speaking ->
             if (speaking) {
                 Log.d(TAG, "[${now()}][BARGE-IN-TRIGGER] TTS started speaking")
@@ -300,6 +322,11 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
         }
     }
 
+    fun setAutoListenEnabled(enabled: Boolean) {
+        autoListenEnabled = enabled
+        Log.i(TAG, "[${now()}][AUTO-LISTEN] Auto-listen ${if (enabled) "ENABLED" else "DISABLED"}")
+    }
+
     private fun handleTranscriptionResult(result: String, source: String) {
         _isTranscribing.postValue(false)
 
@@ -312,15 +339,12 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
                 wasInterruptedByStt = false
                 lastUserInput?.let { startTurn(it, currentModelName) }
             } else if (!isRecording) {
-                // Only trigger no-match if recording is actually stopped
                 _sttNoMatch.postValue(Event(Unit))
             }
             return
         }
 
-        // *** CRITICAL: Check if we're STILL RECORDING ***
         if (isRecording) {
-            // User is still speaking - accumulate this transcription, DON'T start LLM yet
             if (accumulatedUserInput.isNotEmpty()) {
                 accumulatedUserInput.append(" ")
             }
@@ -333,18 +357,14 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
             Log.i(TAG, "[${now()}][$source] ━━━ Waiting for VAD timeout...")
             Log.i(TAG, "[${now()}][$source] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
-            // If LLM already started (shouldn't happen, but safety check), abort it
             if (_engineActive.value == true) {
                 Log.w(TAG, "[${now()}][$source] ━━━ LLM started prematurely while still recording! Aborting.")
                 abortEngineSilently()
             }
 
-            return // Don't start LLM - wait for recording to finish
+            return
         }
 
-        // *** Recording has stopped - this is the FINAL input ***
-
-        // Accumulate this last piece
         if (accumulatedUserInput.isNotEmpty()) {
             accumulatedUserInput.append(" ")
         }
@@ -357,7 +377,6 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
         Log.i(TAG, "[${now()}][$source] ━━━ Complete input: '$fullInput'")
         Log.i(TAG, "[${now()}][$source] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
-        // Check if this is an interruption (LLM already generating)
         if (_engineActive.value == true && !_llmDelivered.value!!) {
             Log.i(TAG, "[${now()}][$source] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
             Log.i(TAG, "[${now()}][$source] ━━━ USER INTERRUPTED GENERATION")
@@ -380,7 +399,6 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
             return
         }
 
-        // Normal flow - start LLM with complete input
         handleSttResult(fullInput)
     }
 
@@ -508,9 +526,12 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
             Log.i(TAG, "[${now()}][STT] ━━━ Blocked - TTS is speaking")
             return
         }
+
+        autoListenEnabled = true
+
         Log.i(TAG, "[${now()}][STT] ━━━ startListening() request received for system: $currentSttSystem")
         wasInterruptedByStt = false
-        accumulatedUserInput.clear()  // Start fresh
+        accumulatedUserInput.clear()
 
         when (currentSttSystem) {
             SttSystem.STANDARD -> startStandardSTT()
@@ -596,7 +617,6 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
 
                 loopIteration++
 
-                // Send audio to Gemini Live after speech is detected
                 if (currentSttSystem == SttSystem.GEMINI_LIVE && hasDetectedSpeechInTurn) {
                     val byteData = data.to16BitPcm(read)
                     geminiLiveService.transcribeAudio(byteData)
@@ -689,8 +709,6 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
                     Log.i(TAG, "[${now()}][STT] ━━━ Sending audioStreamEnd to Gemini Live")
                     geminiLiveService.sendAudioStreamEnd()
 
-                    // If we already have accumulated input, we might get one more transcription
-                    // or we might need to process what we have
                     if (accumulatedUserInput.isEmpty()) {
                         Log.i(TAG, "[${now()}][STT] ━━━ Waiting for final transcription from Gemini Live...")
                     } else {
@@ -698,7 +716,6 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
                     }
                 }
             } else {
-                // No significant NEW speech, but check if we have accumulated input
                 if (accumulatedUserInput.isNotEmpty()) {
                     Log.i(TAG, "[${now()}][VAD] ━━━ No new speech, but using accumulated input: '${accumulatedUserInput}'")
                     handleTranscriptionResult(accumulatedUserInput.toString(), "Accumulated")
@@ -787,7 +804,6 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
         Log.i(TAG, "[${now()}][TURN] ━━━ isRecording: $isRecording")
         Log.i(TAG, "[${now()}][TURN] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
-        // DON'T stop recording here - it should already be stopped by VAD timeout
         if (isRecording) {
             Log.e(TAG, "[${now()}][TURN] ⚠️⚠️⚠️ WARNING: Recording still active when starting LLM! This shouldn't happen!")
         }
@@ -915,6 +931,9 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app), TextToSpe
         Log.i(TAG, "[${now()}][STOP] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
         Log.i(TAG, "[${now()}][STOP] ━━━ STOPPING ALL OPERATIONS")
         Log.i(TAG, "[${now()}][STOP] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+
+        autoListenEnabled = false
+
         abortEngine()
         stopTts()
         stopListeningOnly(transcribe = false)

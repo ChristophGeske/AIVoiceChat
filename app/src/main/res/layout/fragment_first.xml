@@ -6,9 +6,9 @@
     android:layout_height="match_parent"
     android:background="#101114"
     android:padding="12dp"
-    tools:context=".FirstFragment">
+    tools:context=".feature.conversation.ui.ConversationFragment">
 
-    <!-- Settings panel: full height, initially hidden; will overlay content when visible -->
+    <!-- Settings panel: full height, initially hidden; overlays content when visible -->
     <ScrollView
         android:id="@+id/settingsContainerScrollView"
         android:layout_width="match_parent"
@@ -238,7 +238,6 @@
                             android:maxLength="3" />
                     </com.google.android.material.textfield.TextInputLayout>
 
-                    <!-- Description for listening time -->
                     <TextView
                         android:id="@+id/listenSecondsDesc"
                         android:layout_width="match_parent"
@@ -282,7 +281,7 @@
                     android:layout_marginTop="24dp"
                     android:text="Speech Recognition Engine"
                     android:textAppearance="?attr/textAppearanceTitleMedium"
-                    android:textColor="#FFFFFF"/>
+                    android:textColor="#FFFFFF" />
 
                 <TextView
                     android:id="@+id/ttsSettingsLink"
@@ -306,14 +305,14 @@
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
                         android:text="Standard (On-device)"
-                        android:textColor="#FFFFFF"/>
+                        android:textColor="#FFFFFF" />
 
                     <RadioButton
                         android:id="@+id/radioSttGeminiLive"
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
                         android:text="Gemini Live (Fast, requires internet)"
-                        android:textColor="#FFFFFF"/>
+                        android:textColor="#FFFFFF" />
 
                 </RadioGroup>
                 <!-- END: SPEECH RECOGNITION BLOCK -->
@@ -326,16 +325,14 @@
                     android:layout_marginTop="12dp"
                     android:orientation="vertical">
 
-                    <!-- Base System Prompt Title -->
                     <TextView
                         android:id="@+id/systemPromptTitle"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
                         android:text="Base System Prompt"
                         android:textAppearance="?attr/textAppearanceTitleMedium"
-                        android:textColor="#FFFFFF"/>
+                        android:textColor="#FFFFFF" />
 
-                    <!-- Warning: shown when Faster First is enabled -->
                     <TextView
                         android:id="@+id/systemPromptWarning"
                         android:layout_width="match_parent"
@@ -346,9 +343,8 @@
                         android:textColor="#FFA726"
                         android:textSize="12sp"
                         android:visibility="gone"
-                        tools:visibility="visible"/>
+                        tools:visibility="visible" />
 
-                    <!-- Base System Prompt Input -->
                     <com.google.android.material.textfield.TextInputLayout
                         style="@style/Widget.MaterialComponents.TextInputLayout.OutlinedBox"
                         android:layout_width="match_parent"
@@ -381,7 +377,7 @@
                         android:layout_marginTop="16dp"
                         android:text="System Prompt Extensions"
                         android:textAppearance="?attr/textAppearanceTitleMedium"
-                        android:textColor="#FFFFFF"/>
+                        android:textColor="#FFFFFF" />
 
                     <TextView
                         android:id="@+id/promptExtensionsDesc"
@@ -391,7 +387,7 @@
                         android:layout_marginBottom="8dp"
                         android:text="These instructions are automatically appended to your base prompt. You can customize them here."
                         android:textColor="#B0BEC5"
-                        android:textSize="12sp"/>
+                        android:textSize="12sp" />
 
                     <com.google.android.material.textfield.TextInputLayout
                         android:id="@+id/promptExtensionsLayout"
@@ -418,7 +414,7 @@
                         android:layout_gravity="end"
                         android:text="Reset Extensions" />
 
-                    <!-- Phase 1 Prompt (Fast First Sentence) - Only visible when Faster First is ON -->
+                    <!-- Phase 1 Prompt (Fast First Sentence) - visible when Faster First is ON -->
                     <TextView
                         android:id="@+id/phase1PromptTitle"
                         android:layout_width="wrap_content"
@@ -428,7 +424,7 @@
                         android:textAppearance="?attr/textAppearanceTitleMedium"
                         android:textColor="#FFFFFF"
                         android:visibility="gone"
-                        tools:visibility="visible"/>
+                        tools:visibility="visible" />
 
                     <TextView
                         android:id="@+id/phase1PromptDesc"
@@ -440,7 +436,7 @@
                         android:textColor="#B0BEC5"
                         android:textSize="12sp"
                         android:visibility="gone"
-                        tools:visibility="visible"/>
+                        tools:visibility="visible" />
 
                     <com.google.android.material.textfield.TextInputLayout
                         android:id="@+id/phase1PromptLayout"
@@ -469,9 +465,9 @@
                         android:layout_gravity="end"
                         android:text="Reset Phase 1"
                         android:visibility="gone"
-                        tools:visibility="visible"/>
+                        tools:visibility="visible" />
 
-                    <!-- Phase 2 Prompt (Detailed Continuation) - Only visible when Faster First is ON -->
+                    <!-- Phase 2 Prompt (Detailed Continuation) - visible when Faster First is ON -->
                     <TextView
                         android:id="@+id/phase2PromptTitle"
                         android:layout_width="wrap_content"
@@ -481,7 +477,7 @@
                         android:textAppearance="?attr/textAppearanceTitleMedium"
                         android:textColor="#FFFFFF"
                         android:visibility="gone"
-                        tools:visibility="visible"/>
+                        tools:visibility="visible" />
 
                     <TextView
                         android:id="@+id/phase2PromptDesc"
@@ -493,7 +489,7 @@
                         android:textColor="#B0BEC5"
                         android:textSize="12sp"
                         android:visibility="gone"
-                        tools:visibility="visible"/>
+                        tools:visibility="visible" />
 
                     <com.google.android.material.textfield.TextInputLayout
                         android:id="@+id/phase2PromptLayout"
@@ -522,7 +518,7 @@
                         android:layout_gravity="end"
                         android:text="Reset Phase 2"
                         android:visibility="gone"
-                        tools:visibility="visible"/>
+                        tools:visibility="visible" />
 
                 </LinearLayout>
 
@@ -622,4 +618,5 @@
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintTop_toTopOf="parent"
         tools:visibility="visible" />
+
 </androidx.constraintlayout.widget.ConstraintLayout>

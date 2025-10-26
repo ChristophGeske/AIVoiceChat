@@ -1,13 +1,25 @@
 <?xml version="1.0" encoding="utf-8"?>
 <navigation xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
-    xmlns:tools="http://schemas.android.com/tools"
     android:id="@+id/nav_graph"
-    app:startDestination="@id/FirstFragment">
+    app:startDestination="@id/conversationFragment">
 
     <fragment
-        android:id="@+id/FirstFragment"
-        android:name="com.example.advancedvoice.FirstFragment"
-        android:label="@string/first_fragment_label"
-        tools:layout="@layout/fragment_first" />
+        android:id="@+id/conversationFragment"
+        android:name="com.example.advancedvoice.feature.conversation.ui.ConversationFragment"
+        android:label="@string/first_fragment_label">
+        <action
+            android:id="@+id/action_conversation_to_settings"
+            app:destination="@id/settingsFragment" />
+    </fragment>
+
+    <fragment
+        android:id="@+id/settingsFragment"
+        android:name="com.example.advancedvoice.feature.settings.ui.SettingsFragment"
+        android:label="@string/action_settings">
+        <action
+            android:id="@+id/action_settings_to_conversation"
+            app:destination="@id/conversationFragment" />
+    </fragment>
+
 </navigation>

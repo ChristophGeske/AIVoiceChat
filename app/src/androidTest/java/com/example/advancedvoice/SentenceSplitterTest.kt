@@ -1,5 +1,6 @@
 package com.example.advancedvoice
 
+import com.example.advancedvoice.core.text.SentenceSplitter
 import org.junit.Test
 import org.junit.Assert.*
 

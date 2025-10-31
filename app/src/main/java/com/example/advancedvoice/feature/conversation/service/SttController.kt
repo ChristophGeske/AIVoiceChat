@@ -5,15 +5,13 @@ import kotlinx.coroutines.flow.StateFlow
 
 /**
  * Abstraction over speech-to-text sources.
- * Implementations:
- * - StandardSttController (Android SpeechRecognizer)
- * - GeminiLiveSttController (VadRecorder + GeminiLiveTranscriber)
  */
 interface SttController {
     val isListening: StateFlow<Boolean>
-    // NEW: State to indicate when the VAD or recognizer is actively detecting speech.
     val isHearingSpeech: StateFlow<Boolean>
-    val transcripts: SharedFlow<String>
+    // NEW: State to indicate the STT engine is processing the final transcript after speech has ended.
+    val isTranscribing: StateFlow<Boolean>
+    val transcripts: SharedFlow<String> // Final transcripts only
     val errors: SharedFlow<String>
 
     suspend fun start()

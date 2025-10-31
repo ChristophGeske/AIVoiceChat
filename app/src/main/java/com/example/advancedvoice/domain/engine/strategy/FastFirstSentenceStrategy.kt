@@ -22,6 +22,8 @@ class FastFirstSentenceStrategy(
     private val openAiKeyProvider: () -> String
 ) : IGenerationStrategy {
 
+    companion object { private const val TAG = "FastFirst" }
+
     @Volatile private var active = false
 
     override fun execute(
@@ -33,9 +35,14 @@ class FastFirstSentenceStrategy(
         callbacks: SentenceTurnEngine.Callbacks
     ) {
         active = true
+        Log.i(TAG, "[FastFirst] Starting two-phase generation: model=$modelName, maxSentences=$maxSentences")
+
         scope.launch(Dispatchers.IO) {
             try {
                 val isGemini = modelName.contains("gemini", ignoreCase = true)
+
+                // PHASE 1: Generate first sentence quickly
+                Log.i(TAG, "[FastFirst] PHASE 1: Generating first sentence with low temperature...")
                 val (firstSentence, remaining) = if (isGemini) {
                     val gem = GeminiService(geminiKeyProvider, http)
                     val phase1Prompt = "$systemPrompt\n\nRespond with ONE concise complete sentence that directly answers the user's request."
@@ -47,10 +54,17 @@ class FastFirstSentenceStrategy(
                         enableGoogleSearch = true
                     )
                     val first = SentenceSplitter.extractFirstSentence(phase1Text).first.trim()
+                    Log.i(TAG, "[FastFirst] PHASE 1 complete: '${first.take(80)}...'")
                     callbacks.onFirstSentence(first)
 
-                    if (!active) return@launch
+                    if (!active) {
+                        Log.w(TAG, "[FastFirst] Aborted after phase 1")
+                        return@launch
+                    }
+
+                    // PHASE 2: Generate remaining sentences
                     val remainingCount = (maxSentences - 1).coerceAtLeast(1)
+                    Log.i(TAG, "[FastFirst] PHASE 2: Generating $remainingCount additional sentence(s)...")
                     val phase2Prompt = """
                         $systemPrompt
 
@@ -65,7 +79,9 @@ class FastFirstSentenceStrategy(
                         temperature = 0.7,
                         enableGoogleSearch = true
                     )
-                    first to SentenceSplitter.splitIntoSentences(phase2Text)
+                    val remainingSentences = SentenceSplitter.splitIntoSentences(phase2Text)
+                    Log.i(TAG, "[FastFirst] PHASE 2 complete: ${remainingSentences.size} sentences")
+                    first to remainingSentences
                 } else {
                     val openai = OpenAiService(openAiKeyProvider, http)
                     val phase1Prompt = "$systemPrompt\n\nRespond with ONE concise complete sentence that directly answers the user's request."
@@ -78,10 +94,16 @@ class FastFirstSentenceStrategy(
                         enableWebSearch = true
                     ).text
                     val first = SentenceSplitter.extractFirstSentence(phase1).first.trim()
+                    Log.i(TAG, "[FastFirst] PHASE 1 complete: '${first.take(80)}...'")
                     callbacks.onFirstSentence(first)
 
-                    if (!active) return@launch
+                    if (!active) {
+                        Log.w(TAG, "[FastFirst] Aborted after phase 1")
+                        return@launch
+                    }
+
                     val remainingCount = (maxSentences - 1).coerceAtLeast(1)
+                    Log.i(TAG, "[FastFirst] PHASE 2: Generating $remainingCount additional sentence(s)...")
                     val phase2Prompt = """
                         $systemPrompt
 
@@ -97,11 +119,19 @@ class FastFirstSentenceStrategy(
                         verbosity = "low",
                         enableWebSearch = true
                     ).text
-                    first to SentenceSplitter.splitIntoSentences(phase2)
+                    val remainingSentences = SentenceSplitter.splitIntoSentences(phase2)
+                    Log.i(TAG, "[FastFirst] PHASE 2 complete: ${remainingSentences.size} sentences")
+                    first to remainingSentences
                 }
 
-                if (!active) return@launch
-                if (remaining.isNotEmpty()) callbacks.onRemainingSentences(remaining)
+                if (!active) {
+                    Log.w(TAG, "[FastFirst] Aborted before emitting remaining sentences")
+                    return@launch
+                }
+
+                if (remaining.isNotEmpty()) {
+                    callbacks.onRemainingSentences(remaining)
+                }
 
                 val final = buildString {
                     append(firstSentence)
@@ -111,13 +141,15 @@ class FastFirstSentenceStrategy(
                     }
                 }.trim()
 
+                Log.i(TAG, "[FastFirst] Complete response (len=${final.length})")
                 callbacks.onFinalResponse(final)
             } catch (t: Throwable) {
-                Log.e("FastFirstSentenceStrategy", "Error: ${t.message}", t)
+                Log.e(TAG, "[FastFirst] Error: ${t.message}", t)
                 if (active) callbacks.onError(t.message ?: "Generation failed")
             } finally {
                 if (active) {
                     active = false
+                    Log.i(TAG, "[FastFirst] Turn finished")
                     callbacks.onTurnFinish()
                 }
             }
@@ -125,6 +157,7 @@ class FastFirstSentenceStrategy(
     }
 
     override fun abort() {
+        Log.w(TAG, "[FastFirst] abort() called")
         active = false
     }
 

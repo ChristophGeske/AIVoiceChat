@@ -1,6 +1,8 @@
 package com.example.advancedvoice.feature.conversation.ui
 
 import android.graphics.Color
+import android.text.Html
+import android.text.method.LinkMovementMethod
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
@@ -37,7 +39,13 @@ class ConversationAdapter(
             speakerLabel.text = entry.speaker
             speakerLabel.setTextColor(Color.parseColor(labelColor))
 
-            messageContent.text = entry.sentences.joinToString(" ")
+            // FIX: Prioritize showing the streaming text if it's available.
+            // Otherwise, fall back to the joined final sentences.
+            if (!entry.streamingText.isNullOrBlank()) {
+                messageContent.text = entry.streamingText
+            } else {
+                messageContent.text = entry.sentences.joinToString(" ")
+            }
 
             if (entry.isAssistant) {
                 replayButton.visibility = View.VISIBLE

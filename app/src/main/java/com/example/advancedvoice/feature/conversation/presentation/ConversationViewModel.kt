@@ -34,7 +34,6 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
 
     private val http: OkHttpClient = HttpClientProvider.client
     private val appCtx = app.applicationContext
-
     private val TAG = LoggerConfig.TAG_VM
 
     private val store = ConversationStore()
@@ -46,20 +45,20 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
     private var stt: SttController? = null
     private val _isListening = MutableStateFlow(false)
     val isListening: StateFlow<Boolean> = _isListening
-
     private val _isHearingSpeech = MutableStateFlow(false)
     val isHearingSpeech: StateFlow<Boolean> = _isHearingSpeech
-
+    private val _isTranscribing = MutableStateFlow(false)
+    val isTranscribing: StateFlow<Boolean> = _isTranscribing
     private val _phase = MutableStateFlow(GenerationPhase.IDLE)
     val phase: StateFlow<GenerationPhase> = _phase
 
     val controls: StateFlow<ControlsState> =
-        combine(isSpeaking, isListening, isHearingSpeech, phase) { speaking, listening, hearing, p ->
-            ControlsLogic.derive(speaking, listening, hearing, p)
+        combine(isSpeaking, isListening, isHearingSpeech, isTranscribing, phase) { speaking, listening, hearing, transcribing, p ->
+            ControlsLogic.derive(speaking, listening, hearing, transcribing, p)
         }.stateIn(
             viewModelScope,
             SharingStarted.Eagerly,
-            ControlsLogic.derive(false, false, false, GenerationPhase.IDLE)
+            ControlsLogic.derive(false, false, false, false, GenerationPhase.IDLE)
         )
 
     private var llmPerf: PerfTimer? = null
@@ -142,98 +141,216 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
                 }
             }
         }
+
+        // FIX: Apply engine settings from preferences
+        applyEngineSettings()
     }
 
     fun setupSttSystemFromPreferences() {
         val sttPref = Prefs.getSttSystem(appCtx)
         val geminiKey = Prefs.getGeminiKey(appCtx)
-        Log.i(TAG, "setupSttSystemFromPreferences: stt=$sttPref, hasGeminiKey=${geminiKey.isNotBlank()}")
+        Log.i(TAG, "[ViewModel] setupSttSystemFromPreferences: stt=$sttPref, hasGeminiKey=${geminiKey.isNotBlank()}")
 
         val shouldUseGeminiLive = sttPref == SttSystem.GEMINI_LIVE && geminiKey.isNotBlank()
 
         val currentControllerIsLive = stt is GeminiLiveSttController
         if (shouldUseGeminiLive && currentControllerIsLive) {
-            Log.d(TAG, "Already using GeminiLiveSttController. No change needed.")
+            Log.d(TAG, "[ViewModel] Already using GeminiLiveSttController. No change needed.")
             return
         }
         val currentControllerIsStandard = stt is StandardSttController
         if (!shouldUseGeminiLive && currentControllerIsStandard) {
-            Log.d(TAG, "Already using StandardSttController. No change needed.")
+            Log.d(TAG, "[ViewModel] Already using StandardSttController. No change needed.")
             return
         }
 
         stt?.release()
 
         stt = if (shouldUseGeminiLive) {
-            Log.i(TAG, "Creating and wiring GeminiLiveSttController.")
+            Log.i(TAG, "[ViewModel] Creating and wiring GeminiLiveSttController.")
             val liveModel = "models/gemini-2.5-flash-native-audio-preview-09-2025"
             val vad = VadRecorder(scope = viewModelScope)
             val client = GeminiLiveClient(scope = viewModelScope)
             val transcriber = GeminiLiveTranscriber(scope = viewModelScope, client = client)
-            // FIX: Pass the required apiKey and model to the constructor.
             GeminiLiveSttController(viewModelScope, vad, client, transcriber, geminiKey, liveModel)
         } else {
-            Log.i(TAG, "Creating and wiring StandardSttController.")
+            Log.i(TAG, "[ViewModel] Creating and wiring StandardSttController.")
             StandardSttController(getApplication(), viewModelScope)
         }
 
         rewireSttCollectors()
+
+        // FIX: Reapply engine settings after STT changes
+        applyEngineSettings()
+    }
+
+    // FIX: New method to apply engine configuration from preferences
+    private fun applyEngineSettings() {
+        val fasterFirst = Prefs.getFasterFirst(appCtx)
+        val maxSentences = Prefs.getMaxSentences(appCtx)
+
+        Log.i(TAG, "[ViewModel] Applying engine settings: fasterFirst=$fasterFirst, maxSentences=$maxSentences")
+
+        engine.setFasterFirst(fasterFirst)
+        engine.setMaxSentences(maxSentences)
     }
 
     private fun rewireSttCollectors() {
         val current = stt ?: return
-        Log.d(TAG, "Rewiring STT collectors for ${current.javaClass.simpleName}")
-        viewModelScope.launch { current.transcripts.collectLatest { onTranscript(it) } }
+        Log.d(TAG, "[ViewModel] Rewiring STT collectors for ${current.javaClass.simpleName}")
+
+        viewModelScope.launch {
+            current.transcripts.collectLatest { onFinalTranscript(it) }
+        }
+
+        if (current is GeminiLiveSttController) {
+            viewModelScope.launch {
+                current.partialTranscripts.collectLatest { partialText ->
+                    store.updateLastUserStreamingText(partialText)
+                }
+            }
+        }
+
         viewModelScope.launch { current.errors.collectLatest { store.addError(it) } }
         viewModelScope.launch { current.isListening.collectLatest { _isListening.value = it } }
         viewModelScope.launch { current.isHearingSpeech.collectLatest { _isHearingSpeech.value = it } }
+        viewModelScope.launch { current.isTranscribing.collectLatest { _isTranscribing.value = it } }
     }
 
     fun startListening() {
-        Log.i(TAG, "startListening() called.")
+        Log.i(TAG, "[ViewModel] startListening() called.")
+
+        // FIX: Handle barge-in during generation
+        if (engine.isActive()) {
+            Log.w(TAG, "[ViewModel] BARGE-IN detected: User speaking during generation. Aborting current turn.")
+            handleBargeIn()
+            return
+        }
+
+        if (stt is GeminiLiveSttController) {
+            store.addUserStreamingPlaceholder()
+        }
+        val s = stt ?: return
+        viewModelScope.launch { s.start() }
+    }
+
+    // FIX: Handle interruption/barge-in
+    private fun handleBargeIn() {
+        Log.i(TAG, "[ViewModel] handleBargeIn: Stopping generation and TTS, preparing for new input.")
+
+        // Get the partial assistant response if any
+        val lastAssistantEntry = conversation.value.lastOrNull { it.isAssistant }
+        val partialResponse = lastAssistantEntry?.sentences?.joinToString(" ") ?: ""
+
+        if (partialResponse.isNotBlank()) {
+            Log.i(TAG, "[ViewModel] Saving partial assistant response to history (len=${partialResponse.length})")
+            engine.injectAssistantDraft(partialResponse)
+        }
+
+        // Abort generation and TTS
+        engine.abort(silent = true)
+        tts.stop()
+        _phase.value = GenerationPhase.IDLE
+
+        // Start listening for the new/additional input
+        if (stt is GeminiLiveSttController) {
+            store.addUserStreamingPlaceholder()
+        }
         val s = stt ?: return
         viewModelScope.launch { s.start() }
     }
 
     fun stopListening(transcribe: Boolean) {
-        Log.i(TAG, "stopListening(transcribe=$transcribe) called.")
+        Log.i(TAG, "[ViewModel] stopListening(transcribe=$transcribe) called.")
         val s = stt ?: return
         viewModelScope.launch { s.stop(transcribe) }
     }
 
     fun clearConversation() {
-        Log.i(TAG, "clearConversation() called.")
+        Log.i(TAG, "[ViewModel] clearConversation() called.")
         store.clear()
         tts.stop()
         engine.clearHistory()
     }
 
     fun stopAll() {
-        Log.w(TAG, "stopAll() called - HARD STOP.")
+        Log.w(TAG, "[ViewModel] stopAll() called - HARD STOP.")
         engine.abort(silent = false)
         stopListening(transcribe = false)
         tts.stop()
         _phase.value = GenerationPhase.IDLE
     }
 
-    private fun onTranscript(text: String) {
+    private fun onFinalTranscript(text: String) {
         val input = text.trim()
+
         if (input.isEmpty()) {
-            Log.w(TAG, "onTranscript received empty text. Ignoring.")
+            Log.w(TAG, "[ViewModel] onFinalTranscript received empty text. Stopping and aborting turn.")
+            stopListening(transcribe = false)
             return
         }
-        Log.i(TAG, "Transcript='${input.take(120)}'")
-        store.addUser(input)
-        startTurn(input)
+
+        Log.i(TAG, "[ViewModel] Final Transcript='${input.take(120)}'")
+
+        // FIX: Check if this is a barge-in continuation
+        if (engine.isActive()) {
+            Log.i(TAG, "[ViewModel] Barge-in continuation: combining with previous input.")
+            handleBargeInContinuation(input)
+        } else {
+            store.replaceLastUser(input)
+            startTurn(input)
+        }
+    }
+
+    // FIX: Handle the new input when user interrupted
+    private fun handleBargeInContinuation(newInput: String) {
+        // Find the last user message and combine
+        val lastUserEntry = conversation.value.lastOrNull { !it.isAssistant && it.speaker == "You" }
+        val previousInput = lastUserEntry?.sentences?.joinToString(" ") ?: ""
+
+        val combinedInput = if (previousInput.isNotBlank()) {
+            "$previousInput $newInput"
+        } else {
+            newInput
+        }
+
+        Log.i(TAG, "[ViewModel] Combined barge-in input (len=${combinedInput.length}): '${combinedInput.take(100)}...'")
+
+        // Replace the user message with the combined version
+        store.replaceLastUser(combinedInput)
+
+        // Update the engine's history with the combined message
+        engine.replaceLastUserMessage(combinedInput)
+
+        // Start a new turn with the combined input
+        startTurnWithExistingHistory()
     }
 
     private fun startTurn(userText: String) {
         val fasterFirst = Prefs.getFasterFirst(appCtx)
         _phase.value = if (fasterFirst) GenerationPhase.GENERATING_FIRST else GenerationPhase.SINGLE_SHOT_GENERATING
         val model = Prefs.getSelectedModel(appCtx)
-        Log.i(TAG, "startTurn(model=$model, fasterFirst=$fasterFirst) inputLen=${userText.length}")
+        Log.i(TAG, "[ViewModel] startTurn(model=$model, fasterFirst=$fasterFirst) inputLen=${userText.length}")
         llmPerf = PerfTimer(TAG, "llm").also { it.mark("llm_start") }
+
+        // FIX: Ensure engine settings are current
+        applyEngineSettings()
+
         engine.startTurn(userText, model)
+    }
+
+    // FIX: Start turn using existing history (for barge-in)
+    private fun startTurnWithExistingHistory() {
+        val fasterFirst = Prefs.getFasterFirst(appCtx)
+        _phase.value = if (fasterFirst) GenerationPhase.GENERATING_FIRST else GenerationPhase.SINGLE_SHOT_GENERATING
+        val model = Prefs.getSelectedModel(appCtx)
+        Log.i(TAG, "[ViewModel] startTurnWithExistingHistory(model=$model, fasterFirst=$fasterFirst)")
+        llmPerf = PerfTimer(TAG, "llm").also { it.mark("llm_start") }
+
+        // FIX: Ensure engine settings are current
+        applyEngineSettings()
+
+        engine.startTurnWithCurrentHistory(model)
     }
 
     private fun getEffectiveSystemPrompt(): String {
@@ -244,7 +361,7 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
 
     override fun onCleared() {
         super.onCleared()
-        Log.w(TAG, "onCleared() - ViewModel is being destroyed.")
+        Log.w(TAG, "[ViewModel] onCleared() - ViewModel is being destroyed.")
         stt?.release()
         tts.shutdown()
     }

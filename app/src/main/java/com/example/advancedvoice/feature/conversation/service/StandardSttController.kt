@@ -22,9 +22,7 @@ import java.util.Locale
  * - Friendly error messages (including vendor-specific code 11).
  * - Recreate recognizer on ERROR_CLIENT / ERROR_RECOGNIZER_BUSY / vendor codes.
  * - Backoff window after throttling errors to avoid immediate re-failure.
- * - Optional language fallback to "en-US" after a code-11 error.
- * - Guards double-starts.
- * - FIX: Correctly handles user-initiated stops to prevent false "no-match" errors.
+ * - Correctly handles user-initiated stops to prevent false "no-match" errors.
  */
 class StandardSttController(
     private val app: Application,
@@ -38,9 +36,12 @@ class StandardSttController(
     private val _isListening = MutableStateFlow(false)
     override val isListening: StateFlow<Boolean> = _isListening
 
-    // NEW: State to track if the recognizer is actively hearing speech.
     private val _isHearingSpeech = MutableStateFlow(false)
     override val isHearingSpeech: StateFlow<Boolean> = _isHearingSpeech
+
+    // NEW: Implement the isTranscribing state from the interface. It's always false for this controller.
+    private val _isTranscribing = MutableStateFlow(false)
+    override val isTranscribing: StateFlow<Boolean> = _isTranscribing
 
     private val _transcripts = MutableSharedFlow<String>(extraBufferCapacity = 2)
     override val transcripts: SharedFlow<String> = _transcripts
@@ -51,27 +52,22 @@ class StandardSttController(
     @Volatile private var recognizer: SpeechRecognizer? = null
     @Volatile private var starting = false
     @Volatile private var destroyed = false
-
-    // FIX: Flag to track if the user intentionally stopped listening.
     @Volatile private var userStopped = false
 
-    // Backoff controls for vendor-specific throttling (e.g., code 11)
     @Volatile private var nextStartAllowedAt: Long = 0L
     @Volatile private var throttleStreak: Int = 0
-
-    // Optional language fallback
     @Volatile private var forceLangTag: String? = null
 
     private val listener = object : RecognitionListener {
         override fun onReadyForSpeech(params: Bundle?) {
             Log.i(TAG, "[STT_CB] onReadyForSpeech")
             _isListening.value = true
-            _isHearingSpeech.value = false // Not hearing yet, just ready
+            _isHearingSpeech.value = false
             throttleStreak = 0
         }
         override fun onBeginningOfSpeech() {
             Log.i(TAG, "[STT_CB] onBeginningOfSpeech")
-            _isHearingSpeech.value = true // NOW we are hearing speech
+            _isHearingSpeech.value = true
         }
         override fun onEndOfSpeech() {
             Log.i(TAG, "[STT_CB] onEndOfSpeech")
@@ -82,10 +78,9 @@ class StandardSttController(
             _isListening.value = false
             _isHearingSpeech.value = false
 
-            // FIX: If the user initiated the stop, ignore the resulting error.
             if (userStopped) {
                 Log.w(TAG, "[STT_CB] onError (code=$error) ignored because user initiated stop.")
-                userStopped = false // Reset for next time
+                userStopped = false
                 return
             }
 
@@ -155,7 +150,7 @@ class StandardSttController(
 
     override suspend fun start() {
         Log.i(TAG, "start() called.")
-        userStopped = false // Reset the flag at the beginning of a new session
+        userStopped = false
 
         val now = System.currentTimeMillis()
         if (now < nextStartAllowedAt) {
@@ -192,9 +187,8 @@ class StandardSttController(
     }
 
     override suspend fun stop(transcribe: Boolean) {
-        if (!_isListening.value) return
+        if (!_isListening.value && !_isHearingSpeech.value) return
         Log.w(TAG, "stop(transcribe=$transcribe) called.")
-        // FIX: Set the flag BEFORE stopping the recognizer to prevent the race condition.
         userStopped = true
         main.post {
             recognizer?.stopListening()

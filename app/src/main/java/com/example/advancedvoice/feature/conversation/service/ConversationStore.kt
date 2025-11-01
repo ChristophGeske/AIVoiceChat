@@ -80,4 +80,11 @@ class ConversationStore {
             addAssistant(sentences)
         }
     }
+
+    fun removeLastEntry() {
+        if (list.isNotEmpty()) {
+            list.removeAt(list.lastIndex)
+            publish()
+        }
+    }
 }

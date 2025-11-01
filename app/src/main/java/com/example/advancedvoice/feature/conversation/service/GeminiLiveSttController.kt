@@ -71,7 +71,7 @@ class GeminiLiveSttController(
     }
 
     @RequiresPermission(Manifest.permission.RECORD_AUDIO)
-    override suspend fun start(isAutoListen: Boolean) {  // FIX: Added parameter
+    override suspend fun start(isAutoListen: Boolean) {
         stateMutex.withLock {
             Log.i(TAG, "[Controller] >>> START Request processing (autoListen=$isAutoListen). Current state: listening=${isListening.value}, hearing=${isHearingSpeech.value}")
 
@@ -118,7 +118,12 @@ class GeminiLiveSttController(
                             _isHearingSpeech.value = false
                             _isTranscribing.value = true
                             vad.stop()
-                            transcriber.endTurn()
+
+                            // Wait briefly for final transcription chunks
+                            scope.launch {
+                                delay(800L)
+                                transcriber.endTurn()
+                            }
                         }
                         is VadRecorder.VadEvent.Error -> errors.emit(ev.message)
                     }

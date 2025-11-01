@@ -143,7 +143,6 @@ class VadRecorder(
                             silenceStartTs = now
                         }
 
-                        // FIX: Use the shorter timeout to end the turn
                         val silenceDuration = now - silenceStartTs
                         if (silenceDuration > endOfSpeechMs) {
                             val duration = now - speechStartTs
@@ -152,7 +151,19 @@ class VadRecorder(
                             } else {
                                 _events.tryEmit(VadEvent.SilenceTimeout)
                             }
-                            break // End the loop
+                            break
+                        }
+                    } else {
+                        // ✅ NEW: Handle max silence when NO speech was ever detected
+                        if (silenceStartTs == 0L) {
+                            silenceStartTs = now
+                        }
+
+                        val totalSilence = now - silenceStartTs
+                        if (totalSilence > maxSilenceMs) {
+                            Log.i(TAG, "[VAD] Max silence reached with no speech detected")
+                            _events.tryEmit(VadEvent.SilenceTimeout)
+                            break
                         }
                     }
                 }

@@ -44,29 +44,27 @@ class GeminiLiveTranscriber(
         client.sendPcm16Le(pcm16le, sampleRate)
 
     fun startAccumulating() {
-        Log.i(TAG, "[Transcriber] startAccumulating() - clearing buffer and ready to collect speech.")
-        // FIX: Always clear the buffer when starting a new turn
         accumulatedTranscript.clear()
         isAccumulating = true
     }
 
     fun endTurn(): Boolean {
         if (!isAccumulating) {
-            Log.w(TAG, "[Transcriber] endTurn() called but not accumulating. Ignoring.")
+            Log.w(TAG, "[Transcriber] endTurn() called but not accumulating.")
             return false
         }
 
-        Log.i(TAG, "[Transcriber] endTurn() called - finalizing transcript NOW (accumulated ${accumulatedTranscript.length} chars)")
+        Log.i(TAG, "[Transcriber] endTurn() called - finalizing (accumulated ${accumulatedTranscript.length} chars)")
         isAccumulating = false
 
         val finalText = accumulatedTranscript.toString().trim()
 
-        // FIX: Only emit if we have meaningful content
         if (finalText.isNotEmpty()) {
-            Log.i(TAG, "[Transcriber] Emitting FINAL transcript (len=${finalText.length}): '${finalText.take(100)}...'")
+            Log.i(TAG, "[Transcriber] Emitting FINAL: '${finalText.take(100)}...'")
             scope.launch { _finalTranscripts.emit(finalText) }
         } else {
-            Log.w(TAG, "[Transcriber] Buffer was empty, not emitting")
+            Log.w(TAG, "[Transcriber] Buffer empty, emitting empty string")
+            scope.launch { _finalTranscripts.emit("") }
         }
 
         val ok = client.sendAudioStreamEnd()
@@ -92,10 +90,6 @@ class GeminiLiveTranscriber(
     private fun handle(json: JSONObject) {
         val serverContent = json.optJSONObject("serverContent") ?: return
 
-        if (LoggerConfig.LIVE_WS_VERBOSE) {
-            Log.d(TAG, "[Transcriber-RAW] Received: ${json.toString().take(250)}")
-        }
-
         val inTranscription = serverContent.optJSONObject("inputTranscription")
         if (inTranscription != null && isAccumulating) {
             val text = inTranscription.optString("text", "")
@@ -103,7 +97,7 @@ class GeminiLiveTranscriber(
                 accumulatedTranscript.append(text)
                 val previewText = accumulatedTranscript.toString()
 
-                // FIX: Only log periodically to reduce spam
+                // ✅ Log accumulated text (but only every 20 chars to reduce spam)
                 if (previewText.length % 20 < text.length || previewText.length < 20) {
                     Log.d(TAG, "[Transcriber] Accumulated (len=${previewText.length}): '${previewText.take(80)}...'")
                 }
@@ -114,7 +108,7 @@ class GeminiLiveTranscriber(
 
         val turnComplete = serverContent.optBoolean("turnComplete", false)
         if (turnComplete) {
-            Log.i(TAG, "[Transcriber] turnComplete received - server finished its response cycle.")
+            Log.i(TAG, "[Transcriber] turnComplete received")
         }
     }
 }

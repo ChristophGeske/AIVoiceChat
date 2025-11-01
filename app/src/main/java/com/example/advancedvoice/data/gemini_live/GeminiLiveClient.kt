@@ -81,26 +81,27 @@ class GeminiLiveClient(
             val json = JSONObject(text)
             val serverContent = json.optJSONObject("serverContent")
 
-            // FIX: Only log if it's NOT just an audio chunk, or if verbose mode is on.
-            // This will hide the thousands of "modelTurn" audio stream messages.
+            // ✅ Only log if verbose mode OR important messages
             val isAudioChunk = serverContent?.has("modelTurn") ?: false
-            if (LoggerConfig.LIVE_WS_VERBOSE || !isAudioChunk) {
-                Log.d(TAG, "[Client] Message received: ${text.take(250)}")
+            val isTranscription = serverContent?.has("inputTranscription") ?: false
+
+            if (!isAudioChunk && !isTranscription) {
+                // Important messages (setupComplete, turnComplete, errors)
+                Log.d(TAG, "[Client] ${json.keys().asSequence().joinToString()}")
             }
 
             if (json.has("setupComplete")) {
-                Log.i(TAG, "setupComplete=true")
                 _ready.value = true
             }
             if (json.has("error")) {
                 val e = json.optJSONObject("error")
-                val msg = e?.optString("message") ?: "Unknown server error"
-                Log.e(TAG, "SERVER ERROR: $msg code=${e?.optInt("code")}")
+                val msg = e?.optString("message") ?: "Unknown error"
+                Log.e(TAG, "ERROR: $msg")
                 scope.launch { _errors.emit(msg) }
             }
             scope.launch(Dispatchers.Default) { _incoming.emit(json) }
         } catch (e: Exception) {
-            Log.e(TAG, "Invalid WS JSON: ${e.message}")
+            Log.e(TAG, "Invalid JSON: ${e.message}")
         }
     }
 

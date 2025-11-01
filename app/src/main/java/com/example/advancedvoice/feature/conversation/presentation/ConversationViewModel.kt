@@ -23,6 +23,7 @@ import com.example.advancedvoice.feature.conversation.service.GeminiLiveSttContr
 import com.example.advancedvoice.feature.conversation.service.StandardSttController
 import com.example.advancedvoice.feature.conversation.service.SttController
 import com.example.advancedvoice.feature.conversation.service.TtsController
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
@@ -61,6 +62,12 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
 
     private var llmPerf: PerfTimer? = null
     @Volatile private var isBargeInTurn = false
+    @Volatile private var generationStartTime = 0L
+    @Volatile private var lastAbortedEarly = false
+
+    private val pendingTranscript = StringBuilder()
+    private var debounceJob: Job? = null
+    private val TRANSCRIPT_DEBOUNCE_MS = 600L
 
     private val engine: SentenceTurnEngine = SentenceTurnEngine(
         uiScope = viewModelScope,
@@ -83,9 +90,8 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
 
                 val idx = conversation.value.indexOfLast { it.isAssistant }
                 if (idx >= 0 && sentences.isNotEmpty()) {
-                    val max = Prefs.getMaxSentences(appCtx)
                     val current = conversation.value[idx].sentences
-                    val combined = (current + sentences).take(max)
+                    val combined = current + sentences
                     val delta = combined.drop(current.size)
                     if (delta.isNotEmpty()) {
                         store.appendAssistantSentences(idx, delta)
@@ -98,8 +104,7 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
                 llmPerf?.logSummary("llm_start", "llm_done")
                 Log.i(TAG, "[ENGINE_CB] onFinalResponse received (len=${full.length})")
                 _phase.value = GenerationPhase.IDLE
-                val maxSentences = Prefs.getMaxSentences(appCtx)
-                val sentences = SentenceSplitter.splitIntoSentences(full).take(maxSentences)
+                val sentences = SentenceSplitter.splitIntoSentences(full)
                 if (sentences.isNotEmpty()) {
                     store.addAssistant(sentences)
                     tts.queue(sentences.joinToString(" "))
@@ -123,7 +128,6 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
     init {
         setupSttSystemFromPreferences()
 
-        // AUTO-LISTEN: After TTS finishes speaking
         viewModelScope.launch {
             tts.isSpeaking
                 .drop(1)
@@ -165,7 +169,6 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
                 }
         }
 
-        // ✅ VOICE-ACTIVATED INTERRUPTION: Start background listening during generation (BOTH STT systems)
         viewModelScope.launch {
             combine(phase, isHearingSpeech, isSpeaking) { currentPhase, hearingSpeech, speaking ->
                 Triple(currentPhase, hearingSpeech, speaking)
@@ -173,8 +176,6 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
                 val isGenerating = currentPhase == GenerationPhase.GENERATING_FIRST ||
                         currentPhase == GenerationPhase.SINGLE_SHOT_GENERATING
 
-                // ✅ REMOVED: stt is GeminiLiveSttController check
-                // Start background listening when generation begins (works for both STT systems)
                 if (isGenerating && !isListening.value && !speaking) {
                     if (hasRecordAudioPermission()) {
                         Log.i(TAG, "[VOICE-INTERRUPT] Generation started, enabling background voice detection...")
@@ -182,38 +183,45 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
                             try {
                                 stt?.start(isAutoListen = true)
                             } catch (se: SecurityException) {
-                                Log.w(TAG, "[VOICE-INTERRUPT] Mic permission denied, voice interruption disabled")
+                                Log.w(TAG, "[VOICE-INTERRUPT] Mic permission denied")
                             }
                         }
-                    } else {
-                        Log.d(TAG, "[VOICE-INTERRUPT] No mic permission, voice interruption disabled")
                     }
                 }
 
-                // Detect when user starts speaking during generation
                 if (isGenerating && hearingSpeech && !isBargeInTurn) {
-                    Log.i(TAG, "[VOICE-INTERRUPT] User started speaking during generation! Triggering interruption...")
+                    val generationDuration = System.currentTimeMillis() - generationStartTime
+
+                    if (generationDuration < 1500L) {
+                        Log.d(TAG, "[VOICE-INTERRUPT] Speech detected but too early (${generationDuration}ms), ignoring")
+                        return@collect
+                    }
+
+                    Log.i(TAG, "[VOICE-INTERRUPT] User started speaking (after ${generationDuration}ms)! Aborting...")
                     isBargeInTurn = true
+                    lastAbortedEarly = false
+
                     viewModelScope.launch {
                         engine.abort(true)
                         tts.stop()
-                        // Don't stop STT - let it finish capturing the user's speech
                     }
                 }
             }
         }
 
-        // ✅ CLEANUP: Stop background listening when generation ends naturally
         viewModelScope.launch {
             phase.collect { currentPhase ->
-                // ✅ REMOVED: stt is GeminiLiveSttController check
                 if (currentPhase == GenerationPhase.IDLE &&
-                    isListening.value &&
+                    (isListening.value || isHearingSpeech.value) &&
                     !isBargeInTurn) {
 
-                    // Only stop if no speech was detected
-                    if (!isHearingSpeech.value) {
-                        Log.d(TAG, "[VOICE-INTERRUPT] Generation ended naturally, stopping background listener")
+                    delay(300L)
+
+                    if (phase.value == GenerationPhase.IDLE &&
+                        !isBargeInTurn &&
+                        (isListening.value || isHearingSpeech.value)) {
+
+                        Log.d(TAG, "[VOICE-INTERRUPT] Generation ended, stopping background listener")
                         viewModelScope.launch {
                             stt?.stop(false)
                         }
@@ -255,7 +263,7 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
 
             val vad = VadRecorder(
                 scope = viewModelScope,
-                endOfSpeechMs = 1500L,
+                endOfSpeechMs = 1000L,
                 maxSilenceMs = maxSilenceMs
             )
 
@@ -319,7 +327,6 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
         }
         Log.i(TAG, "[ViewModel] Starting a normal listening session.")
 
-        // ✅ Only add placeholder if this is NOT a voice interruption
         if (!isBargeInTurn) {
             store.addUserStreamingPlaceholder()
         }
@@ -338,8 +345,16 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private fun handleTapInterruption() {
-        Log.i(TAG, "[INTERRUPT-TAP] User tapped to interrupt.")
-        isBargeInTurn = true
+        val interruptingGeneration = engine.isActive()
+        val interruptingTts = isSpeaking.value && !engine.isActive()
+
+        Log.i(TAG, "[INTERRUPT-TAP] User tapped to interrupt. (generation=$interruptingGeneration, tts=$interruptingTts)")
+
+        if (interruptingGeneration) {
+            isBargeInTurn = true
+        } else {
+            isBargeInTurn = false
+        }
 
         viewModelScope.launch {
             stopAllSuspendable()
@@ -348,6 +363,8 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun stopAll() {
+        debounceJob?.cancel()
+        pendingTranscript.clear()
         viewModelScope.launch { stopAllSuspendable() }
     }
 
@@ -357,38 +374,106 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
         tts.stop()
         stt?.stop(false)
         _phase.value = GenerationPhase.IDLE
-        // ✅ Don't reset isBargeInTurn here - let onFinalTranscript handle it
         Log.w(TAG, "[ViewModel] stopAllSuspendable() complete. System is now idle.")
     }
 
     private fun onFinalTranscript(text: String) {
         val input = text.trim()
+
         if (input.isEmpty()) {
-            Log.w(TAG, "[ViewModel] onFinalTranscript received empty text. Ignoring.")
+            Log.w(TAG, "[ViewModel] onFinalTranscript received empty text.")
+
+            if (isBargeInTurn) {
+                Log.i(TAG, "[VOICE-INTERRUPT] Empty after abort - false alarm, ignoring")
+                isBargeInTurn = false
+                removeLastUserPlaceholderIfEmpty()
+                return
+            }
+
+            // ✅ NEW: If generation is still active, restart background listener
+            val stillGenerating = engine.isActive()
+            if (stillGenerating) {
+                Log.i(TAG, "[VOICE-INTERRUPT] Empty transcript during generation - false alarm, restarting listener")
+                removeLastUserPlaceholderIfEmpty()
+
+                // Restart background listener
+                viewModelScope.launch {
+                    delay(200L)  // Brief delay before restarting
+                    if (engine.isActive()) {
+                        Log.i(TAG, "[VOICE-INTERRUPT] Restarting background listener after false alarm")
+                        try {
+                            stt?.start(isAutoListen = true)
+                        } catch (se: SecurityException) {
+                            Log.w(TAG, "[VOICE-INTERRUPT] Cannot restart - mic permission denied")
+                        }
+                    }
+                }
+                return
+            }
+
+            removeLastUserPlaceholderIfEmpty()
             return
         }
 
         Log.i(TAG, "[ViewModel] Final Transcript='${input.take(120)}'")
 
-        // ✅ Auto-detect if this was a voice interruption (transcript arrived during generation)
-        val wasGenerating = engine.isActive()
-        if (wasGenerating && !isBargeInTurn) {
-            Log.i(TAG, "[VOICE-INTERRUPT] Transcript arrived during generation - auto-detected as interruption")
-            isBargeInTurn = true
+        if (isBargeInTurn) {
+            Log.i(TAG, "[VOICE-INTERRUPT] Real transcript after abort! Combining...")
+
+            viewModelScope.launch {
+                delay(150L)
+
+                debounceJob?.cancel()
+                pendingTranscript.clear()
+
+                isBargeInTurn = false
+                handleInterruptionContinuation(input)
+            }
+            return
         }
 
-        if (isBargeInTurn) {
-            Log.i(TAG, "[ViewModel] This was an interruption transcript. Combining...")
-            isBargeInTurn = false
-            handleInterruptionContinuation(input)
+        val hasPendingText = pendingTranscript.isNotEmpty()
+
+        if (hasPendingText) {
+            pendingTranscript.append(" ").append(input)
+            Log.i(TAG, "[DEBOUNCE] Appending fragment. Combined: ${pendingTranscript.length} chars")
         } else {
-            Log.i(TAG, "[ViewModel] This is a normal turn transcript.")
-            store.replaceLastUser(input)
-            startTurn(input)
+            pendingTranscript.append(input)
+            Log.i(TAG, "[DEBOUNCE] Starting accumulation")
+        }
+
+        store.replaceLastUser(pendingTranscript.toString())
+
+        debounceJob?.cancel()
+        debounceJob = viewModelScope.launch {
+            delay(TRANSCRIPT_DEBOUNCE_MS)
+
+            val finalText = pendingTranscript.toString().trim()
+            pendingTranscript.clear()
+
+            if (finalText.isNotEmpty()) {
+                Log.i(TAG, "[DEBOUNCE] Sending transcript (len=${finalText.length})")
+                startTurn(finalText)
+            }
+        }
+    }
+
+    private fun removeLastUserPlaceholderIfEmpty() {
+        val lastEntry = conversation.value.lastOrNull()
+        if (lastEntry != null &&
+            lastEntry.speaker == "You" &&
+            lastEntry.sentences.isEmpty() &&
+            lastEntry.streamingText.isNullOrBlank()) {
+
+            Log.i(TAG, "[ViewModel] Removing empty user placeholder")
+            store.removeLastEntry()
         }
     }
 
     private fun handleInterruptionContinuation(newInput: String) {
+        debounceJob?.cancel()
+        pendingTranscript.clear()
+
         val lastUserEntry = conversation.value.lastOrNull { it.speaker == "You" }
         val previousInput = lastUserEntry?.sentences?.joinToString(" ")?.trim() ?: ""
 
@@ -410,6 +495,8 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
         val model = Prefs.getSelectedModel(appCtx)
         Log.i(TAG, "[ViewModel] startTurn(model=$model) inputLen=${userText.length}")
         llmPerf = PerfTimer(TAG, "llm").also { it.mark("llm_start") }
+        generationStartTime = System.currentTimeMillis()
+        lastAbortedEarly = false
         engine.startTurn(userText, model)
     }
 
@@ -418,17 +505,33 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
         val model = Prefs.getSelectedModel(appCtx)
         Log.i(TAG, "[ViewModel] startTurnWithExistingHistory(model=$model)")
         llmPerf = PerfTimer(TAG, "llm").also { it.mark("llm_start") }
+        generationStartTime = System.currentTimeMillis()
+        lastAbortedEarly = false
         engine.startTurnWithCurrentHistory(model)
+    }
+
+    fun replayMessage(index: Int) {
+        val entry = conversation.value.getOrNull(index)
+        if (entry != null && entry.isAssistant) {
+            val text = entry.sentences.joinToString(" ")
+            Log.i(TAG, "[ViewModel] Replaying assistant message (index=$index, len=${text.length})")
+            tts.queue(text)
+        } else {
+            Log.w(TAG, "[ViewModel] replayMessage($index) - not an assistant message or invalid index")
+        }
     }
 
     override fun onCleared() {
         super.onCleared()
         Log.w(TAG, "[ViewModel] onCleared() - ViewModel is being destroyed.")
+        debounceJob?.cancel()
         stt?.release()
         tts.shutdown()
     }
 
     fun clearConversation() {
+        debounceJob?.cancel()
+        pendingTranscript.clear()
         engine.abort(true)
         store.clear()
         tts.stop()
@@ -447,16 +550,5 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
             You are a helpful assistant. Answer the user's request in clear, complete sentences.
             Do not use JSON or code fences unless explicitly requested.
         """
-    }
-
-    fun replayMessage(index: Int) {
-        val entry = conversation.value.getOrNull(index)
-        if (entry != null && entry.isAssistant) {
-            val text = entry.sentences.joinToString(" ")
-            Log.i(TAG, "[ViewModel] Replaying assistant message (index=$index, len=${text.length})")
-            tts.queue(text)
-        } else {
-            Log.w(TAG, "[ViewModel] replayMessage($index) - not an assistant message or invalid index")
-        }
     }
 }

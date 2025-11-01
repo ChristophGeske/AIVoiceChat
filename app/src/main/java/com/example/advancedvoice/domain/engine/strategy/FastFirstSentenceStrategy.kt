@@ -6,13 +6,14 @@ import com.example.advancedvoice.data.common.ChatMessage
 import com.example.advancedvoice.data.gemini.GeminiService
 import com.example.advancedvoice.data.openai.OpenAiService
 import com.example.advancedvoice.domain.engine.SentenceTurnEngine
+import com.example.advancedvoice.domain.util.CombinedSources
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import okhttp3.OkHttpClient
-import kotlinx.coroutines.isActive
 
 class FastFirstSentenceStrategy(
     private val http: OkHttpClient,
@@ -22,7 +23,6 @@ class FastFirstSentenceStrategy(
 
     companion object { private const val TAG = "FastFirst" }
 
-    // FIX: Don't null out the job - just cancel it
     private var executionJob: Job? = null
 
     override fun execute(
@@ -33,10 +33,11 @@ class FastFirstSentenceStrategy(
         maxSentences: Int,
         callbacks: SentenceTurnEngine.Callbacks
     ) {
-        // FIX: Cancel any previous execution
         executionJob?.cancel()
 
         Log.i(TAG, "[FastFirst] Starting two-phase generation: model=$modelName, maxSentences=$maxSentences")
+
+        val combinedSources = CombinedSources()
 
         executionJob = scope.launch(Dispatchers.IO) {
             try {
@@ -46,15 +47,16 @@ class FastFirstSentenceStrategy(
                 val (firstSentence, remaining) = if (isGemini) {
                     val gem = GeminiService(geminiKeyProvider, http)
                     val phase1Prompt = "$systemPrompt\n\nRespond with ONE concise complete sentence that directly answers the user's request."
-                    val phase1Text = gem.generateText(
+
+                    val (phase1Text, sources1) = gem.generateTextWithSources(
                         systemPrompt = phase1Prompt,
                         history = mapHistory(history),
                         modelName = modelName,
                         temperature = 0.2,
                         enableGoogleSearch = true
                     )
+                    combinedSources.addAll(sources1)
 
-                    // FIX: Use ensureActive() instead of manual job checks
                     ensureActive()
 
                     val first = SentenceSplitter.extractFirstSentence(phase1Text).first.trim()
@@ -74,13 +76,15 @@ class FastFirstSentenceStrategy(
                         Continue with $remainingCount more sentence${if (remainingCount != 1) "s" else ""}, do NOT repeat or rephrase the opening.
                         Start immediately with new information.
                     """.trimIndent()
-                    val phase2Text = gem.generateText(
+
+                    val (phase2Text, sources2) = gem.generateTextWithSources(
                         systemPrompt = phase2Prompt,
                         history = mapHistory(history) + ChatMessage("assistant", first),
                         modelName = modelName,
                         temperature = 0.7,
                         enableGoogleSearch = true
                     )
+                    combinedSources.addAll(sources2)
 
                     ensureActive()
 
@@ -90,18 +94,20 @@ class FastFirstSentenceStrategy(
                 } else {
                     val openai = OpenAiService(openAiKeyProvider, http)
                     val phase1Prompt = "$systemPrompt\n\nRespond with ONE concise complete sentence that directly answers the user's request."
-                    val phase1 = openai.generateResponses(
+
+                    val result1 = openai.generateResponses(
                         systemPrompt = phase1Prompt,
                         history = mapHistory(history),
                         model = modelName,
                         effort = "low",
                         verbosity = "low",
                         enableWebSearch = true
-                    ).text
+                    )
+                    combinedSources.addAll(result1.sources)
 
                     ensureActive()
 
-                    val first = SentenceSplitter.extractFirstSentence(phase1).first.trim()
+                    val first = SentenceSplitter.extractFirstSentence(result1.text).first.trim()
                     Log.i(TAG, "[FastFirst] PHASE 1 complete: '${first.take(80)}...'")
 
                     ensureActive()
@@ -118,36 +124,43 @@ class FastFirstSentenceStrategy(
                         Continue with $remainingCount more sentence${if (remainingCount != 1) "s" else ""}, do NOT repeat or rephrase the opening.
                         Start immediately with new information.
                     """.trimIndent()
-                    val phase2 = openai.generateResponses(
+
+                    val result2 = openai.generateResponses(
                         systemPrompt = phase2Prompt,
                         history = mapHistory(history) + ChatMessage("assistant", first),
                         model = modelName,
                         effort = "low",
                         verbosity = "low",
                         enableWebSearch = true
-                    ).text
+                    )
+                    combinedSources.addAll(result2.sources)
 
                     ensureActive()
 
-                    val remainingSentences = SentenceSplitter.splitIntoSentences(phase2)
+                    val remainingSentences = SentenceSplitter.splitIntoSentences(result2.text)
                     Log.i(TAG, "[FastFirst] PHASE 2 complete: ${remainingSentences.size} sentences")
                     first to remainingSentences
                 }
 
                 ensureActive()
 
+                // Always call this callback, even if remaining is empty
                 callbacks.onRemainingSentences(remaining)
 
                 Log.i(TAG, "[FastFirst] Strategy complete (first + remaining delivered)")
 
+                // Post sources as system message
+                combinedSources.toHtmlCompact()?.let { sourcesHtml ->
+                    callbacks.onSystem(sourcesHtml)
+                }
+
             } catch (e: kotlinx.coroutines.CancellationException) {
                 Log.i(TAG, "[FastFirst] Job was cancelled")
-                throw e // Re-throw to properly cancel the coroutine
+                throw e
             } catch (t: Throwable) {
                 Log.e(TAG, "[FastFirst] Error: ${t.message}", t)
                 callbacks.onError(t.message ?: "Generation failed")
             } finally {
-                // FIX: Only call onTurnFinish if the job completed normally
                 if (isActive) {
                     Log.i(TAG, "[FastFirst] Turn finished normally")
                     callbacks.onTurnFinish()

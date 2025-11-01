@@ -39,18 +39,29 @@ class ConversationAdapter(
             speakerLabel.text = entry.speaker
             speakerLabel.setTextColor(Color.parseColor(labelColor))
 
-            // FIX: Prioritize showing the streaming text if it's available.
-            // Otherwise, fall back to the joined final sentences.
-            if (!entry.streamingText.isNullOrBlank()) {
-                messageContent.text = entry.streamingText
-            } else {
-                messageContent.text = entry.sentences.joinToString(" ")
-            }
-
             if (entry.isAssistant) {
+                // Show streaming text if available, otherwise show final sentences
+                if (!entry.streamingText.isNullOrBlank()) {
+                    messageContent.text = entry.streamingText
+                } else {
+                    messageContent.text = entry.sentences.joinToString(" ")
+                }
                 replayButton.visibility = View.VISIBLE
                 replayButton.setOnClickListener { onReplayClicked(index) }
             } else {
+                // For System messages, render as HTML (allows clickable source links)
+                if (entry.speaker.equals("System", ignoreCase = true)) {
+                    val html = entry.sentences.joinToString(" ")
+                    messageContent.text = Html.fromHtml(html, Html.FROM_HTML_MODE_COMPACT)
+                    messageContent.movementMethod = LinkMovementMethod.getInstance()
+                } else {
+                    // For User/Error messages, show plain text
+                    if (!entry.streamingText.isNullOrBlank()) {
+                        messageContent.text = entry.streamingText
+                    } else {
+                        messageContent.text = entry.sentences.joinToString(" ")
+                    }
+                }
                 replayButton.visibility = View.GONE
             }
         }

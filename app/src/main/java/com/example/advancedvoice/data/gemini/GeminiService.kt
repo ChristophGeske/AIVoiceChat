@@ -1,5 +1,6 @@
 package com.example.advancedvoice.data.gemini
 
+import android.util.Log
 import com.example.advancedvoice.core.network.HttpClientProvider
 import com.example.advancedvoice.data.common.ChatMessage
 import okhttp3.MediaType.Companion.toMediaType
@@ -17,13 +18,21 @@ class GeminiService(
     private val client: OkHttpClient = HttpClientProvider.client
 ) {
 
-    fun generateText(
+    companion object {
+        private const val TAG = "GeminiService"
+    }
+
+    /**
+     * Generates text and extracts grounding sources.
+     * Returns Pair of (text, sources).
+     */
+    fun generateTextWithSources(
         systemPrompt: String,
         history: List<ChatMessage>,
         modelName: String,
         temperature: Double = 0.7,
         enableGoogleSearch: Boolean = true
-    ): String {
+    ): Pair<String, List<Pair<String, String?>>> {
         val apiKey = apiKeyProvider().trim()
         require(apiKey.isNotEmpty()) { "Gemini API key missing" }
 
@@ -68,8 +77,22 @@ class GeminiService(
         client.newCall(req).execute().use { resp ->
             val payload = resp.body?.string().orEmpty()
             if (!resp.isSuccessful) error("Gemini error: HTTP ${resp.code} ${resp.message}\n${payload.take(400)}")
-            return extractText(payload)
+
+            val text = extractText(payload)
+            val sources = extractGroundingSources(payload)
+
+            return text to sources
         }
+    }
+
+    fun generateText(
+        systemPrompt: String,
+        history: List<ChatMessage>,
+        modelName: String,
+        temperature: Double = 0.7,
+        enableGoogleSearch: Boolean = true
+    ): String {
+        return generateTextWithSources(systemPrompt, history, modelName, temperature, enableGoogleSearch).first
     }
 
     private fun extractText(payload: String): String {
@@ -89,6 +112,32 @@ class GeminiService(
             }.trim()
         } catch (_: Exception) {
             ""
+        }
+    }
+
+    private fun extractGroundingSources(payload: String): List<Pair<String, String?>> {
+        return try {
+            val root = JSONObject(payload)
+            val cand0 = root.optJSONArray("candidates")?.optJSONObject(0)
+            val gm = cand0?.optJSONObject("groundingMetadata")
+                ?: cand0?.optJSONObject("grounding_metadata")
+            val chunks = gm?.optJSONArray("groundingChunks")
+                ?: gm?.optJSONArray("grounding_chunks")
+                ?: return emptyList()
+
+            val out = ArrayList<Pair<String, String?>>()
+            for (i in 0 until chunks.length()) {
+                val web = chunks.optJSONObject(i)?.optJSONObject("web")
+                val uri = web?.optString("uri").orEmpty()
+                if (uri.isNotBlank()) {
+                    val title = web?.optString("title")?.takeIf { it.isNotBlank() }
+                    out.add(uri to title)
+                }
+            }
+            out
+        } catch (e: Exception) {
+            Log.e(TAG, "Error extracting Gemini grounding", e)
+            emptyList()
         }
     }
 }

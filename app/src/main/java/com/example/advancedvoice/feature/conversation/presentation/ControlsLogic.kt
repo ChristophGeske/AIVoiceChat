@@ -5,34 +5,45 @@ object ControlsLogic {
         isSpeaking: Boolean,
         isListening: Boolean,
         isHearingSpeech: Boolean,
-        isTranscribing: Boolean, // This state is now managed and important
+        isTranscribing: Boolean,
         phase: GenerationPhase
     ): ControlsState {
         val isGenerating = phase != GenerationPhase.IDLE
 
-        // Determine the primary button text based on a priority of states
+        // FIX: Determine if interruption is allowed based on specific phase
+        val interruptionAllowed = when (phase) {
+            GenerationPhase.GENERATING_FIRST,
+            GenerationPhase.SINGLE_SHOT_GENERATING -> true
+            GenerationPhase.GENERATING_REMAINDER -> false  // Block interruption during Phase 2
+            GenerationPhase.IDLE -> false
+        }
+
+        // Determine the primary button text
         val buttonText = when {
             isTranscribing -> "Transcribing..."
-            isHearingSpeech -> "Listening..." // Show a consistent "Listening..." state
+            isHearingSpeech -> "Listening..."
             isListening -> "Listening..."
             isSpeaking -> "Speaking (Tap to Interrupt)"
-            isGenerating -> "Generating (Speak to Interrupt)"
+            // FIX: Only show interrupt hint if interruption is allowed
+            isGenerating && interruptionAllowed -> "Generating (Speak to Interrupt)"
+            isGenerating -> "Generating..."  // Phase 2 - no interrupt hint
             else -> "Tap to Speak"
         }
 
-        // The "Stop" button should be enabled if ANY background activity is happening.
+        // The "Stop" button should be enabled if ANY background activity is happening
         val anythingInProgress = isSpeaking || isListening || isHearingSpeech || isGenerating || isTranscribing
 
-        // The "Speak" button should only be enabled when the system is truly idle or can be interrupted.
+        // FIX: The "Speak" button logic
         val speakEnabled = when {
             isListening || isHearingSpeech || isTranscribing -> false // Never while actively listening/transcribing
-            else -> true // Allow tap to interrupt speaking or generating
+            isGenerating && !interruptionAllowed -> false // Block during Phase 2
+            else -> true // Allow tap to interrupt speaking or Phase 1 generation
         }
 
         return ControlsState(
             speakEnabled = speakEnabled,
             stopEnabled = anythingInProgress,
-            clearEnabled = !anythingInProgress, // Only enable clear when idle
+            clearEnabled = !anythingInProgress,
             speakButtonText = buttonText
         )
     }

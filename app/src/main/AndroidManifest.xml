@@ -18,13 +18,13 @@
         tools:targetApi="31">
 
         <!--
-          This is the essential declaration for your MainActivity.
-          It registers the activity with the Android system and marks it
-          as the main entry point that can be launched from the home screen.
+          MainActivity - Main entry point for the application.
         -->
         <activity
             android:name=".MainActivity"
             android:exported="true"
+            android:screenOrientation="portrait"
+            android:configChanges="orientation|screenSize|keyboardHidden"
             android:windowSoftInputMode="adjustResize"
             android:theme="@style/Theme.AIVoiceChat">
             <intent-filter>

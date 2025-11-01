@@ -136,9 +136,7 @@ class FastFirstSentenceStrategy(
 
                 ensureActive()
 
-                if (remaining.isNotEmpty()) {
-                    callbacks.onRemainingSentences(remaining)
-                }
+                callbacks.onRemainingSentences(remaining)
 
                 Log.i(TAG, "[FastFirst] Strategy complete (first + remaining delivered)")
 

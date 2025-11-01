@@ -80,7 +80,9 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
             },
             onRemainingSentences = { sentences ->
                 Log.i(TAG, "[ENGINE_CB] onRemainingSentences received (count=${sentences.size})")
+                // FIX: Set phase to IDLE FIRST, before any other logic
                 _phase.value = GenerationPhase.IDLE
+
                 val idx = conversation.value.indexOfLast { it.isAssistant }
                 if (idx >= 0 && sentences.isNotEmpty()) {
                     val max = Prefs.getMaxSentences(appCtx)
@@ -108,6 +110,8 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
             onTurnFinish = {
                 Log.i(TAG, "[ENGINE_CB] onTurnFinish received.")
                 llmPerf = null
+                // Defensive:  set to IDLE here in case onRemainingSentences wasn't called
+                _phase.value = GenerationPhase.IDLE
             },
             onSystem = { msg -> store.addSystem(msg) },
             onError = { msg ->
@@ -125,15 +129,27 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
                 .drop(1)
                 .filter { !it }
                 .collect {
-                    if (Prefs.getAutoListen(appCtx) && phase.value == GenerationPhase.IDLE && !isListening.value) {
-                        Log.i(TAG, "[AUTO-LISTEN] TTS stopped. Waiting 750ms...")
-                        delay(750)
+                    val autoListenEnabled = Prefs.getAutoListen(appCtx)
+                    if (!autoListenEnabled) {
+                        Log.d(TAG, "[AUTO-LISTEN] Feature disabled in settings.")
+                        return@collect
+                    }
+
+                    if (phase.value == GenerationPhase.IDLE && !isListening.value) {
+                        // FIX: Use a SHORT fixed delay to start listening quickly
+                        val delayMs = 750L  // Just 750ms to avoid accidental tail-end of TTS
+
+                        Log.i(TAG, "[AUTO-LISTEN] TTS stopped. Waiting ${delayMs}ms before listening...")
+                        delay(delayMs)
+
                         if (!isSpeaking.value && !isListening.value && phase.value == GenerationPhase.IDLE) {
                             Log.i(TAG, "[AUTO-LISTEN] Conditions met. Starting listening.")
                             startNormalListening()
                         } else {
                             Log.w(TAG, "[AUTO-LISTEN] Conditions changed, aborting.")
                         }
+                    } else {
+                        Log.d(TAG, "[AUTO-LISTEN] Skipped: phase=${phase.value}, isListening=${isListening.value}")
                     }
                 }
         }
@@ -162,7 +178,17 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
         stt = if (shouldUseGeminiLive) {
             Log.i(TAG, "[ViewModel] Creating and wiring GeminiLiveSttController.")
             val liveModel = "models/gemini-2.5-flash-native-audio-preview-09-2025"
-            val vad = VadRecorder(scope = viewModelScope, endOfSpeechMs = 1200L, maxSilenceMs = 5000L)
+
+            // FIX: Use listenSeconds setting for VAD max silence timeout
+            val listenSeconds = Prefs.getListenSeconds(appCtx)
+            val maxSilenceMs = (listenSeconds * 1000L).coerceIn(3000L, 30000L)
+
+            val vad = VadRecorder(
+                scope = viewModelScope,
+                endOfSpeechMs = 1500L,      // Keep this short for responsiveness
+                maxSilenceMs = maxSilenceMs  // FIX: Use user's setting
+            )
+
             val client = GeminiLiveClient(scope = viewModelScope)
             val transcriber = GeminiLiveTranscriber(scope = viewModelScope, client = client)
             GeminiLiveSttController(viewModelScope, vad, client, transcriber, geminiKey, liveModel)

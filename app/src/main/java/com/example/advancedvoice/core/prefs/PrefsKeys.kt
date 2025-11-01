@@ -23,6 +23,6 @@ object PrefsKeys {
     const val SYSTEM_PROMPT = "system_prompt"
     const val SYSTEM_PROMPT_EXT = "system_prompt_extensions"
 
-    const val AUTO_LISTEN = "auto_listen"
-
+    // Auto-listen
+    const val AUTO_LISTEN = "auto_listen"              // Boolean
 }

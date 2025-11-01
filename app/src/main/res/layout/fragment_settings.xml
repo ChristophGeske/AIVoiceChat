@@ -228,7 +228,33 @@
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:layout_marginTop="4dp"
-                    android:text="Time the app listens after 'Tap to Speak' button was pressed and after the system finished speaking the complete answer."
+                    android:text="Controls: (1) How long to listen after pressing 'Tap to Speak', and (2) Delay before auto-listening after assistant finishes speaking (if auto-listen is enabled)."
+                    android:textColor="#B0BEC5"
+                    android:textSize="12sp" />
+            </LinearLayout>
+
+            <!-- AUTO-LISTEN TOGGLE -->
+            <LinearLayout
+                android:id="@+id/autoListenGroup"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="12dp"
+                android:layout_marginBottom="12dp"
+                android:orientation="vertical">
+
+                <com.google.android.material.switchmaterial.SwitchMaterial
+                    android:id="@+id/switchAutoListen"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="Auto-listen after response"
+                    android:textColor="#FFFFFF" />
+
+                <TextView
+                    android:id="@+id/autoListenDesc"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="4dp"
+                    android:text="Automatically start listening again after the assistant finishes speaking. The delay is controlled by 'Listening time' setting above."
                     android:textColor="#B0BEC5"
                     android:textSize="12sp" />
             </LinearLayout>

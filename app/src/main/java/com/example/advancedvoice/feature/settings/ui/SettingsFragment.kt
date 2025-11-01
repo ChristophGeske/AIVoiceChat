@@ -33,6 +33,7 @@ class SettingsFragment : Fragment() {
         setupPromptSection(view)
         setupMaxSentences(view)
         setupListenSeconds(view)
+        setupAutoListen(view)      // ← ADD THIS
         setupFasterFirst(view)
         setupSttSystem(view)
         setupTtsSettingsLink(view)
@@ -126,7 +127,6 @@ class SettingsFragment : Fragment() {
 
         val defaultSystem = DEFAULT_SYSTEM_PROMPT.trimIndent()
 
-        // Use BufferType to avoid overload ambiguity
         systemPrompt.setText(Prefs.getSystemPrompt(requireContext(), defaultSystem), TextView.BufferType.EDITABLE)
         systemPrompt.doAfterTextChanged {
             Prefs.setSystemPrompt(requireContext(), it?.toString().orEmpty())
@@ -180,6 +180,20 @@ class SettingsFragment : Fragment() {
         }
     }
 
+    // ✅ NEW: Auto-listen setup
+    private fun setupAutoListen(root: View) {
+        val sw = root.findViewById<com.google.android.material.switchmaterial.SwitchMaterial>(R.id.switchAutoListen)
+        sw.isChecked = Prefs.getAutoListen(requireContext())
+        sw.setOnCheckedChangeListener { _, isChecked ->
+            Prefs.setAutoListen(requireContext(), isChecked)
+            Toast.makeText(
+                requireContext(),
+                if (isChecked) "Auto-listen enabled" else "Auto-listen disabled",
+                Toast.LENGTH_SHORT
+            ).show()
+        }
+    }
+
     private fun setupFasterFirst(root: View) {
         val sw = root.findViewById<com.google.android.material.switchmaterial.SwitchMaterial>(R.id.switchFasterFirst)
         val current = Prefs.getFasterFirst(requireContext())
@@ -193,8 +207,8 @@ class SettingsFragment : Fragment() {
     }
 
     private fun setupSttSystem(root: View) {
-        val rStd = root.findViewById<android.widget.RadioButton>(R.id.radioSttStandard)
-        val rLive = root.findViewById<android.widget.RadioButton>(R.id.radioSttGeminiLive)
+        val rStd = root.findViewById<RadioButton>(R.id.radioSttStandard)
+        val rLive = root.findViewById<RadioButton>(R.id.radioSttGeminiLive)
         val saved = Prefs.getSttSystem(requireContext())
         if (saved == SttSystem.GEMINI_LIVE) rLive.isChecked = true else rStd.isChecked = true
 

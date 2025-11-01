@@ -9,8 +9,10 @@ import com.example.advancedvoice.domain.engine.SentenceTurnEngine
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 import okhttp3.OkHttpClient
+import kotlinx.coroutines.isActive
 
 class FastFirstSentenceStrategy(
     private val http: OkHttpClient,
@@ -20,7 +22,7 @@ class FastFirstSentenceStrategy(
 
     companion object { private const val TAG = "FastFirst" }
 
-    // FIX: Use Job for proper cancellation
+    // FIX: Don't null out the job - just cancel it
     private var executionJob: Job? = null
 
     override fun execute(
@@ -51,21 +53,17 @@ class FastFirstSentenceStrategy(
                         temperature = 0.2,
                         enableGoogleSearch = true
                     )
+
+                    // FIX: Use ensureActive() instead of manual job checks
+                    ensureActive()
+
                     val first = SentenceSplitter.extractFirstSentence(phase1Text).first.trim()
                     Log.i(TAG, "[FastFirst] PHASE 1 complete: '${first.take(80)}...'")
 
-                    // FIX: Check if cancelled before calling callback
-                    if (!executionJob!!.isActive) {
-                        Log.w(TAG, "[FastFirst] Cancelled after phase 1, skipping callbacks")
-                        return@launch
-                    }
-
+                    ensureActive()
                     callbacks.onFirstSentence(first)
 
-                    if (!executionJob!!.isActive) {
-                        Log.w(TAG, "[FastFirst] Cancelled before phase 2")
-                        return@launch
-                    }
+                    ensureActive()
 
                     val remainingCount = (maxSentences - 1).coerceAtLeast(1)
                     Log.i(TAG, "[FastFirst] PHASE 2: Generating $remainingCount additional sentence(s)...")
@@ -83,6 +81,9 @@ class FastFirstSentenceStrategy(
                         temperature = 0.7,
                         enableGoogleSearch = true
                     )
+
+                    ensureActive()
+
                     val remainingSentences = SentenceSplitter.splitIntoSentences(phase2Text)
                     Log.i(TAG, "[FastFirst] PHASE 2 complete: ${remainingSentences.size} sentences")
                     first to remainingSentences
@@ -97,20 +98,16 @@ class FastFirstSentenceStrategy(
                         verbosity = "low",
                         enableWebSearch = true
                     ).text
+
+                    ensureActive()
+
                     val first = SentenceSplitter.extractFirstSentence(phase1).first.trim()
                     Log.i(TAG, "[FastFirst] PHASE 1 complete: '${first.take(80)}...'")
 
-                    if (!executionJob!!.isActive) {
-                        Log.w(TAG, "[FastFirst] Cancelled after phase 1, skipping callbacks")
-                        return@launch
-                    }
-
+                    ensureActive()
                     callbacks.onFirstSentence(first)
 
-                    if (!executionJob!!.isActive) {
-                        Log.w(TAG, "[FastFirst] Cancelled before phase 2")
-                        return@launch
-                    }
+                    ensureActive()
 
                     val remainingCount = (maxSentences - 1).coerceAtLeast(1)
                     Log.i(TAG, "[FastFirst] PHASE 2: Generating $remainingCount additional sentence(s)...")
@@ -129,15 +126,15 @@ class FastFirstSentenceStrategy(
                         verbosity = "low",
                         enableWebSearch = true
                     ).text
+
+                    ensureActive()
+
                     val remainingSentences = SentenceSplitter.splitIntoSentences(phase2)
                     Log.i(TAG, "[FastFirst] PHASE 2 complete: ${remainingSentences.size} sentences")
                     first to remainingSentences
                 }
 
-                if (!executionJob!!.isActive) {
-                    Log.w(TAG, "[FastFirst] Cancelled before emitting remaining sentences")
-                    return@launch
-                }
+                ensureActive()
 
                 if (remaining.isNotEmpty()) {
                     callbacks.onRemainingSentences(remaining)
@@ -145,15 +142,15 @@ class FastFirstSentenceStrategy(
 
                 Log.i(TAG, "[FastFirst] Strategy complete (first + remaining delivered)")
 
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                Log.i(TAG, "[FastFirst] Job was cancelled")
+                throw e // Re-throw to properly cancel the coroutine
             } catch (t: Throwable) {
-                if (executionJob!!.isActive) {
-                    Log.e(TAG, "[FastFirst] Error: ${t.message}", t)
-                    callbacks.onError(t.message ?: "Generation failed")
-                } else {
-                    Log.i(TAG, "[FastFirst] Cancelled, ignoring error: ${t.message}")
-                }
+                Log.e(TAG, "[FastFirst] Error: ${t.message}", t)
+                callbacks.onError(t.message ?: "Generation failed")
             } finally {
-                if (executionJob!!.isActive) {
+                // FIX: Only call onTurnFinish if the job completed normally
+                if (isActive) {
                     Log.i(TAG, "[FastFirst] Turn finished normally")
                     callbacks.onTurnFinish()
                 } else {
@@ -166,7 +163,6 @@ class FastFirstSentenceStrategy(
     override fun abort() {
         Log.w(TAG, "[FastFirst] abort() called - CANCELLING JOB")
         executionJob?.cancel()
-        executionJob = null
     }
 
     private fun mapHistory(history: List<SentenceTurnEngine.Msg>): List<ChatMessage> =

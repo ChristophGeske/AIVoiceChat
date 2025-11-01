@@ -100,13 +100,9 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
                 _phase.value = GenerationPhase.IDLE
                 val maxSentences = Prefs.getMaxSentences(appCtx)
                 val sentences = SentenceSplitter.splitIntoSentences(full).take(maxSentences)
-                Log.d(TAG, "[ENGINE_CB] Split into ${sentences.size} sentences (max=$maxSentences).")
                 if (sentences.isNotEmpty()) {
                     store.addAssistant(sentences)
-                    val textToSpeak = sentences.joinToString(" ")
-                    tts.queue(textToSpeak)
-                } else {
-                    Log.w(TAG, "[ENGINE_CB] Final response was empty after splitting.")
+                    tts.queue(sentences.joinToString(" "))
                 }
             },
             onTurnFinish = {
@@ -143,25 +139,10 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
         }
 
         applyEngineSettings()
-
-        viewModelScope.launch {
-            isHearingSpeech
-                .filter { it && engine.isActive() }
-                .debounce(300)
-                .collect {
-                    if (engine.isActive()) {
-                        Log.i(TAG, "[INTERRUPT] Sustained speech detected. Handling barge-in.")
-                        handleSpeechInterruption()
-                    }
-                }
-        }
     }
 
     private fun hasRecordAudioPermission(): Boolean {
-        return ContextCompat.checkSelfPermission(
-            appCtx,
-            Manifest.permission.RECORD_AUDIO
-        ) == PackageManager.PERMISSION_GRANTED
+        return ContextCompat.checkSelfPermission(appCtx, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
     }
 
     fun setupSttSystemFromPreferences() {
@@ -181,12 +162,7 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
         stt = if (shouldUseGeminiLive) {
             Log.i(TAG, "[ViewModel] Creating and wiring GeminiLiveSttController.")
             val liveModel = "models/gemini-2.5-flash-native-audio-preview-09-2025"
-            // FIX: Instantiate VAD with the new responsive timeouts
-            val vad = VadRecorder(
-                scope = viewModelScope,
-                endOfSpeechMs = 1200L, // End turn after 1.2s of silence
-                maxSilenceMs = 5000L   // Allow up to 5s of silence mid-speech
-            )
+            val vad = VadRecorder(scope = viewModelScope, endOfSpeechMs = 1200L, maxSilenceMs = 5000L)
             val client = GeminiLiveClient(scope = viewModelScope)
             val transcriber = GeminiLiveTranscriber(scope = viewModelScope, client = client)
             GeminiLiveSttController(viewModelScope, vad, client, transcriber, geminiKey, liveModel)
@@ -233,8 +209,7 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
         Log.i(TAG, "[ViewModel] startListening() called. isGenerating=${engine.isActive()}, isTalking=${isSpeaking.value}")
 
         when {
-            engine.isActive() -> handleTapInterruptionDuringGeneration()
-            isSpeaking.value -> handleTapInterruptionDuringTTS()
+            engine.isActive() || isSpeaking.value -> handleTapInterruption()
             else -> startNormalListening()
         }
     }
@@ -256,63 +231,29 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    private fun handleTapInterruptionDuringGeneration() {
-        Log.i(TAG, "[INTERRUPT-TAP] During generation. Aborting and starting new listen.")
+    private fun handleTapInterruption() {
+        Log.i(TAG, "[INTERRUPT-TAP] User tapped to interrupt.")
         isBargeInTurn = true
-        abortGenerationAndListen(startNewListen = true)
-    }
 
-    private fun handleTapInterruptionDuringTTS() {
-        Log.i(TAG, "[INTERRUPT-TAP] During TTS. Stopping TTS and listening.")
-        tts.stop()
-        startNormalListening()
-    }
-
-    private fun handleSpeechInterruption() {
-        if (!engine.isActive()) return
-        Log.i(TAG, "[INTERRUPT-SPEECH] Aborting generation, letting current STT complete.")
-        isBargeInTurn = true
-        abortGenerationAndListen(startNewListen = false)
-    }
-
-    private fun abortGenerationAndListen(startNewListen: Boolean) {
-        engine.abort(silent = true)
-        tts.stop()
-        _phase.value = GenerationPhase.IDLE
-
-        if (startNewListen) {
-            viewModelScope.launch {
-                stt?.stop(false)
-                delay(200)
-                startNormalListening()
-            }
-        } else {
-            // For speech barge-in, the STT is already running.
-            // We just need to mark that the next transcript is part of a barge-in.
-            isBargeInTurn = true
+        viewModelScope.launch {
+            stopAllSuspendable() // This is now the single source of truth for stopping everything
+            startNormalListening()
         }
     }
 
-    fun stopListening(transcribe: Boolean) {
-        Log.i(TAG, "[ViewModel] stopListening(transcribe=$transcribe) called.")
-        viewModelScope.launch { stt?.stop(transcribe) }
-    }
-
-    fun clearConversation() {
-        engine.abort(true)
-        store.clear()
-        tts.stop()
-        _phase.value = GenerationPhase.IDLE
-        viewModelScope.launch { stt?.stop(false) }
-    }
-
     fun stopAll() {
-        Log.w(TAG, "[ViewModel] stopAll() called - HARD STOP.")
-        engine.abort(false)
+        viewModelScope.launch { stopAllSuspendable() }
+    }
+
+    // A single, sequential, and robust function to stop everything.
+    private suspend fun stopAllSuspendable() {
+        Log.w(TAG, "[ViewModel] stopAllSuspendable() called - HARD STOP initiated.")
+        engine.abort(true)
         tts.stop()
-        viewModelScope.launch { stt?.stop(false) }
+        stt?.stop(false) // This is a suspend call and will now complete before moving on.
         _phase.value = GenerationPhase.IDLE
-        Log.w(TAG, "[ViewModel] stopAll() complete. System should be idle.")
+        isBargeInTurn = false // Reset barge-in flag
+        Log.w(TAG, "[ViewModel] stopAllSuspendable() complete. System is now idle.")
     }
 
     private fun onFinalTranscript(text: String) {
@@ -337,7 +278,8 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
 
     private fun handleInterruptionContinuation(newInput: String) {
         val lastUserEntry = conversation.value.lastOrNull { it.speaker == "You" }
-        val previousInput = lastUserEntry?.streamingText?.substringBefore(newInput.take(10))?.trim() ?: ""
+        // During an interruption, the previous text is in the final sentences, not streaming text.
+        val previousInput = lastUserEntry?.sentences?.joinToString(" ")?.trim() ?: ""
 
         val combinedInput = if (previousInput.isNotBlank()) {
             "$previousInput $newInput"
@@ -353,31 +295,19 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private fun startTurn(userText: String) {
-        val fasterFirst = Prefs.getFasterFirst(appCtx)
-        _phase.value = if (fasterFirst) GenerationPhase.GENERATING_FIRST else GenerationPhase.SINGLE_SHOT_GENERATING
+        _phase.value = if (Prefs.getFasterFirst(appCtx)) GenerationPhase.GENERATING_FIRST else GenerationPhase.SINGLE_SHOT_GENERATING
         val model = Prefs.getSelectedModel(appCtx)
-        Log.i(TAG, "[ViewModel] startTurn(model=$model, fasterFirst=$fasterFirst) inputLen=${userText.length}")
+        Log.i(TAG, "[ViewModel] startTurn(model=$model) inputLen=${userText.length}")
         llmPerf = PerfTimer(TAG, "llm").also { it.mark("llm_start") }
-
-        applyEngineSettings()
         engine.startTurn(userText, model)
     }
 
     private fun startTurnWithExistingHistory() {
-        val fasterFirst = Prefs.getFasterFirst(appCtx)
-        _phase.value = if (fasterFirst) GenerationPhase.GENERATING_FIRST else GenerationPhase.SINGLE_SHOT_GENERATING
+        _phase.value = if (Prefs.getFasterFirst(appCtx)) GenerationPhase.GENERATING_FIRST else GenerationPhase.SINGLE_SHOT_GENERATING
         val model = Prefs.getSelectedModel(appCtx)
-        Log.i(TAG, "[ViewModel] startTurnWithExistingHistory(model=$model, fasterFirst=$fasterFirst)")
+        Log.i(TAG, "[ViewModel] startTurnWithExistingHistory(model=$model)")
         llmPerf = PerfTimer(TAG, "llm").also { it.mark("llm_start") }
-
-        applyEngineSettings()
         engine.startTurnWithCurrentHistory(model)
-    }
-
-    private fun getEffectiveSystemPrompt(): String {
-        val base = Prefs.getSystemPrompt(appCtx, DEFAULT_SYSTEM_PROMPT)
-        val extensions = Prefs.getSystemPromptExtensions(appCtx)
-        return if (extensions.isBlank()) base else "$base\n\n$extensions"
     }
 
     override fun onCleared() {
@@ -385,6 +315,20 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
         Log.w(TAG, "[ViewModel] onCleared() - ViewModel is being destroyed.")
         stt?.release()
         tts.shutdown()
+    }
+
+    fun clearConversation() {
+        engine.abort(true)
+        store.clear()
+        tts.stop()
+        _phase.value = GenerationPhase.IDLE
+        viewModelScope.launch { stt?.stop(false) }
+    }
+
+    private fun getEffectiveSystemPrompt(): String {
+        val base = Prefs.getSystemPrompt(appCtx, DEFAULT_SYSTEM_PROMPT)
+        val extensions = Prefs.getSystemPromptExtensions(appCtx)
+        return if (extensions.isBlank()) base else "$base\n\n$extensions"
     }
 
     companion object {

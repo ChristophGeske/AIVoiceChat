@@ -27,19 +27,15 @@ class GeminiLiveClient(
     }
 
     private var socket: WebSocket? = null
-
+    val ready: StateFlow<Boolean> get() = _ready
     private val _ready = MutableStateFlow(false)
-    val ready: StateFlow<Boolean> = _ready
-
+    val incoming: SharedFlow<JSONObject> get() = _incoming
     private val _incoming = MutableSharedFlow<JSONObject>(extraBufferCapacity = 64)
-    val incoming: SharedFlow<JSONObject> = _incoming
-
+    val errors: SharedFlow<String> get() = _errors
     private val _errors = MutableSharedFlow<String>(extraBufferCapacity = 16)
-    val errors: SharedFlow<String> = _errors
 
     fun connect(apiKey: String, model: String) {
         if (socket != null) {
-            Log.i(TAG, "connect() called but socket already exists. Ignoring.")
             return
         }
         Log.i(TAG, "connect -> Creating new WebSocket for model=$model")
@@ -49,8 +45,7 @@ class GeminiLiveClient(
             override fun onOpen(webSocket: WebSocket, response: Response) {
                 Log.i(TAG, "WS OPEN (code=${response.code}) -> send setup")
                 _ready.value = false
-                val setup = GeminiLiveProtocol.setup(model)
-                webSocket.send(setup.toString())
+                webSocket.send(GeminiLiveProtocol.setup(model).toString())
             }
 
             override fun onMessage(webSocket: WebSocket, text: String) {
@@ -74,7 +69,6 @@ class GeminiLiveClient(
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
                 Log.e(TAG, "WS FAILURE: ${t.javaClass.simpleName}: ${t.message}")
-                response?.let { Log.e(TAG, "WS FAILURE resp=${it.code} ${it.message}") }
                 _ready.value = false
                 scope.launch { _errors.emit("WebSocket error: ${t.message ?: "unknown"}") }
                 socket = null
@@ -87,27 +81,18 @@ class GeminiLiveClient(
             val json = JSONObject(text)
             val serverContent = json.optJSONObject("serverContent")
 
-            // FIX: Only log unimportant messages if verbose mode is on.
+            // FIX: Only log if it's NOT just an audio chunk, or if verbose mode is on.
+            // This will hide the thousands of "modelTurn" audio stream messages.
             val isAudioChunk = serverContent?.has("modelTurn") ?: false
-            if (!LoggerConfig.LIVE_WS_VERBOSE && isAudioChunk) {
-                // This is a model audio response chunk, and we're not in verbose mode.
-                // Just emit and return to avoid spamming the log.
-                scope.launch(Dispatchers.Default) { _incoming.emit(json) }
-                return
+            if (LoggerConfig.LIVE_WS_VERBOSE || !isAudioChunk) {
+                Log.d(TAG, "[Client] Message received: ${text.take(250)}")
             }
 
-            val hasSetup = json.has("setupComplete")
-            val hasError = json.has("error")
-            val hasTranscription = serverContent?.has("inputTranscription") == true
-            val hasTurnComplete = serverContent?.optBoolean("turnComplete") == true
-            Log.d(TAG, "[Client] Message received: setup=$hasSetup, error=$hasError, transcription=$hasTranscription, turnComplete=$hasTurnComplete")
-
-
-            if (hasSetup) {
+            if (json.has("setupComplete")) {
                 Log.i(TAG, "setupComplete=true")
                 _ready.value = true
             }
-            if (hasError) {
+            if (json.has("error")) {
                 val e = json.optJSONObject("error")
                 val msg = e?.optString("message") ?: "Unknown server error"
                 Log.e(TAG, "SERVER ERROR: $msg code=${e?.optInt("code")}")
@@ -119,26 +104,11 @@ class GeminiLiveClient(
         }
     }
 
-    private var frameCount = 0
-
     fun sendPcm16Le(bytes: ByteArray, sampleRate: Int = 16000): Boolean {
-        val ws = socket ?: return false
+        // This is fine, audio frame logging is already disabled by LoggerConfig
         return try {
-            val b64 = Base64.encodeToString(bytes, Base64.NO_WRAP)
-            val msg = GeminiLiveProtocol.audioPcm16LeFrame(b64, sampleRate)
-            val ok = ws.send(msg.toString())
-
-            // FIX: This logging is now controlled by LoggerConfig
-            if (LoggerConfig.LIVE_FRAME_SAMPLING > 0) {
-                frameCount++
-                if (frameCount % LoggerConfig.LIVE_FRAME_SAMPLING == 0) {
-                    Log.d(TAG, "audio frame sent (n=$frameCount, len=${bytes.size})")
-                }
-            }
-            ok
+            socket?.send(GeminiLiveProtocol.audioPcm16LeFrame(Base64.encodeToString(bytes, Base64.NO_WRAP), sampleRate).toString()) ?: false
         } catch (e: Exception) {
-            Log.e(TAG, "send audio error: ${e.message}")
-            scope.launch { _errors.emit("Send audio error: ${e.message}") }
             false
         }
     }
@@ -157,6 +127,5 @@ class GeminiLiveClient(
         } catch (_: Exception) {}
         socket = null
         _ready.value = false
-        frameCount = 0
     }
 }

@@ -43,7 +43,9 @@ class ConversationFragment : Fragment(R.layout.fragment_first) {
         super.onViewCreated(view, savedInstanceState)
         _binding = FragmentFirstBinding.bind(view)
 
-        val adapter = ConversationAdapter {}
+        val adapter = ConversationAdapter { index ->
+            vm.replayMessage(index)
+        }
         binding.conversationRecyclerView.adapter = adapter
 
         viewLifecycleOwner.lifecycleScope.launch {

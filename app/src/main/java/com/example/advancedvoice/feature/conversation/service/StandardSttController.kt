@@ -16,14 +16,6 @@ import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import java.util.Locale
 
-/**
- * Hardened Android STT:
- * - Main-thread-only SpeechRecognizer operations.
- * - Friendly error messages (including vendor-specific code 11).
- * - Recreate recognizer on ERROR_CLIENT / ERROR_RECOGNIZER_BUSY / vendor codes.
- * - Backoff window after throttling errors to avoid immediate re-failure.
- * - Correctly handles user-initiated stops to prevent false "no-match" errors.
- */
 class StandardSttController(
     private val app: Application,
     private val scope: CoroutineScope
@@ -39,7 +31,6 @@ class StandardSttController(
     private val _isHearingSpeech = MutableStateFlow(false)
     override val isHearingSpeech: StateFlow<Boolean> = _isHearingSpeech
 
-    // NEW: Implement the isTranscribing state from the interface. It's always false for this controller.
     private val _isTranscribing = MutableStateFlow(false)
     override val isTranscribing: StateFlow<Boolean> = _isTranscribing
 
@@ -54,13 +45,16 @@ class StandardSttController(
     @Volatile private var destroyed = false
     @Volatile private var userStopped = false
 
+    // FIX: Track if this session was started by auto-listen
+    @Volatile private var isAutoListenSession = false
+
     @Volatile private var nextStartAllowedAt: Long = 0L
     @Volatile private var throttleStreak: Int = 0
     @Volatile private var forceLangTag: String? = null
 
     private val listener = object : RecognitionListener {
         override fun onReadyForSpeech(params: Bundle?) {
-            Log.i(TAG, "[STT_CB] onReadyForSpeech")
+            Log.i(TAG, "[STT_CB] onReadyForSpeech (autoListen=$isAutoListenSession)")
             _isListening.value = true
             _isHearingSpeech.value = false
             throttleStreak = 0
@@ -78,6 +72,9 @@ class StandardSttController(
             _isListening.value = false
             _isHearingSpeech.value = false
 
+            val wasAutoListen = isAutoListenSession
+            isAutoListenSession = false // Reset flag
+
             if (userStopped) {
                 Log.w(TAG, "[STT_CB] onError (code=$error) ignored because user initiated stop.")
                 userStopped = false
@@ -85,8 +82,24 @@ class StandardSttController(
             }
 
             val friendly = mapErrorFriendly(error)
-            Log.w(TAG, "[STT_CB] onError: $friendly (code=$error)")
-            _errors.tryEmit(friendly)
+            Log.w(TAG, "[STT_CB] onError: $friendly (code=$error, autoListen=$wasAutoListen)")
+
+            if (error == SpeechRecognizer.ERROR_CLIENT) {
+                Log.d(TAG, "[STT_CB] ERROR_CLIENT (from stopListening), ignoring")
+                return
+            }
+
+            // FIX: If this was auto-listen and we got NO_MATCH or TIMEOUT, silently ignore
+            if (wasAutoListen && (error == SpeechRecognizer.ERROR_NO_MATCH || error == SpeechRecognizer.ERROR_SPEECH_TIMEOUT)) {
+                Log.d(TAG, "[STT_CB] Auto-listen timed out (user didn't speak). Silently ignoring.")
+                return
+            }
+
+            // For manual sessions, show the error
+            if (error == SpeechRecognizer.ERROR_NO_MATCH || error == SpeechRecognizer.ERROR_SPEECH_TIMEOUT) {
+                Log.i(TAG, "[STT_CB] Manual session: No speech detected, notifying user.")
+                // Note: We don't emit to _sttNoMatch anymore in ViewModel, so just log
+            }
 
             if (isVendorOrThrottle(error)) {
                 throttleStreak = (throttleStreak + 1).coerceAtMost(5)
@@ -98,10 +111,16 @@ class StandardSttController(
             if (shouldRecreate(error)) {
                 main.post { recreateRecognizer() }
             }
+
+            // Only emit actual errors (not expected timeouts)
+            if (error != SpeechRecognizer.ERROR_NO_MATCH && error != SpeechRecognizer.ERROR_SPEECH_TIMEOUT) {
+                _errors.tryEmit(friendly)
+            }
         }
         override fun onResults(results: Bundle?) {
             _isListening.value = false
             _isHearingSpeech.value = false
+            isAutoListenSession = false // Reset flag
             throttleStreak = 0
             forceLangTag = null
             val text = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull().orEmpty()
@@ -148,15 +167,18 @@ class StandardSttController(
         putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
     }
 
-    override suspend fun start() {
-        Log.i(TAG, "start() called.")
+    override suspend fun start(isAutoListen: Boolean) {
+        Log.i(TAG, "start() called (autoListen=$isAutoListen).")
         userStopped = false
+        isAutoListenSession = isAutoListen // FIX: Track the session type
 
         val now = System.currentTimeMillis()
         if (now < nextStartAllowedAt) {
             val wait = nextStartAllowedAt - now
             Log.w(TAG, "start(): backoff active, wait ${wait}ms")
-            _errors.tryEmit("Speech service busy. Please wait a moment.")
+            if (!isAutoListen) {
+                _errors.tryEmit("Speech service busy. Please wait a moment.")
+            }
             return
         }
 
@@ -168,17 +190,21 @@ class StandardSttController(
         main.post {
             try {
                 if (!SpeechRecognizer.isRecognitionAvailable(app)) {
-                    _errors.tryEmit("Speech recognition not available on this device.")
+                    if (!isAutoListen) {
+                        _errors.tryEmit("Speech recognition not available on this device.")
+                    }
                     return@post
                 }
                 if (recognizer == null) {
                     createRecognizer()
                 }
                 recognizer?.startListening(sttIntent())
-                Log.i(TAG, "startListening() posted")
+                Log.i(TAG, "startListening() posted (autoListen=$isAutoListen)")
             } catch (t: Throwable) {
                 Log.e(TAG, "startListening failed: ${t.message}")
-                _errors.tryEmit("Could not start speech recognition.")
+                if (!isAutoListen) {
+                    _errors.tryEmit("Could not start speech recognition.")
+                }
                 recreateRecognizer()
             } finally {
                 starting = false
@@ -190,6 +216,7 @@ class StandardSttController(
         if (!_isListening.value && !_isHearingSpeech.value) return
         Log.w(TAG, "stop(transcribe=$transcribe) called.")
         userStopped = true
+        isAutoListenSession = false // Reset flag
         main.post {
             recognizer?.stopListening()
             _isListening.value = false
@@ -212,7 +239,7 @@ class StandardSttController(
         SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> "Microphone permission is required."
         SpeechRecognizer.ERROR_NETWORK -> "Network error. Check your connection."
         SpeechRecognizer.ERROR_NETWORK_TIMEOUT -> "Network timeout."
-        SpeechRecognizer.ERROR_NO_MATCH -> "I didn’t catch that. Please try again."
+        SpeechRecognizer.ERROR_NO_MATCH -> "I didn't catch that. Please try again."
         SpeechRecognizer.ERROR_RECOGNIZER_BUSY -> "Speech service is busy. Retrying…"
         SpeechRecognizer.ERROR_SERVER -> "Speech service temporarily unavailable."
         SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> "No speech detected."

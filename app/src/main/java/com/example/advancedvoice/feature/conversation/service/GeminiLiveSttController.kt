@@ -49,7 +49,6 @@ class GeminiLiveSttController(
     private var clientErrJob: Job? = null
     private var finalTranscriptJob: Job? = null
 
-    // A Mutex ensures that start() and stop() operations are atomic and cannot run concurrently.
     private val stateMutex = Mutex()
 
     @Volatile private var turnEnded = false
@@ -72,9 +71,9 @@ class GeminiLiveSttController(
     }
 
     @RequiresPermission(Manifest.permission.RECORD_AUDIO)
-    override suspend fun start() {
+    override suspend fun start(isAutoListen: Boolean) {  // FIX: Added parameter
         stateMutex.withLock {
-            Log.i(TAG, "[Controller] >>> START Request processing. Current state: listening=${isListening.value}, hearing=${isHearingSpeech.value}")
+            Log.i(TAG, "[Controller] >>> START Request processing (autoListen=$isAutoListen). Current state: listening=${isListening.value}, hearing=${isHearingSpeech.value}")
 
             if (isListening.value || isHearingSpeech.value) {
                 Log.w(TAG, "[Controller] START called while active. Forcing full stop before restart.")

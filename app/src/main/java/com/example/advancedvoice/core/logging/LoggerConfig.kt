@@ -3,8 +3,8 @@ package com.example.advancedvoice.core.logging
 object LoggerConfig {
     // Live WS logging
     // FIX: Set both to false to eliminate noisy logs
-    const val LIVE_WS_VERBOSE = false         // if true, logs every frame and full JSON
-    const val LIVE_FRAME_SAMPLING = 0         // log every Nth audio frame; 0 = never
+    const val LIVE_WS_VERBOSE = false
+    const val LIVE_FRAME_SAMPLING = 0         // 0 means never log audio frames
 
     // Tags (match your filters)
     const val TAG_LIVE = "GeminiLiveService"

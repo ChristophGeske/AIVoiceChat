@@ -38,7 +38,6 @@ class GeminiLiveClient(
     val errors: SharedFlow<String> = _errors
 
     fun connect(apiKey: String, model: String) {
-        // FIX: Only connect if the socket is null or closed. Do NOT close an existing one here.
         if (socket != null) {
             Log.i(TAG, "connect() called but socket already exists. Ignoring.")
             return
@@ -70,7 +69,7 @@ class GeminiLiveClient(
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
                 Log.i(TAG, "WS CLOSED code=$code reason=$reason")
                 _ready.value = false
-                socket = null // FIX: Nullify the socket when it's confirmed closed.
+                socket = null
             }
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
@@ -78,7 +77,7 @@ class GeminiLiveClient(
                 response?.let { Log.e(TAG, "WS FAILURE resp=${it.code} ${it.message}") }
                 _ready.value = false
                 scope.launch { _errors.emit("WebSocket error: ${t.message ?: "unknown"}") }
-                socket = null // FIX: Nullify on failure so a new one can be created.
+                socket = null
             }
         })
     }
@@ -88,20 +87,27 @@ class GeminiLiveClient(
             val json = JSONObject(text)
             val serverContent = json.optJSONObject("serverContent")
 
-            // FIX: Only log if the flag is enabled OR if the message is important (not just an audio chunk)
-            if (LoggerConfig.LIVE_WS_VERBOSE || serverContent == null || !serverContent.has("modelTurn")) {
-                val hasSetup = json.has("setupComplete")
-                val hasError = json.has("error")
-                val hasTranscription = serverContent?.has("inputTranscription") == true
-                val hasTurnComplete = serverContent?.optBoolean("turnComplete") == true
-                Log.d(TAG, "[Client] Message received: setup=$hasSetup, error=$hasError, transcription=$hasTranscription, turnComplete=$hasTurnComplete")
+            // FIX: Only log unimportant messages if verbose mode is on.
+            val isAudioChunk = serverContent?.has("modelTurn") ?: false
+            if (!LoggerConfig.LIVE_WS_VERBOSE && isAudioChunk) {
+                // This is a model audio response chunk, and we're not in verbose mode.
+                // Just emit and return to avoid spamming the log.
+                scope.launch(Dispatchers.Default) { _incoming.emit(json) }
+                return
             }
 
-            if (json.has("setupComplete")) {
+            val hasSetup = json.has("setupComplete")
+            val hasError = json.has("error")
+            val hasTranscription = serverContent?.has("inputTranscription") == true
+            val hasTurnComplete = serverContent?.optBoolean("turnComplete") == true
+            Log.d(TAG, "[Client] Message received: setup=$hasSetup, error=$hasError, transcription=$hasTranscription, turnComplete=$hasTurnComplete")
+
+
+            if (hasSetup) {
                 Log.i(TAG, "setupComplete=true")
                 _ready.value = true
             }
-            if (json.has("error")) {
+            if (hasError) {
                 val e = json.optJSONObject("error")
                 val msg = e?.optString("message") ?: "Unknown server error"
                 Log.e(TAG, "SERVER ERROR: $msg code=${e?.optInt("code")}")
@@ -121,6 +127,8 @@ class GeminiLiveClient(
             val b64 = Base64.encodeToString(bytes, Base64.NO_WRAP)
             val msg = GeminiLiveProtocol.audioPcm16LeFrame(b64, sampleRate)
             val ok = ws.send(msg.toString())
+
+            // FIX: This logging is now controlled by LoggerConfig
             if (LoggerConfig.LIVE_FRAME_SAMPLING > 0) {
                 frameCount++
                 if (frameCount % LoggerConfig.LIVE_FRAME_SAMPLING == 0) {
@@ -143,7 +151,6 @@ class GeminiLiveClient(
     }
 
     fun close() {
-        // FIX: This is the ONLY place that should request a close.
         Log.i(TAG, "WS CLOSE requested by client.")
         try {
             socket?.close(1000, "Client initiated close")

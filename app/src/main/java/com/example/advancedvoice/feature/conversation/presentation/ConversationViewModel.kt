@@ -181,7 +181,12 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
         stt = if (shouldUseGeminiLive) {
             Log.i(TAG, "[ViewModel] Creating and wiring GeminiLiveSttController.")
             val liveModel = "models/gemini-2.5-flash-native-audio-preview-09-2025"
-            val vad = VadRecorder(scope = viewModelScope, silenceTimeoutMs = 5000L)
+            // FIX: Instantiate VAD with the new responsive timeouts
+            val vad = VadRecorder(
+                scope = viewModelScope,
+                endOfSpeechMs = 1200L, // End turn after 1.2s of silence
+                maxSilenceMs = 5000L   // Allow up to 5s of silence mid-speech
+            )
             val client = GeminiLiveClient(scope = viewModelScope)
             val transcriber = GeminiLiveTranscriber(scope = viewModelScope, client = client)
             GeminiLiveSttController(viewModelScope, vad, client, transcriber, geminiKey, liveModel)
@@ -264,7 +269,7 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private fun handleSpeechInterruption() {
-        if (!engine.isActive()) return // Don't interrupt if not generating
+        if (!engine.isActive()) return
         Log.i(TAG, "[INTERRUPT-SPEECH] Aborting generation, letting current STT complete.")
         isBargeInTurn = true
         abortGenerationAndListen(startNewListen = false)
@@ -281,7 +286,16 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
                 delay(200)
                 startNormalListening()
             }
+        } else {
+            // For speech barge-in, the STT is already running.
+            // We just need to mark that the next transcript is part of a barge-in.
+            isBargeInTurn = true
         }
+    }
+
+    fun stopListening(transcribe: Boolean) {
+        Log.i(TAG, "[ViewModel] stopListening(transcribe=$transcribe) called.")
+        viewModelScope.launch { stt?.stop(transcribe) }
     }
 
     fun clearConversation() {
@@ -312,7 +326,7 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
 
         if (isBargeInTurn) {
             Log.i(TAG, "[ViewModel] This was an interruption transcript. Combining...")
-            isBargeInTurn = false // Consume the flag
+            isBargeInTurn = false
             handleInterruptionContinuation(input)
         } else {
             Log.i(TAG, "[ViewModel] This is a normal turn transcript.")

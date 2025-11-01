@@ -16,18 +16,13 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlin.math.max
 
-/**
- * Simple voice activity recording loop with RMS-based VAD:
- * - Emits audio frames (PCM16 LE) only after speech is detected.
- * - Emits events for SpeechStart, SilenceTimeout, SpeechEnd, and Errors.
- *
- * NOTE: Caller must hold RECORD_AUDIO permission before calling start().
- */
 class VadRecorder(
     private val scope: CoroutineScope,
     private val sampleRate: Int = 16_000,
     private val silenceThresholdRms: Double = 250.0,
-    private val silenceTimeoutMs: Long = 3_000L,
+    // FIX: Two separate timeouts for better responsiveness
+    private val endOfSpeechMs: Long = 1500L,   // Shorter timeout to end the turn quickly
+    private val maxSilenceMs: Long = 5000L,     // Longer timeout for mid-speech pauses
     private val minSpeechDurationMs: Long = 400L,
     private val channelConfig: Int = AudioFormat.CHANNEL_IN_MONO,
     private val encoding: Int = AudioFormat.ENCODING_PCM_16BIT,
@@ -69,13 +64,8 @@ class VadRecorder(
             return
         }
 
-        val bytesPerSample = when (encoding) {
-            AudioFormat.ENCODING_PCM_8BIT -> 1
-            AudioFormat.ENCODING_PCM_16BIT -> 2
-            AudioFormat.ENCODING_PCM_FLOAT -> 4
-            else -> 2
-        }
-        val channels = if (channelConfig == AudioFormat.CHANNEL_IN_STEREO) 2 else 1
+        val bytesPerSample = 2 // For ENCODING_PCM_16BIT
+        val channels = 1 // For CHANNEL_IN_MONO
         val frameSizeBytes = (sampleRate / 1000) * frameMillis * bytesPerSample * channels
 
         fun alignUp(value: Int, alignment: Int): Int {
@@ -88,27 +78,14 @@ class VadRecorder(
         bufferBytes = alignUp(bufferBytes, frameSizeBytes)
 
         val rec: AudioRecord = try {
-            if (android.os.Build.VERSION.SDK_INT >= 23) {
-                val format = AudioFormat.Builder()
-                    .setEncoding(encoding)
-                    .setSampleRate(sampleRate)
-                    .setChannelMask(channelConfig)
-                    .build()
-                AudioRecord.Builder()
-                    .setAudioSource(MediaRecorder.AudioSource.MIC)
-                    .setAudioFormat(format)
-                    .setBufferSizeInBytes(bufferBytes)
-                    .build()
-            } else {
-                @Suppress("DEPRECATION")
-                AudioRecord(
-                    MediaRecorder.AudioSource.MIC,
-                    sampleRate,
-                    channelConfig,
-                    encoding,
-                    bufferBytes
-                )
-            }
+            @Suppress("DEPRECATION")
+            AudioRecord(
+                MediaRecorder.AudioSource.MIC,
+                sampleRate,
+                channelConfig,
+                encoding,
+                bufferBytes
+            )
         } catch (se: SecurityException) {
             _events.tryEmit(VadEvent.Error("SecurityException: RECORD_AUDIO denied"))
             return
@@ -118,7 +95,6 @@ class VadRecorder(
         }
 
         if (rec.state != AudioRecord.STATE_INITIALIZED) {
-            Log.e(TAG, "AudioRecord not initialized (min=$minSize, chosen=$bufferBytes, frame=$frameSizeBytes, ch=$channels, bps=$bytesPerSample)")
             _events.tryEmit(VadEvent.Error("AudioRecord not initialized"))
             try { rec.release() } catch (_: Throwable) {}
             return
@@ -126,11 +102,7 @@ class VadRecorder(
 
         try {
             rec.startRecording()
-        } catch (se: SecurityException) {
-            _events.tryEmit(VadEvent.Error("SecurityException on startRecording"))
-            try { rec.release() } catch (_: Throwable) {}
-            return
-        } catch (e: IllegalStateException) {
+        } catch (e: Exception) {
             _events.tryEmit(VadEvent.Error("startRecording failed: ${e.message}"))
             try { rec.release() } catch (_: Throwable) {}
             return
@@ -150,10 +122,7 @@ class VadRecorder(
             while (isActive && isRunning) {
                 val read = rec.read(shortBuf, 0, shortBuf.size)
                 if (read <= 0) {
-                    if (isActive) {
-                        Log.e(TAG, "AudioRecord read error: $read")
-                        _events.tryEmit(VadEvent.Error("AudioRecord read error: $read"))
-                    }
+                    if (isActive) _events.tryEmit(VadEvent.Error("AudioRecord read error: $read"))
                     break
                 }
 
@@ -167,20 +136,23 @@ class VadRecorder(
                         speechStartTs = now
                         _events.tryEmit(VadEvent.SpeechStart)
                     }
-                    silenceStartTs = 0L // Reset silence counter
+                    silenceStartTs = 0L
                 } else {
                     if (hasSpeech) {
                         if (silenceStartTs == 0L) {
                             silenceStartTs = now
-                        } else if (now - silenceStartTs > silenceTimeoutMs) {
+                        }
+
+                        // FIX: Use the shorter timeout to end the turn
+                        val silenceDuration = now - silenceStartTs
+                        if (silenceDuration > endOfSpeechMs) {
                             val duration = now - speechStartTs
                             if (duration >= minSpeechDurationMs) {
                                 _events.tryEmit(VadEvent.SpeechEnd(durationMs = duration))
                             } else {
-                                // Speech was too short, treat as noise/silence
                                 _events.tryEmit(VadEvent.SilenceTimeout)
                             }
-                            break // End the loop on speech end/timeout
+                            break // End the loop
                         }
                     }
                 }
@@ -198,13 +170,8 @@ class VadRecorder(
         Log.i(TAG, "Stopping VAD recorder...")
         isRunning = false
 
-        val j = job
+        job?.cancelAndJoin()
         job = null
-        try {
-            j?.cancelAndJoin()
-        } catch (e: Exception) {
-            Log.w(TAG, "Error cancelling VAD job: ${e.message}")
-        }
 
         val rec = recorder
         recorder = null

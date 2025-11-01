@@ -8,14 +8,10 @@ import com.example.advancedvoice.data.openai.OpenAiService
 import com.example.advancedvoice.domain.engine.SentenceTurnEngine
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import okhttp3.OkHttpClient
 
-/**
- * Two-phase strategy:
- *  - Phase 1: fast first sentence
- *  - Phase 2: remaining sentences
- */
 class FastFirstSentenceStrategy(
     private val http: OkHttpClient,
     private val geminiKeyProvider: () -> String,
@@ -24,7 +20,8 @@ class FastFirstSentenceStrategy(
 
     companion object { private const val TAG = "FastFirst" }
 
-    @Volatile private var active = false
+    // FIX: Use Job for proper cancellation
+    private var executionJob: Job? = null
 
     override fun execute(
         scope: CoroutineScope,
@@ -34,14 +31,15 @@ class FastFirstSentenceStrategy(
         maxSentences: Int,
         callbacks: SentenceTurnEngine.Callbacks
     ) {
-        active = true
+        // FIX: Cancel any previous execution
+        executionJob?.cancel()
+
         Log.i(TAG, "[FastFirst] Starting two-phase generation: model=$modelName, maxSentences=$maxSentences")
 
-        scope.launch(Dispatchers.IO) {
+        executionJob = scope.launch(Dispatchers.IO) {
             try {
                 val isGemini = modelName.contains("gemini", ignoreCase = true)
 
-                // PHASE 1: Generate first sentence quickly
                 Log.i(TAG, "[FastFirst] PHASE 1: Generating first sentence with low temperature...")
                 val (firstSentence, remaining) = if (isGemini) {
                     val gem = GeminiService(geminiKeyProvider, http)
@@ -55,14 +53,20 @@ class FastFirstSentenceStrategy(
                     )
                     val first = SentenceSplitter.extractFirstSentence(phase1Text).first.trim()
                     Log.i(TAG, "[FastFirst] PHASE 1 complete: '${first.take(80)}...'")
-                    callbacks.onFirstSentence(first)
 
-                    if (!active) {
-                        Log.w(TAG, "[FastFirst] Aborted after phase 1")
+                    // FIX: Check if cancelled before calling callback
+                    if (!executionJob!!.isActive) {
+                        Log.w(TAG, "[FastFirst] Cancelled after phase 1, skipping callbacks")
                         return@launch
                     }
 
-                    // PHASE 2: Generate remaining sentences
+                    callbacks.onFirstSentence(first)
+
+                    if (!executionJob!!.isActive) {
+                        Log.w(TAG, "[FastFirst] Cancelled before phase 2")
+                        return@launch
+                    }
+
                     val remainingCount = (maxSentences - 1).coerceAtLeast(1)
                     Log.i(TAG, "[FastFirst] PHASE 2: Generating $remainingCount additional sentence(s)...")
                     val phase2Prompt = """
@@ -95,10 +99,16 @@ class FastFirstSentenceStrategy(
                     ).text
                     val first = SentenceSplitter.extractFirstSentence(phase1).first.trim()
                     Log.i(TAG, "[FastFirst] PHASE 1 complete: '${first.take(80)}...'")
+
+                    if (!executionJob!!.isActive) {
+                        Log.w(TAG, "[FastFirst] Cancelled after phase 1, skipping callbacks")
+                        return@launch
+                    }
+
                     callbacks.onFirstSentence(first)
 
-                    if (!active) {
-                        Log.w(TAG, "[FastFirst] Aborted after phase 1")
+                    if (!executionJob!!.isActive) {
+                        Log.w(TAG, "[FastFirst] Cancelled before phase 2")
                         return@launch
                     }
 
@@ -124,8 +134,8 @@ class FastFirstSentenceStrategy(
                     first to remainingSentences
                 }
 
-                if (!active) {
-                    Log.w(TAG, "[FastFirst] Aborted before emitting remaining sentences")
+                if (!executionJob!!.isActive) {
+                    Log.w(TAG, "[FastFirst] Cancelled before emitting remaining sentences")
                     return@launch
                 }
 
@@ -133,32 +143,30 @@ class FastFirstSentenceStrategy(
                     callbacks.onRemainingSentences(remaining)
                 }
 
-                val final = buildString {
-                    append(firstSentence)
-                    if (remaining.isNotEmpty()) {
-                        append(' ')
-                        append(remaining.joinToString(" "))
-                    }
-                }.trim()
+                Log.i(TAG, "[FastFirst] Strategy complete (first + remaining delivered)")
 
-                Log.i(TAG, "[FastFirst] Complete response (len=${final.length})")
-                callbacks.onFinalResponse(final)
             } catch (t: Throwable) {
-                Log.e(TAG, "[FastFirst] Error: ${t.message}", t)
-                if (active) callbacks.onError(t.message ?: "Generation failed")
+                if (executionJob!!.isActive) {
+                    Log.e(TAG, "[FastFirst] Error: ${t.message}", t)
+                    callbacks.onError(t.message ?: "Generation failed")
+                } else {
+                    Log.i(TAG, "[FastFirst] Cancelled, ignoring error: ${t.message}")
+                }
             } finally {
-                if (active) {
-                    active = false
-                    Log.i(TAG, "[FastFirst] Turn finished")
+                if (executionJob!!.isActive) {
+                    Log.i(TAG, "[FastFirst] Turn finished normally")
                     callbacks.onTurnFinish()
+                } else {
+                    Log.i(TAG, "[FastFirst] Turn cancelled, skipping onTurnFinish")
                 }
             }
         }
     }
 
     override fun abort() {
-        Log.w(TAG, "[FastFirst] abort() called")
-        active = false
+        Log.w(TAG, "[FastFirst] abort() called - CANCELLING JOB")
+        executionJob?.cancel()
+        executionJob = null
     }
 
     private fun mapHistory(history: List<SentenceTurnEngine.Msg>): List<ChatMessage> =

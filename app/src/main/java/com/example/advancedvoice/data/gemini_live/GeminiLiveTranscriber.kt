@@ -44,26 +44,32 @@ class GeminiLiveTranscriber(
         client.sendPcm16Le(pcm16le, sampleRate)
 
     fun startAccumulating() {
-        Log.i(TAG, "[Transcriber] startAccumulating() - ready to collect speech.")
+        Log.i(TAG, "[Transcriber] startAccumulating() - clearing buffer and ready to collect speech.")
+        // FIX: Always clear the buffer when starting a new turn
         accumulatedTranscript.clear()
         isAccumulating = true
     }
 
     fun endTurn(): Boolean {
-        Log.i(TAG, "[Transcriber] endTurn() called - finalizing transcript NOW.")
+        if (!isAccumulating) {
+            Log.w(TAG, "[Transcriber] endTurn() called but not accumulating. Ignoring.")
+            return false
+        }
+
+        Log.i(TAG, "[Transcriber] endTurn() called - finalizing transcript NOW (accumulated ${accumulatedTranscript.length} chars)")
         isAccumulating = false
 
-        // Emit the final transcript IMMEDIATELY - no need to wait for turnComplete
         val finalText = accumulatedTranscript.toString().trim()
-        Log.i(TAG, "[Transcriber] Emitting FINAL transcript (len=${finalText.length}): '${finalText.take(100)}...'")
 
-        // Emit synchronously to ensure immediate delivery
-        scope.launch { _finalTranscripts.emit(finalText) }
+        // FIX: Only emit if we have meaningful content
+        if (finalText.isNotEmpty()) {
+            Log.i(TAG, "[Transcriber] Emitting FINAL transcript (len=${finalText.length}): '${finalText.take(100)}...'")
+            scope.launch { _finalTranscripts.emit(finalText) }
+        } else {
+            Log.w(TAG, "[Transcriber] Buffer was empty, not emitting")
+        }
 
-        // Send the protocol message
         val ok = client.sendAudioStreamEnd()
-
-        // Clear for next turn
         accumulatedTranscript.clear()
 
         return ok
@@ -90,19 +96,22 @@ class GeminiLiveTranscriber(
             Log.d(TAG, "[Transcriber-RAW] Received: ${json.toString().take(250)}")
         }
 
-        // Accumulate input transcription fragments (only while actively listening)
         val inTranscription = serverContent.optJSONObject("inputTranscription")
         if (inTranscription != null && isAccumulating) {
             val text = inTranscription.optString("text", "")
             if (text.isNotBlank()) {
                 accumulatedTranscript.append(text)
                 val previewText = accumulatedTranscript.toString()
-                Log.d(TAG, "[Transcriber] Accumulated (len=${previewText.length}): '${previewText.take(80)}...'")
+
+                // FIX: Only log periodically to reduce spam
+                if (previewText.length % 20 < text.length || previewText.length < 20) {
+                    Log.d(TAG, "[Transcriber] Accumulated (len=${previewText.length}): '${previewText.take(80)}...'")
+                }
+
                 scope.launch { _partialTranscripts.emit(previewText) }
             }
         }
 
-        // turnComplete just signals server finished its full cycle (we don't need to wait for it)
         val turnComplete = serverContent.optBoolean("turnComplete", false)
         if (turnComplete) {
             Log.i(TAG, "[Transcriber] turnComplete received - server finished its response cycle.")

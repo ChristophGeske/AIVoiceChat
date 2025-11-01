@@ -4,6 +4,7 @@ import android.Manifest
 import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.MediaRecorder
+import android.util.Log
 import androidx.annotation.RequiresPermission
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -30,8 +31,11 @@ class VadRecorder(
     private val minSpeechDurationMs: Long = 400L,
     private val channelConfig: Int = AudioFormat.CHANNEL_IN_MONO,
     private val encoding: Int = AudioFormat.ENCODING_PCM_16BIT,
-    private val frameMillis: Int = 20 // 20 ms per read -> 320 samples at 16 kHz mono 16-bit
+    private val frameMillis: Int = 20
 ) {
+    companion object {
+        private const val TAG = "VadRecorder"
+    }
 
     sealed class VadEvent {
         object SpeechStart : VadEvent()
@@ -54,7 +58,10 @@ class VadRecorder(
 
     @RequiresPermission(Manifest.permission.RECORD_AUDIO)
     suspend fun start() {
-        if (isRunning) return
+        if (isRunning) {
+            Log.w(TAG, "start() called while already running. Ignoring.")
+            return
+        }
 
         val minSize = AudioRecord.getMinBufferSize(sampleRate, channelConfig, encoding)
         if (minSize == AudioRecord.ERROR || minSize == AudioRecord.ERROR_BAD_VALUE) {
@@ -62,17 +69,13 @@ class VadRecorder(
             return
         }
 
-        // Compute frame + buffer sizes and align buffer
         val bytesPerSample = when (encoding) {
             AudioFormat.ENCODING_PCM_8BIT -> 1
             AudioFormat.ENCODING_PCM_16BIT -> 2
             AudioFormat.ENCODING_PCM_FLOAT -> 4
             else -> 2
         }
-        val channels = when (channelConfig) {
-            AudioFormat.CHANNEL_IN_STEREO -> 2
-            else -> 1
-        }
+        val channels = if (channelConfig == AudioFormat.CHANNEL_IN_STEREO) 2 else 1
         val frameSizeBytes = (sampleRate / 1000) * frameMillis * bytesPerSample * channels
 
         fun alignUp(value: Int, alignment: Int): Int {
@@ -97,6 +100,7 @@ class VadRecorder(
                     .setBufferSizeInBytes(bufferBytes)
                     .build()
             } else {
+                @Suppress("DEPRECATION")
                 AudioRecord(
                     MediaRecorder.AudioSource.MIC,
                     sampleRate,
@@ -114,11 +118,8 @@ class VadRecorder(
         }
 
         if (rec.state != AudioRecord.STATE_INITIALIZED) {
-            _events.tryEmit(
-                VadEvent.Error(
-                    "AudioRecord not initialized (min=$minSize, chosen=$bufferBytes, frame=$frameSizeBytes, ch=$channels, bps=$bytesPerSample)"
-                )
-            )
+            Log.e(TAG, "AudioRecord not initialized (min=$minSize, chosen=$bufferBytes, frame=$frameSizeBytes, ch=$channels, bps=$bytesPerSample)")
+            _events.tryEmit(VadEvent.Error("AudioRecord not initialized"))
             try { rec.release() } catch (_: Throwable) {}
             return
         }
@@ -137,6 +138,7 @@ class VadRecorder(
 
         recorder = rec
         isRunning = true
+        Log.i(TAG, "VAD recorder started successfully.")
 
         job = scope.launch(Dispatchers.IO) {
             val frameSamples = (sampleRate / 1000) * frameMillis
@@ -148,21 +150,24 @@ class VadRecorder(
             while (isActive && isRunning) {
                 val read = rec.read(shortBuf, 0, shortBuf.size)
                 if (read <= 0) {
-                    _events.tryEmit(VadEvent.Error("AudioRecord read error: $read"))
+                    if (isActive) {
+                        Log.e(TAG, "AudioRecord read error: $read")
+                        _events.tryEmit(VadEvent.Error("AudioRecord read error: $read"))
+                    }
                     break
                 }
 
                 val rms = AudioRms.calculateRms(shortBuf, read)
-                val silent = rms < silenceThresholdRms
+                val isLoud = rms >= silenceThresholdRms
                 val now = System.currentTimeMillis()
 
-                if (!silent) {
+                if (isLoud) {
                     if (!hasSpeech) {
                         hasSpeech = true
                         speechStartTs = now
                         _events.tryEmit(VadEvent.SpeechStart)
                     }
-                    silenceStartTs = 0L
+                    silenceStartTs = 0L // Reset silence counter
                 } else {
                     if (hasSpeech) {
                         if (silenceStartTs == 0L) {
@@ -172,9 +177,10 @@ class VadRecorder(
                             if (duration >= minSpeechDurationMs) {
                                 _events.tryEmit(VadEvent.SpeechEnd(durationMs = duration))
                             } else {
+                                // Speech was too short, treat as noise/silence
                                 _events.tryEmit(VadEvent.SilenceTimeout)
                             }
-                            break
+                            break // End the loop on speech end/timeout
                         }
                     }
                 }
@@ -183,24 +189,35 @@ class VadRecorder(
                     _audio.tryEmit(shortBuf.toPcm16Le(read))
                 }
             }
+            Log.i(TAG, "VAD recording loop finished.")
         }
     }
 
     suspend fun stop() {
         if (!isRunning) return
+        Log.i(TAG, "Stopping VAD recorder...")
         isRunning = false
 
         val j = job
         job = null
         try {
             j?.cancelAndJoin()
-        } catch (_: Throwable) {}
+        } catch (e: Exception) {
+            Log.w(TAG, "Error cancelling VAD job: ${e.message}")
+        }
 
         val rec = recorder
         recorder = null
-        try {
-            rec?.stop()
-            rec?.release()
-        } catch (_: Throwable) {}
+        scope.launch(Dispatchers.IO) {
+            try {
+                if (rec?.recordingState == AudioRecord.RECORDSTATE_RECORDING) {
+                    rec.stop()
+                }
+                rec?.release()
+                Log.i(TAG, "VAD recorder stopped and released successfully.")
+            } catch (e: Exception) {
+                Log.e(TAG, "Error stopping/releasing AudioRecord: ${e.message}")
+            }
+        }
     }
 }

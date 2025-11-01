@@ -8,23 +8,23 @@ object ControlsLogic {
         isTranscribing: Boolean,
         phase: GenerationPhase
     ): ControlsState {
-        val isProcessing = phase != GenerationPhase.IDLE
+        val isGenerating = phase != GenerationPhase.IDLE
 
-        // FIX: Allow "speak" button during generation for barge-in
-        val activityInProgress = isListening || isHearingSpeech || isTranscribing || isSpeaking
+        // Activity in progress that blocks the speak button
+        val activityInProgress = isListening || isHearingSpeech || isTranscribing
 
         val text = when {
             isHearingSpeech -> "Listening..."
             isListening -> "Listening..."
-            isSpeaking -> "Assistant Speaking..."
-            isProcessing -> "Generating... (tap to interrupt)"  // FIX: Indicate interruption is possible
+            isSpeaking -> "Assistant Speaking (tap to interrupt)"
+            isGenerating -> "Generating (speak to interrupt)"  // FIX: Indicate speak-to-interrupt
             else -> "Tap to Speak"
         }
 
         return ControlsState(
-            speakEnabled = !activityInProgress,  // FIX: Can press during generation now
-            stopEnabled = activityInProgress || isProcessing,
-            clearEnabled = !(activityInProgress || isProcessing),
+            speakEnabled = !activityInProgress,  // Can press during generation or TTS
+            stopEnabled = activityInProgress || isGenerating || isSpeaking,  // Stop always available
+            clearEnabled = !(activityInProgress || isGenerating || isSpeaking),
             speakButtonText = text
         )
     }

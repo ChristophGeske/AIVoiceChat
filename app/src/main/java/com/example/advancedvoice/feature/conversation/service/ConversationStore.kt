@@ -69,4 +69,15 @@ class ConversationStore {
     private fun publish() {
         _state.value = list.toList()
     }
+
+    fun replaceLastAssistant(sentences: List<String>) {
+        val idx = list.indexOfLast { it.isAssistant }
+        if (idx >= 0) {
+            val current = list[idx]
+            list[idx] = current.copy(sentences = sentences, streamingText = null)
+            publish()
+        } else {
+            addAssistant(sentences)
+        }
+    }
 }

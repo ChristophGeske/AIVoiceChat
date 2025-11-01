@@ -38,28 +38,27 @@ class GeminiLiveClient(
     val errors: SharedFlow<String> = _errors
 
     fun connect(apiKey: String, model: String) {
-        Log.i(TAG, "connect → model=$model")
-        close()
+        // FIX: Only connect if the socket is null or closed. Do NOT close an existing one here.
+        if (socket != null) {
+            Log.i(TAG, "connect() called but socket already exists. Ignoring.")
+            return
+        }
+        Log.i(TAG, "connect -> Creating new WebSocket for model=$model")
 
         val url = "$WS_URL?key=${apiKey.trim()}"
         socket = WebSocketProvider.newWebSocket(url, headers = emptyMap(), listener = object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
-                Log.i(TAG, "WS OPEN (code=${response.code}) → send setup")
+                Log.i(TAG, "WS OPEN (code=${response.code}) -> send setup")
                 _ready.value = false
                 val setup = GeminiLiveProtocol.setup(model)
                 webSocket.send(setup.toString())
             }
 
             override fun onMessage(webSocket: WebSocket, text: String) {
-                if (LoggerConfig.LIVE_WS_VERBOSE) {
-                    Log.d(TAG, "WS MSG: ${text.take(LoggerConfig.LIVE_JSON_PREVIEW)}")
-                }
                 handleMessage(text)
             }
 
             override fun onMessage(webSocket: WebSocket, bytes: ByteString) {
-                val preview = if (LoggerConfig.LIVE_WS_VERBOSE) bytes.utf8().take(LoggerConfig.LIVE_JSON_PREVIEW) else ""
-                if (LoggerConfig.LIVE_WS_VERBOSE) Log.d(TAG, "WS MSG(bytes): ${bytes.size} → $preview")
                 handleMessage(bytes.utf8())
             }
 
@@ -71,6 +70,7 @@ class GeminiLiveClient(
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
                 Log.i(TAG, "WS CLOSED code=$code reason=$reason")
                 _ready.value = false
+                socket = null // FIX: Nullify the socket when it's confirmed closed.
             }
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
@@ -78,6 +78,7 @@ class GeminiLiveClient(
                 response?.let { Log.e(TAG, "WS FAILURE resp=${it.code} ${it.message}") }
                 _ready.value = false
                 scope.launch { _errors.emit("WebSocket error: ${t.message ?: "unknown"}") }
+                socket = null // FIX: Nullify on failure so a new one can be created.
             }
         })
     }
@@ -85,6 +86,17 @@ class GeminiLiveClient(
     private fun handleMessage(text: String) {
         try {
             val json = JSONObject(text)
+            val serverContent = json.optJSONObject("serverContent")
+
+            // FIX: Only log if the flag is enabled OR if the message is important (not just an audio chunk)
+            if (LoggerConfig.LIVE_WS_VERBOSE || serverContent == null || !serverContent.has("modelTurn")) {
+                val hasSetup = json.has("setupComplete")
+                val hasError = json.has("error")
+                val hasTranscription = serverContent?.has("inputTranscription") == true
+                val hasTurnComplete = serverContent?.optBoolean("turnComplete") == true
+                Log.d(TAG, "[Client] Message received: setup=$hasSetup, error=$hasError, transcription=$hasTranscription, turnComplete=$hasTurnComplete")
+            }
+
             if (json.has("setupComplete")) {
                 Log.i(TAG, "setupComplete=true")
                 _ready.value = true
@@ -131,9 +143,10 @@ class GeminiLiveClient(
     }
 
     fun close() {
+        // FIX: This is the ONLY place that should request a close.
+        Log.i(TAG, "WS CLOSE requested by client.")
         try {
-            socket?.close(1000, "Client close")
-            Log.i(TAG, "WS CLOSE requested")
+            socket?.close(1000, "Client initiated close")
         } catch (_: Exception) {}
         socket = null
         _ready.value = false

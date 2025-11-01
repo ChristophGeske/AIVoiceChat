@@ -5,7 +5,6 @@ import android.util.Log
 import androidx.annotation.RequiresPermission
 import com.example.advancedvoice.core.audio.VadRecorder
 import com.example.advancedvoice.core.logging.LoggerConfig
-import com.example.advancedvoice.core.util.PerfTimer
 import com.example.advancedvoice.data.gemini_live.GeminiLiveClient
 import com.example.advancedvoice.data.gemini_live.GeminiLiveTranscriber
 import kotlinx.coroutines.CoroutineScope
@@ -26,7 +25,10 @@ class GeminiLiveSttController(
     private val model: String
 ) : SttController {
 
-    companion object { private const val TAG = "GeminiLiveService" }
+    companion object {
+        private const val TAG = "GeminiLiveService"
+        private const val MAX_SESSIONS_BEFORE_RECONNECT = 5
+    }
 
     private val _isListening = MutableStateFlow(false)
     override val isListening: StateFlow<Boolean> = _isListening
@@ -37,9 +39,9 @@ class GeminiLiveSttController(
     private val _isTranscribing = MutableStateFlow(false)
     override val isTranscribing: StateFlow<Boolean> = _isTranscribing
 
+    // FIX: Removed 'override' - this is a property specific to GeminiLiveSttController
     val partialTranscripts: SharedFlow<String> = transcriber.partialTranscripts
 
-    // FIX: The private, mutable flow that we can emit to.
     private val _transcripts = MutableSharedFlow<String>(extraBufferCapacity = 8)
     override val transcripts: SharedFlow<String> = _transcripts
 
@@ -50,16 +52,17 @@ class GeminiLiveSttController(
     private var clientErrJob: Job? = null
     private var finalTranscriptJob: Job? = null
 
-    private val connected: Boolean get() = client.ready.value
-    private var perf: PerfTimer? = null
+    @Volatile private var turnEnded = false
+    @Volatile private var sessionCount = 0
 
     init {
         connect()
     }
 
     private fun connect() {
-        Log.i(TAG, "[Controller] connect(model=$model)")
+        Log.i(TAG, "[Controller] Ensuring client is connected.")
         transcriber.connect(apiKey, model)
+
         clientErrJob?.cancel()
         clientErrJob = scope.launch {
             client.errors.collect { msg ->
@@ -67,56 +70,62 @@ class GeminiLiveSttController(
                 errors.emit(msg)
             }
         }
-        perf = PerfTimer(TAG, "live")
-        perf?.mark("ws_connect")
     }
 
     @RequiresPermission(Manifest.permission.RECORD_AUDIO)
     override suspend fun start() {
-        if (_isListening.value || _isHearingSpeech.value || _isTranscribing.value) {
-            Log.w(TAG, "[Controller] start() called but already active. Ignoring.")
-            return
+        Log.i(TAG, "[Controller] >>> START Request. Current state: listening=${isListening.value}, hearing=${isHearingSpeech.value}")
+
+        if (isListening.value || isHearingSpeech.value) {
+            Log.w(TAG, "[Controller] START called while active. Forcing full stop before restart.")
+            internalStop(transcribe = false)
+            delay(300)
         }
 
-        if (!connected) {
-            Log.w(TAG, "[Controller] Not connected. Attempting to re-connect before starting.")
-            connect()
+        if (sessionCount >= MAX_SESSIONS_BEFORE_RECONNECT || !client.ready.value) {
+            Log.w(TAG, "[Controller] Session count ($sessionCount) or disconnected state requires reconnection.")
+            releaseAndReconnect()
+            delay(1500)
         }
 
-        Log.i(TAG, "[Controller] start → waiting for setupComplete...")
+        Log.i(TAG, "[Controller] start -> waiting for setupComplete...")
         val ok = waitUntilReadyOrTimeout(5000)
         if (!ok) {
-            val m = "Gemini Live is not ready. Check API key/model/network."
-            Log.e(TAG, "[Controller] $m")
-            errors.tryEmit(m)
+            Log.e(TAG, "[Controller] Client failed to become ready.")
+            errors.tryEmit("STT service failed to connect. Please check network/API key.")
             return
         }
 
-        Log.i(TAG, "[Controller] setupComplete received; starting VAD and listening for events.")
+        Log.i(TAG, "[Controller] Setup complete. Starting VAD for session #${sessionCount + 1}")
         _isListening.value = true
         _isHearingSpeech.value = false
         _isTranscribing.value = false
+        turnEnded = false
 
-        // Start accumulating transcription for this turn
         transcriber.startAccumulating()
+
+        eventJob?.cancel()
+        audioJob?.cancel()
+        finalTranscriptJob?.cancel()
 
         eventJob = scope.launch {
             vad.events.collect { ev ->
                 when (ev) {
                     is VadRecorder.VadEvent.SpeechStart -> {
-                        Log.i(TAG, "[VAD] SpeechStart event received.")
-                        _isHearingSpeech.value = true
+                        if (!_isHearingSpeech.value) {
+                            Log.i(TAG, "[VAD] SpeechStart event received.")
+                            _isHearingSpeech.value = true
+                        }
                     }
                     is VadRecorder.VadEvent.SpeechEnd, is VadRecorder.VadEvent.SilenceTimeout -> {
-                        Log.i(TAG, "[VAD] Speech ended. Finalizing transcript immediately...")
-                        _isListening.value = false
-                        _isHearingSpeech.value = false
-                        // Don't set _isTranscribing - the transcript is emitted immediately
-
+                        if (turnEnded) {
+                            Log.w(TAG, "[VAD] Ignoring duplicate SpeechEnd event.")
+                            return@collect
+                        }
+                        turnEnded = true
+                        Log.i(TAG, "[VAD] Speech ended. Finalizing transcript.")
                         vad.stop()
-                        transcriber.endTurn()  // This emits the final transcript NOW
-
-                        Log.i(TAG, "[VAD] Final transcript emitted, waiting for LLM to start...")
+                        transcriber.endTurn()
                     }
                     is VadRecorder.VadEvent.Error -> errors.emit(ev.message)
                 }
@@ -124,15 +133,20 @@ class GeminiLiveSttController(
         }
 
         audioJob = scope.launch {
-            vad.audio.collect { frame -> client.sendPcm16Le(frame) }
+            vad.audio.collect { frame ->
+                if (isListening.value) {
+                    client.sendPcm16Le(frame)
+                }
+            }
         }
 
-        finalTranscriptJob?.cancel()
         finalTranscriptJob = scope.launch {
             transcriber.finalTranscripts.collect { final ->
-                Log.i(TAG, "[Controller] Collected final transcript (len=${final.length}). Emitting to ViewModel.")
+                Log.i(TAG, "[Controller] Collected final transcript (len=${final.length}).")
+                sessionCount++
                 _transcripts.emit(final)
-                // State will transition to GENERATING when ViewModel processes this
+                Log.i(TAG, "[Controller] Session #$sessionCount completed.")
+                internalStop(false)
             }
         }
 
@@ -141,38 +155,54 @@ class GeminiLiveSttController(
         } catch (se: SecurityException) {
             Log.e(TAG, "[Controller] Microphone permission denied on start.", se)
             errors.tryEmit("Microphone permission denied")
-            stop(transcribe = false)
+            internalStop(false)
         }
     }
 
     override suspend fun stop(transcribe: Boolean) {
-        if (!_isListening.value && !_isHearingSpeech.value && !_isTranscribing.value) return
-        Log.w(TAG, "[Controller] stop(transcribe=$transcribe) called.")
+        Log.w(TAG, "[Controller] >>> STOP Request (transcribe=$transcribe).")
+        internalStop(transcribe)
+    }
 
-        if (!transcribe) {
-            Log.w(TAG, "[Controller] HARD STOP: Disconnecting transcriber.")
-            transcriber.disconnect()
-        } else if (_isListening.value || _isHearingSpeech.value) {
-            _isListening.value = false
-            _isHearingSpeech.value = false
-            transcriber.endTurn()  // This emits immediately
+    private fun internalStop(transcribe: Boolean) {
+        Log.i(TAG, "[Controller] internalStop: Cleaning up state (transcribe=$transcribe)")
+
+        scope.launch { vad.stop() }
+
+        if (transcribe && (isListening.value || isHearingSpeech.value) && !turnEnded) {
+            Log.i(TAG, "[Controller] Transcribing on stop.")
+            turnEnded = true
+            transcriber.endTurn()
         }
 
-        vad.stop()
-        audioJob?.cancel(); audioJob = null
         eventJob?.cancel(); eventJob = null
+        audioJob?.cancel(); audioJob = null
 
         _isListening.value = false
         _isHearingSpeech.value = false
         _isTranscribing.value = false
+        turnEnded = false
+
+        Log.i(TAG, "[Controller] internalStop complete. States are now clean.")
+    }
+
+    private suspend fun releaseAndReconnect() {
+        Log.w(TAG, "[Controller] Releasing and reconnecting WebSocket...")
+        internalStop(false)
+        finalTranscriptJob?.cancel(); finalTranscriptJob = null
+        clientErrJob?.cancel(); clientErrJob = null
+        transcriber.disconnect()
+        sessionCount = 0
+        delay(500)
+        connect()
     }
 
     override fun release() {
-        Log.w(TAG, "[Controller] release() called. Full cleanup.")
-        scope.launch { stop(transcribe = false) }
-        finalTranscriptJob?.cancel(); finalTranscriptJob = null
-        clientErrJob?.cancel(); clientErrJob = null
-        perf = null
+        Log.w(TAG, "[Controller] >>> RELEASE Request. Full cleanup and disconnect.")
+        scope.launch {
+            internalStop(false)
+            releaseAndReconnect()
+        }
     }
 
     private suspend fun waitUntilReadyOrTimeout(timeoutMs: Long): Boolean {

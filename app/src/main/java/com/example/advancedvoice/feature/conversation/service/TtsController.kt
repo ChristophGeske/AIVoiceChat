@@ -18,7 +18,6 @@ class TtsController(
     private val scope: CoroutineScope
 ) : TextToSpeech.OnInitListener {
 
-    // LOG: Add a dedicated tag for TTS logs
     companion object { private const val TAG = "TtsController" }
 
     private val tts: TextToSpeech = TextToSpeech(app, this)
@@ -40,6 +39,7 @@ class TtsController(
             Log.i(TAG, "[TTS] onStart: utteranceId=$utteranceId")
             _isSpeaking.value = true
         }
+
         override fun onDone(utteranceId: String?) {
             Log.i(TAG, "[TTS] onDone: utteranceId=$utteranceId")
             scope.launch {
@@ -57,9 +57,10 @@ class TtsController(
                 }
             }
         }
+
         override fun onError(utteranceId: String?) {
             Log.e(TAG, "[TTS] onError: utteranceId=$utteranceId")
-            onDone(utteranceId) // Treat error as done to process next item
+            onDone(utteranceId)
         }
     }
 
@@ -85,7 +86,6 @@ class TtsController(
             return
         }
         queue.addLast(text)
-        // LOG: Log the queuing action
         Log.i(TAG, "[TTS] Queued ${text.length} chars. New queue size: ${queue.size}. Text: '${text.take(80)}...'")
         if (_isReady.value && !_isSpeaking.value && currentId == null) {
             Log.i(TAG, "[TTS] TTS is idle, speaking immediately.")
@@ -98,22 +98,55 @@ class TtsController(
         val next = queue.removeFirst()
         val id = UUID.randomUUID().toString()
         currentId = id
-        // LOG: Log the speak action
         Log.i(TAG, "[TTS] speakNext() called. UtteranceId=$id, Text: '${next.take(80)}...'")
         tts.speak(next, TextToSpeech.QUEUE_ADD, null, id)
     }
 
+    /**
+     * Stop current speech and clear queue.
+     * ✅ For immediate interruption (user interrupts assistant).
+     */
     fun stop() {
         Log.w(TAG, "[TTS] stop() called. Halting playback and clearing queue.")
-        try { tts.stop() } catch (_: Exception) {}
+        try {
+            tts.stop()
+        } catch (_: Exception) {}
+
         _isSpeaking.value = false
         currentId = null
         queue.clear()
     }
 
+    /**
+     * Clear only the queue but let current speech finish.
+     * ✅ For low-latency: allows current sentence to finish naturally.
+     */
+    fun clearQueue() {
+        Log.i(TAG, "[TTS] clearQueue() called. Clearing ${queue.size} pending items.")
+        queue.clear()
+        // currentId remains - current speech will finish
+    }
+
+    /**
+     * Stop current speech but keep queue.
+     * ✅ For pause functionality (if needed later).
+     */
+    fun stopCurrent() {
+        Log.i(TAG, "[TTS] stopCurrent() called. Stopping current speech only.")
+        try {
+            tts.stop()
+        } catch (_: Exception) {}
+
+        _isSpeaking.value = false
+        currentId = null
+        // queue remains - can resume with speakNext()
+    }
+
     fun shutdown() {
         Log.w(TAG, "[TTS] shutdown() called.")
         stop()
-        try { tts.shutdown() } catch (_: Exception) {}
+        try {
+            tts.shutdown()
+        } catch (_: Exception) {}
     }
 }

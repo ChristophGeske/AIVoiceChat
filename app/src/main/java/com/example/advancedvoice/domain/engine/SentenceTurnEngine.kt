@@ -91,12 +91,15 @@ class SentenceTurnEngine(
      * If the last message is not user, add a user message instead.
      */
     fun replaceLastUserMessage(newText: String) {
-        if (history.isNotEmpty() && history.last().role == "user") {
-            history[history.lastIndex] = Msg("user", newText)
-            Log.d(TAG, "History replaced last user message (len=${newText.length}) total=${history.size}")
+        // ✅ FIXED: Check last TWO entries to handle assistant responses
+        val lastUserIdx = history.indexOfLast { it.role == "user" }
+
+        if (lastUserIdx >= 0) {
+            history[lastUserIdx] = Msg("user", newText)
+            Log.d(TAG, "History replaced user message at index $lastUserIdx (len=${newText.length}) total=${history.size}")
         } else {
             history.add(Msg("user", newText))
-            Log.d(TAG, "History +user (no previous to replace) (len=${newText.length}) total=${history.size}")
+            Log.d(TAG, "History +user (no previous user found) (len=${newText.length}) total=${history.size}")
         }
     }
 

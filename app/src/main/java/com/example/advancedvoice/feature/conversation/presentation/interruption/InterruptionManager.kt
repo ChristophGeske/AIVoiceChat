@@ -13,16 +13,14 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.launch
 
-/**
- * Manages voice interruption, barge-in, and accumulation logic.
- */
 class InterruptionManager(
     private val scope: CoroutineScope,
     private val stateManager: ConversationStateManager,
     private val engine: SentenceTurnEngine,
     private val tts: TtsController,
     private val getStt: () -> SttController?,
-    private val startTurnWithExistingHistory: () -> Unit
+    private val startTurnWithExistingHistory: () -> Unit,
+    private val onInterruption: () -> Unit  // Called on interruption
 ) {
     private companion object {
         const val TAG = LoggerConfig.TAG_VM
@@ -40,23 +38,16 @@ class InterruptionManager(
         private set
 
     @Volatile private var lastRestartTime = 0L
-
     private var interruptAccumulationJob: Job? = null
 
-    /**
-     * Initialize voice interruption monitoring.
-     */
     fun initialize() {
         monitorVoiceInterrupts()
         monitorBackgroundListenerCleanup()
     }
 
-    /**
-     * Check if currently in a generation phase.
-     */
     private fun isGenerating(phase: GenerationPhase): Boolean {
         return phase == GenerationPhase.GENERATING_FIRST ||
-                phase == GenerationPhase.GENERATING_REMAINDER ||  // ✅ ADDED
+                phase == GenerationPhase.GENERATING_REMAINDER ||
                 phase == GenerationPhase.SINGLE_SHOT_GENERATING
     }
 
@@ -68,13 +59,13 @@ class InterruptionManager(
             combine(
                 stateManager.phase,
                 stateManager.isHearingSpeech,
-                stateManager.isSpeaking  // ✅ ADD TTS state
+                stateManager.isSpeaking
             ) { currentPhase, hearingSpeech, speaking ->
                 Triple(currentPhase, hearingSpeech, speaking)
             }.collect { (currentPhase, hearingSpeech, speaking) ->
                 val generating = isGenerating(currentPhase)
 
-                // ✅ FIXED: Don't start listener if TTS is speaking (prevents self-hearing)
+                // ✅ Start background listener when generation starts (but not during TTS)
                 if (generating && !stateManager.isListening.value && !speaking && !isAccumulatingAfterInterrupt) {
                     Log.i(TAG, "[VOICE-INTERRUPT] Generation started, enabling background voice detection...")
                     scope.launch {
@@ -86,7 +77,7 @@ class InterruptionManager(
                     }
                 }
 
-                // ✅ FIXED: Stop listener if TTS starts (prevents self-hearing during playback)
+                // ✅ Stop listener when TTS starts
                 if (speaking && stateManager.isListening.value && !isAccumulatingAfterInterrupt) {
                     Log.i(TAG, "[VOICE-INTERRUPT] TTS started, stopping background listener to prevent self-hearing")
                     scope.launch {
@@ -94,36 +85,26 @@ class InterruptionManager(
                     }
                 }
 
-                // Handle speech detection during generation
+                // ✅ SIMPLIFIED: Any speech during generation = user wants to add more
                 if (generating && hearingSpeech && !isBargeInTurn && !isAccumulatingAfterInterrupt) {
                     val generationDuration = System.currentTimeMillis() - generationStartTime
+                    Log.i(TAG, "[VOICE-ACCUMULATION] User speaking at ${generationDuration}ms - entering accumulation mode")
 
-                    when {
-                        // Very early speech (< 500ms) = User continuation (VAD cut them off)
-                        generationDuration < 500L -> {
-                            Log.i(TAG, "[VOICE-CONTINUATION] Speech at ${generationDuration}ms - treating as continuation of user input")
-                            handleInterruption(isContinuation = true)
-                        }
+                    // ✅ Don't notify as interruption - it's continuation
+                    isBargeInTurn = false
+                    isAccumulatingAfterInterrupt = true
 
-                        // Early speech (500-1500ms) = Likely false alarm, ignore
-                        generationDuration < 1500L -> {
-                            Log.d(TAG, "[VOICE-INTERRUPT] Speech detected at ${generationDuration}ms - ignoring as potential false alarm")
-                        }
-
-                        // Later speech (> 1500ms) = Real interruption
-                        else -> {
-                            Log.i(TAG, "[VOICE-INTERRUPT] User interrupting (after ${generationDuration}ms)! Aborting...")
-                            handleInterruption(isContinuation = false)
-                        }
+                    scope.launch {
+                        engine.abort(true)
+                        tts.stop()
                     }
+
+                    startAccumulationWatcher()
                 }
             }
         }
     }
 
-    /**
-     * Monitor for cleaning up background listener after generation.
-     */
     private fun monitorBackgroundListenerCleanup() {
         scope.launch {
             stateManager.phase.collect { currentPhase ->
@@ -149,24 +130,6 @@ class InterruptionManager(
         }
     }
 
-    /**
-     * Handle interruption or continuation.
-     */
-    private fun handleInterruption(isContinuation: Boolean) {
-        isBargeInTurn = !isContinuation
-        isAccumulatingAfterInterrupt = true
-
-        scope.launch {
-            engine.abort(true)
-            tts.stop()
-        }
-
-        startAccumulationWatcher()
-    }
-
-    /**
-     * Start smart accumulation watcher - only finalizes when user truly stopped.
-     */
     private fun startAccumulationWatcher() {
         interruptAccumulationJob?.cancel()
         interruptAccumulationJob = scope.launch {
@@ -211,9 +174,6 @@ class InterruptionManager(
         }
     }
 
-    /**
-     * Finalize accumulated input and restart generation.
-     */
     private fun finalizeAccumulation() {
         if (!isAccumulatingAfterInterrupt) {
             Log.d(TAG, "[ACCUMULATION] Already finalized, ignoring")
@@ -225,7 +185,7 @@ class InterruptionManager(
 
         Log.i(TAG, "[ACCUMULATION] Finalizing (len=${accumulatedText.length}): '${accumulatedText.take(100)}...'")
 
-        // ✅ NEW: Rate limiting to prevent restart loops
+        // ✅ Rate limiting
         val now = System.currentTimeMillis()
         val timeSinceLastRestart = now - lastRestartTime
 
@@ -244,7 +204,7 @@ class InterruptionManager(
 
         if (accumulatedText.isNotEmpty()) {
             Log.i(TAG, "[ACCUMULATION] Restarting turn with accumulated text")
-            lastRestartTime = now  // ✅ NEW: Update restart time
+            lastRestartTime = now
             engine.replaceLastUserMessage(accumulatedText)
             startTurnWithExistingHistory()
         } else {
@@ -256,10 +216,6 @@ class InterruptionManager(
         }
     }
 
-
-    /**
-     * Combine transcript with accumulated input.
-     */
     fun combineTranscript(newTranscript: String): String {
         val lastUserEntry = stateManager.conversation.value.lastOrNull { it.speaker == "You" }
         val previousInput = lastUserEntry?.sentences?.joinToString(" ")?.trim() ?: ""
@@ -275,16 +231,10 @@ class InterruptionManager(
         }
     }
 
-    /**
-     * Reset for new turn start.
-     */
     fun onTurnStart(timestamp: Long) {
         generationStartTime = timestamp
     }
 
-    /**
-     * Reset all state.
-     */
     fun reset() {
         interruptAccumulationJob?.cancel()
         isBargeInTurn = false

@@ -25,7 +25,8 @@ class ConversationFlowController(
     private val interruption: InterruptionManager,
     private val getStt: () -> SttController?,
     private val getPrefs: PrefsProvider,
-    private val onTurnComplete: () -> Unit
+    private val onTurnComplete: () -> Unit,
+    private val onInterruption: () -> Unit
 ) {
     private companion object {
         const val TAG = LoggerConfig.TAG_VM
@@ -117,6 +118,9 @@ class ConversationFlowController(
         val interruptingTts = stateManager.isSpeaking.value && !engine.isActive()
 
         Log.i(TAG, "[INTERRUPT-TAP] User tapped to interrupt. (generation=$interruptingGeneration, tts=$interruptingTts)")
+
+        // ✅ ONLY disable auto-listen on manual tap (not voice)
+        onInterruption()
 
         interruption.reset()
 

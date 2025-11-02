@@ -1,5 +1,6 @@
 package com.example.advancedvoice.feature.conversation.presentation.state
 
+import android.util.Log
 import com.example.advancedvoice.domain.entities.ConversationEntry
 import com.example.advancedvoice.feature.conversation.presentation.ControlsLogic
 import com.example.advancedvoice.feature.conversation.presentation.ControlsState
@@ -13,10 +14,13 @@ import kotlinx.coroutines.flow.*
  * Manages all UI state for the conversation feature.
  */
 class ConversationStateManager(
-    private val scope: CoroutineScope,  // ✅ ADDED
+    private val scope: CoroutineScope,
     private val store: ConversationStore,
     private val tts: TtsController
 ) {
+    // ✅ ADDED TAG for logging
+    private companion object { const val TAG = "StateManager" }
+
     // User conversation state
     val conversation: StateFlow<List<ConversationEntry>> = store.state
 
@@ -47,26 +51,38 @@ class ConversationStateManager(
     ) { speaking, listening, hearing, transcribing, p ->
         ControlsLogic.derive(speaking, listening, hearing, transcribing, p)
     }.stateIn(
-        scope,  // ✅ FIXED: Use passed scope instead of tts.scope
+        scope,
         SharingStarted.Eagerly,
         ControlsLogic.derive(false, false, false, false, GenerationPhase.IDLE)
     )
 
-    // Setters for internal use
+    // Setters for internal use with logging
     fun setListening(value: Boolean) {
-        _isListening.value = value
+        if (_isListening.value != value) {
+            Log.d(TAG, "[UI State] isListening -> $value")
+            _isListening.value = value
+        }
     }
 
     fun setHearingSpeech(value: Boolean) {
-        _isHearingSpeech.value = value
+        if (_isHearingSpeech.value != value) {
+            Log.d(TAG, "[UI State] isHearingSpeech -> $value")
+            _isHearingSpeech.value = value
+        }
     }
 
     fun setTranscribing(value: Boolean) {
-        _isTranscribing.value = value
+        if (_isTranscribing.value != value) {
+            Log.d(TAG, "[UI State] isTranscribing -> $value")
+            _isTranscribing.value = value
+        }
     }
 
     fun setPhase(value: GenerationPhase) {
-        _phase.value = value
+        if (_phase.value != value) {
+            Log.d(TAG, "[UI State] phase -> $value")
+            _phase.value = value
+        }
     }
 
     // Store delegates

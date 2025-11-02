@@ -10,35 +10,30 @@ object ControlsLogic {
     ): ControlsState {
         val isGenerating = phase != GenerationPhase.IDLE
 
-        // FIX: Determine if interruption is allowed based on specific phase
-        val interruptionAllowed = when (phase) {
-            GenerationPhase.GENERATING_FIRST,
-            GenerationPhase.SINGLE_SHOT_GENERATING -> true
-            GenerationPhase.GENERATING_REMAINDER -> false  // Block interruption during Phase 2
-            GenerationPhase.IDLE -> false
-        }
+        // Voice interruption is only allowed BEFORE the first sentence is delivered.
+        val voiceInterruptAllowed = phase == GenerationPhase.GENERATING_FIRST ||
+                phase == GenerationPhase.SINGLE_SHOT_GENERATING
 
         // Determine the primary button text
         val buttonText = when {
             isTranscribing -> "Transcribing..."
             isHearingSpeech -> "Listening..."
             isListening -> "Listening..."
+            // After TTS starts, the only way to interrupt is by tapping.
             isSpeaking -> "Speaking (Tap to Interrupt)"
-            // FIX: Only show interrupt hint if interruption is allowed
-            isGenerating && interruptionAllowed -> "Generating (Speak to Interrupt)"
-            isGenerating -> "Generating..."  // Phase 2 - no interrupt hint
+            // Show "Speak to Interrupt" only when it's actually possible.
+            isGenerating && voiceInterruptAllowed -> "Generating (Speak to Interrupt)"
+            // For phase 2 generation, no voice interrupt is allowed.
+            isGenerating && !voiceInterruptAllowed -> "Generating..."
             else -> "Tap to Speak"
         }
 
-        // The "Stop" button should be enabled if ANY background activity is happening
+        // The "Stop" button is for any background activity.
         val anythingInProgress = isSpeaking || isListening || isHearingSpeech || isGenerating || isTranscribing
 
-        // FIX: The "Speak" button logic
-        val speakEnabled = when {
-            isListening || isHearingSpeech || isTranscribing -> false // Never while actively listening/transcribing
-            isGenerating && !interruptionAllowed -> false // Block during Phase 2
-            else -> true // Allow tap to interrupt speaking or Phase 1 generation
-        }
+        // The main "Speak" button should always be enabled unless actively listening/transcribing.
+        // Tapping it while busy will act as an interruption.
+        val speakEnabled = !isListening && !isHearingSpeech && !isTranscribing
 
         return ControlsState(
             speakEnabled = speakEnabled,

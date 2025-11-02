@@ -1,6 +1,7 @@
 package com.example.advancedvoice.feature.conversation.presentation.interruption
 
 import android.util.Log
+import com.example.advancedvoice.core.audio.VadRecorder
 import com.example.advancedvoice.core.logging.LoggerConfig
 import com.example.advancedvoice.domain.engine.SentenceTurnEngine
 import com.example.advancedvoice.feature.conversation.presentation.GenerationPhase
@@ -20,12 +21,13 @@ class InterruptionManager(
     private val tts: TtsController,
     private val getStt: () -> SttController?,
     private val startTurnWithExistingHistory: () -> Unit,
-    private val onInterruption: () -> Unit  // Called on interruption
+    private val onInterruption: () -> Unit
 ) {
     private companion object {
         const val TAG = LoggerConfig.TAG_VM
-        const val INTERRUPT_ACCUMULATION_TIMEOUT = 10000L
+        const val INTERRUPT_ACCUMULATION_TIMEOUT = 30000L
         const val MIN_RESTART_INTERVAL_MS = 2000L
+        const val MIN_GENERATION_TIME_BEFORE_INTERRUPT_MS = 2000L  // ✅ NEW: Don't interrupt too early
     }
 
     @Volatile var isBargeInTurn = false
@@ -39,6 +41,7 @@ class InterruptionManager(
 
     @Volatile private var lastRestartTime = 0L
     private var interruptAccumulationJob: Job? = null
+    private var backgroundRecorder: VadRecorder? = null
 
     fun initialize() {
         monitorVoiceInterrupts()
@@ -51,9 +54,6 @@ class InterruptionManager(
                 phase == GenerationPhase.SINGLE_SHOT_GENERATING
     }
 
-    /**
-     * Monitor for voice interruptions during generation.
-     */
     private fun monitorVoiceInterrupts() {
         scope.launch {
             combine(
@@ -65,38 +65,85 @@ class InterruptionManager(
             }.collect { (currentPhase, hearingSpeech, speaking) ->
                 val generating = isGenerating(currentPhase)
 
-                // ✅ Start background listener when generation starts (but not during TTS)
-                if (generating && !stateManager.isListening.value && !speaking && !isAccumulatingAfterInterrupt) {
-                    Log.i(TAG, "[VOICE-INTERRUPT] Generation started, enabling background voice detection...")
+                // ✅ FIX: Stop listener IMMEDIATELY when TTS starts (synchronously)
+                if (speaking && backgroundRecorder != null && !isAccumulatingAfterInterrupt) {
+                    Log.i(TAG, "[VOICE-INTERRUPT] TTS started, stopping background listener IMMEDIATELY")
+                    disableBackgroundListener()
+                }
+
+                // ✅ FIX: Only enable VAD after a delay to avoid race with TTS
+                if (generating && backgroundRecorder == null && !speaking && !isAccumulatingAfterInterrupt) {
+                    Log.i(TAG, "[VOICE-INTERRUPT] Generation started, scheduling background VAD...")
                     scope.launch {
-                        try {
-                            getStt()?.start(isAutoListen = true)
-                        } catch (se: SecurityException) {
-                            Log.w(TAG, "[VOICE-INTERRUPT] Mic permission denied")
+                        delay(800L) // ✅ Increased from 500ms to 800ms
+
+                        // Double-check conditions
+                        if (isGenerating(stateManager.phase.value) &&
+                            !stateManager.isSpeaking.value &&
+                            backgroundRecorder == null &&
+                            !isAccumulatingAfterInterrupt) {
+                            Log.i(TAG, "[VOICE-INTERRUPT] Enabling background voice detection (after delay)")
+                            enableBackgroundListener()
+                        } else {
+                            Log.d(TAG, "[VOICE-INTERRUPT] Cancelled VAD enable (TTS started or conditions changed)")
                         }
                     }
                 }
 
-                // ✅ Stop listener when TTS starts
-                if (speaking && stateManager.isListening.value && !isAccumulatingAfterInterrupt) {
-                    Log.i(TAG, "[VOICE-INTERRUPT] TTS started, stopping background listener to prevent self-hearing")
-                    scope.launch {
-                        getStt()?.stop(false)
-                    }
-                }
-
-                // ✅ SIMPLIFIED: Any speech during generation = user wants to add more
+                // ✅ FIX: Add minimum time before allowing interruption
                 if (generating && hearingSpeech && !isBargeInTurn && !isAccumulatingAfterInterrupt) {
                     val generationDuration = System.currentTimeMillis() - generationStartTime
+
+                    // ✅ Ignore voice detected too early (likely echo/noise)
+                    if (generationDuration < MIN_GENERATION_TIME_BEFORE_INTERRUPT_MS) {
+                        Log.d(TAG, "[VOICE-INTERRUPT] Ignoring voice at ${generationDuration}ms (too early, likely noise)")
+                        return@collect
+                    }
+
                     Log.i(TAG, "[VOICE-ACCUMULATION] User speaking at ${generationDuration}ms - entering accumulation mode")
 
-                    // ✅ Don't notify as interruption - it's continuation
                     isBargeInTurn = false
                     isAccumulatingAfterInterrupt = true
 
                     scope.launch {
+                        // Stop generation and TTS
                         engine.abort(true)
                         tts.stop()
+
+                        // Disable background VAD (we'll use real STT now)
+                        disableBackgroundListener()
+
+                        // ✅ Stop any existing STT session first
+                        Log.i(TAG, "[VOICE-INTERRUPT] Stopping any existing STT session...")
+                        try {
+                            getStt()?.stop(false)
+                            delay(300L) // ✅ Wait for cleanup
+                        } catch (e: Exception) {
+                            Log.e(TAG, "[VOICE-INTERRUPT] Error stopping STT: ${e.message}")
+                        }
+
+                        // ✅ START REAL STT TO CAPTURE TRANSCRIPT
+                        Log.i(TAG, "[VOICE-INTERRUPT] Starting fresh STT to capture user input...")
+                        try {
+                            getStt()?.start(isAutoListen = false)
+
+                            // ✅ NEW: Verify STT actually started
+                            delay(500L)
+                            val sttState = stateManager.isListening.value || stateManager.isHearingSpeech.value
+                            if (!sttState && isAccumulatingAfterInterrupt) {
+                                Log.e(TAG, "[VOICE-INTERRUPT] STT failed to start! Aborting accumulation.")
+                                isAccumulatingAfterInterrupt = false
+                                stateManager.removeLastUserPlaceholderIfEmpty()
+                                stateManager.addError("Could not start speech recognition")
+                                return@launch
+                            }
+                        } catch (e: Exception) {
+                            Log.e(TAG, "[VOICE-INTERRUPT] Error starting STT: ${e.message}")
+                            isAccumulatingAfterInterrupt = false
+                            stateManager.removeLastUserPlaceholderIfEmpty()
+                            stateManager.addError("Could not start speech recognition")
+                            return@launch
+                        }
                     }
 
                     startAccumulationWatcher()
@@ -105,11 +152,78 @@ class InterruptionManager(
         }
     }
 
+    /**
+     * Enable background voice detection (VAD only - no transcription).
+     */
+    private suspend fun enableBackgroundListener() {
+        if (backgroundRecorder != null) {
+            Log.d(TAG, "[VOICE-INTERRUPT] Background listener already active")
+            return
+        }
+
+        Log.i(TAG, "[VOICE-INTERRUPT] Enabling background voice detection (infinite timeout)")
+
+        val recorder = VadRecorder(
+            scope = scope,
+            sampleRate = 16_000,
+            silenceThresholdRms = 300.0,
+            endOfSpeechMs = 300L,
+            maxSilenceMs = null,
+            minSpeechDurationMs = 300L,
+            startupGracePeriodMs = 300L
+        )
+
+        backgroundRecorder = recorder
+
+        // Collect VAD events
+        scope.launch {
+            recorder.events.collect { event ->
+                when (event) {
+                    is VadRecorder.VadEvent.SpeechStart -> {
+                        val elapsed = System.currentTimeMillis() - generationStartTime
+                        Log.i(TAG, "[VOICE-INTERRUPT] Voice detected at ${elapsed}ms")
+                        stateManager.setHearingSpeech(true)
+                    }
+                    is VadRecorder.VadEvent.SpeechEnd -> {
+                        Log.i(TAG, "[VOICE-INTERRUPT] Voice ended (${event.durationMs}ms)")
+                        stateManager.setHearingSpeech(false)
+                    }
+                    is VadRecorder.VadEvent.SilenceTimeout -> {
+                        Log.d(TAG, "[VOICE-INTERRUPT] Unexpected silence timeout")
+                        disableBackgroundListener()
+                    }
+                    is VadRecorder.VadEvent.Error -> {
+                        Log.e(TAG, "[VOICE-INTERRUPT] VAD error: ${event.message}")
+                        disableBackgroundListener()
+                    }
+                }
+            }
+        }
+
+        // Start recording with permission handling
+        try {
+            recorder.start()
+        } catch (se: SecurityException) {
+            Log.w(TAG, "[VOICE-INTERRUPT] Permission denied: ${se.message}")
+            backgroundRecorder = null
+        }
+    }
+
+    private fun disableBackgroundListener() {
+        val recorder = backgroundRecorder ?: return
+        backgroundRecorder = null
+
+        Log.d(TAG, "[VOICE-INTERRUPT] Disabling background listener")
+        scope.launch {
+            recorder.stop()
+        }
+    }
+
     private fun monitorBackgroundListenerCleanup() {
         scope.launch {
             stateManager.phase.collect { currentPhase ->
                 if (currentPhase == GenerationPhase.IDLE &&
-                    (stateManager.isListening.value || stateManager.isHearingSpeech.value) &&
+                    backgroundRecorder != null &&
                     !isBargeInTurn &&
                     !isAccumulatingAfterInterrupt) {
 
@@ -118,11 +232,11 @@ class InterruptionManager(
                     if (stateManager.phase.value == GenerationPhase.IDLE &&
                         !isBargeInTurn &&
                         !isAccumulatingAfterInterrupt &&
-                        (stateManager.isListening.value || stateManager.isHearingSpeech.value)) {
+                        backgroundRecorder != null) {
 
                         Log.d(TAG, "[VOICE-INTERRUPT] Generation ended, stopping background listener")
                         scope.launch {
-                            getStt()?.stop(false)
+                            disableBackgroundListener()
                         }
                     }
                 }
@@ -133,40 +247,60 @@ class InterruptionManager(
     private fun startAccumulationWatcher() {
         interruptAccumulationJob?.cancel()
         interruptAccumulationJob = scope.launch {
-            Log.i(TAG, "[ACCUMULATION] Starting smart watcher (max ${INTERRUPT_ACCUMULATION_TIMEOUT}ms)")
+            Log.i(TAG, "[ACCUMULATION] Starting watcher (max ${INTERRUPT_ACCUMULATION_TIMEOUT}ms)")
 
             val startTime = System.currentTimeMillis()
             var lastCheck = startTime
+            var consecutiveNotBusyCount = 0
 
             while (isAccumulatingAfterInterrupt) {
                 delay(500L)
 
                 val elapsed = System.currentTimeMillis() - startTime
-                val isBusy = stateManager.isListening.value ||
-                        stateManager.isHearingSpeech.value ||
-                        stateManager.isTranscribing.value
+
+                // ✅ NEW: Get fresh state values
+                val listening = stateManager.isListening.value
+                val hearing = stateManager.isHearingSpeech.value
+                val transcribing = stateManager.isTranscribing.value
+                val isBusy = listening || hearing || transcribing
 
                 if (System.currentTimeMillis() - lastCheck >= 2000L) {
-                    Log.d(TAG, "[ACCUMULATION] Watcher: elapsed=${elapsed}ms, listening=${stateManager.isListening.value}, hearing=${stateManager.isHearingSpeech.value}, transcribing=${stateManager.isTranscribing.value}")
+                    Log.d(TAG, "[ACCUMULATION] elapsed=${elapsed}ms, listening=$listening, hearing=$hearing, transcribing=$transcribing, busy=$isBusy")
                     lastCheck = System.currentTimeMillis()
                 }
 
                 if (!isBusy) {
-                    delay(500L)
+                    consecutiveNotBusyCount++
 
-                    if (!stateManager.isListening.value &&
-                        !stateManager.isHearingSpeech.value &&
-                        !stateManager.isTranscribing.value &&
-                        isAccumulatingAfterInterrupt) {
-
-                        Log.i(TAG, "[ACCUMULATION] User stopped (after ${elapsed}ms), finalizing input")
+                    // ✅ If not busy for 3 consecutive checks (1.5s), finalize
+                    if (consecutiveNotBusyCount >= 3) {
+                        Log.i(TAG, "[ACCUMULATION] User stopped (${elapsed}ms), finalizing")
                         finalizeAccumulation()
                         break
                     }
+                } else {
+                    consecutiveNotBusyCount = 0
                 }
 
+                // ✅ Emergency timeout
                 if (elapsed > INTERRUPT_ACCUMULATION_TIMEOUT) {
-                    Log.w(TAG, "[ACCUMULATION] Timeout reached (${elapsed}ms), force finalizing")
+                    Log.w(TAG, "[ACCUMULATION] Timeout (${elapsed}ms), force finalizing")
+
+                    // Force stop STT
+                    scope.launch {
+                        try {
+                            Log.w(TAG, "[ACCUMULATION] Force stopping STT...")
+                            getStt()?.stop(false)
+                            delay(200L)
+                            // ✅ Force reset states
+                            stateManager.setListening(false)
+                            stateManager.setHearingSpeech(false)
+                            stateManager.setTranscribing(false)
+                        } catch (e: Exception) {
+                            Log.e(TAG, "[ACCUMULATION] Error force-stopping STT: ${e.message}")
+                        }
+                    }
+
                     finalizeAccumulation()
                     break
                 }
@@ -176,21 +310,21 @@ class InterruptionManager(
 
     private fun finalizeAccumulation() {
         if (!isAccumulatingAfterInterrupt) {
-            Log.d(TAG, "[ACCUMULATION] Already finalized, ignoring")
+            Log.d(TAG, "[ACCUMULATION] Already finalized")
             return
         }
 
+        // ✅ Get the LATEST user entry (which should have the combined text)
         val lastUserEntry = stateManager.conversation.value.lastOrNull { it.speaker == "You" }
         val accumulatedText = lastUserEntry?.sentences?.joinToString(" ")?.trim() ?: ""
 
         Log.i(TAG, "[ACCUMULATION] Finalizing (len=${accumulatedText.length}): '${accumulatedText.take(100)}...'")
 
-        // ✅ Rate limiting
         val now = System.currentTimeMillis()
         val timeSinceLastRestart = now - lastRestartTime
 
         if (timeSinceLastRestart < MIN_RESTART_INTERVAL_MS) {
-            Log.w(TAG, "[ACCUMULATION] Restart too soon (${timeSinceLastRestart}ms), delaying...")
+            Log.w(TAG, "[ACCUMULATION] Too soon, delaying...")
             scope.launch {
                 delay(MIN_RESTART_INTERVAL_MS - timeSinceLastRestart)
                 finalizeAccumulation()
@@ -202,6 +336,17 @@ class InterruptionManager(
         isBargeInTurn = false
         interruptAccumulationJob?.cancel()
 
+        scope.launch {
+            disableBackgroundListener()
+            // ✅ Stop STT after capturing
+            getStt()?.stop(false)
+            delay(200L)
+            // ✅ Force reset states
+            stateManager.setListening(false)
+            stateManager.setHearingSpeech(false)
+            stateManager.setTranscribing(false)
+        }
+
         if (accumulatedText.isNotEmpty()) {
             Log.i(TAG, "[ACCUMULATION] Restarting turn with accumulated text")
             lastRestartTime = now
@@ -210,9 +355,6 @@ class InterruptionManager(
         } else {
             Log.w(TAG, "[ACCUMULATION] No text accumulated, cleaning up")
             stateManager.removeLastUserPlaceholderIfEmpty()
-            scope.launch {
-                getStt()?.stop(false)
-            }
         }
     }
 
@@ -239,5 +381,13 @@ class InterruptionManager(
         interruptAccumulationJob?.cancel()
         isBargeInTurn = false
         isAccumulatingAfterInterrupt = false
+
+        scope.launch {
+            disableBackgroundListener()
+            // ✅ Force reset states
+            stateManager.setListening(false)
+            stateManager.setHearingSpeech(false)
+            stateManager.setTranscribing(false)
+        }
     }
 }

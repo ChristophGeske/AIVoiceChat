@@ -18,15 +18,13 @@ import com.example.advancedvoice.feature.conversation.service.ConversationStore
 import com.example.advancedvoice.feature.conversation.service.TtsController
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.filter
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import okhttp3.OkHttpClient
 
-/**
- * Main ViewModel for the conversation feature.
- * Coordinates between state management, STT, interruption handling, and conversation flow.
- */
 class ConversationViewModel(app: Application) : AndroidViewModel(app) {
 
     companion object {
@@ -40,20 +38,13 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
     private val http: OkHttpClient = HttpClientProvider.client
     private val appCtx = app.applicationContext
 
-    // Components
     private val store = ConversationStore()
     private val tts = TtsController(app, viewModelScope)
-    private val stateManager = ConversationStateManager(
-        scope = viewModelScope,
-        store = store,
-        tts = tts
-    )
+    private val stateManager = ConversationStateManager(scope = viewModelScope, store = store, tts = tts)
     private val perfTimerHolder = EngineCallbacksFactory.PerfTimerHolder()
 
-    // Track if auto-listen should trigger after TTS stops
     @Volatile private var shouldAutoListenAfterTts = false
 
-    // Engine
     private val engine: SentenceTurnEngine = SentenceTurnEngine(
         uiScope = viewModelScope,
         http = http,
@@ -63,7 +54,7 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
         callbacks = EngineCallbacksFactory.create(stateManager, tts, perfTimerHolder)
     )
 
-    // Managers (lazy initialization to break circular dependencies)
+    // ✅ REVERTED: Back to a single, unified STT Manager.
     private val sttManager: SttManager by lazy {
         SttManager(
             app = app,
@@ -81,10 +72,7 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
             tts = tts,
             getStt = { sttManager.getStt() },
             startTurnWithExistingHistory = { flowController.startTurnWithExistingHistory() },
-            onInterruption = {
-                // ✅ NEW: Disable auto-listen when user interrupts
-                disableAutoListenAfterTts()
-            }
+            onInterruption = { disableAutoListenAfterTts() }
         )
     }
 
@@ -102,11 +90,10 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
                 override fun getAutoListen() = Prefs.getAutoListen(appCtx)
             },
             onTurnComplete = { enableAutoListenAfterTts() },
-            onInterruption = { disableAutoListenAfterTts() }
+            onTapToSpeak = { disableAutoListenAfterTts() }
         )
     }
 
-    // Public API
     val conversation: StateFlow<List<ConversationEntry>> = stateManager.conversation
     val isSpeaking: StateFlow<Boolean> = stateManager.isSpeaking
     val isListening: StateFlow<Boolean> = stateManager.isListening
@@ -120,19 +107,22 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
         interruption.initialize()
         applyEngineSettings()
         setupAutoListen()
+        logButtonStateChanges()
     }
 
-    /**
-     * Enable auto-listen after next TTS completion.
-     */
+    private fun logButtonStateChanges() {
+        viewModelScope.launch {
+            controls.map { it.speakButtonText }.distinctUntilChanged().collect { buttonText ->
+                Log.i(TAG, "[UI BUTTON] Text -> \"$buttonText\"")
+            }
+        }
+    }
+
     private fun enableAutoListenAfterTts() {
         shouldAutoListenAfterTts = true
         Log.d(TAG, "[AUTO-LISTEN] Auto-listen enabled for next TTS completion")
     }
 
-    /**
-     * Disable auto-listen.
-     */
     private fun disableAutoListenAfterTts() {
         if (shouldAutoListenAfterTts) {
             Log.w(TAG, "[AUTO-LISTEN] Auto-listen DISABLED (user action or interruption)")
@@ -140,51 +130,31 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
         shouldAutoListenAfterTts = false
     }
 
-    /**
-     * Setup auto-listen after TTS stops.
-     */
     private fun setupAutoListen() {
         viewModelScope.launch {
-            tts.isSpeaking
-                .drop(1)
-                .filter { !it }
-                .collect {
-                    // ✅ Check if auto-listen was intentionally enabled
-                    if (!shouldAutoListenAfterTts) {
-                        Log.d(TAG, "[AUTO-LISTEN] TTS stopped but auto-listen disabled (manual stop or replay)")
-                        return@collect
-                    }
-
-                    val autoListenEnabled = Prefs.getAutoListen(appCtx)
-                    if (!autoListenEnabled) {
-                        Log.d(TAG, "[AUTO-LISTEN] Feature disabled in settings.")
-                        shouldAutoListenAfterTts = false
-                        return@collect
-                    }
-
-                    if (phase.value == GenerationPhase.IDLE && !isListening.value) {
-                        delay(750L)
-
-                        if (!isSpeaking.value && !isListening.value && phase.value == GenerationPhase.IDLE && shouldAutoListenAfterTts) {
-                            Log.i(TAG, "[AUTO-LISTEN] Conditions met. Starting auto-listening.")
-                            shouldAutoListenAfterTts = false
-                            flowController.startAutoListening()
-                        } else {
-                            Log.w(TAG, "[AUTO-LISTEN] Conditions changed, aborting.")
-                            shouldAutoListenAfterTts = false
-                        }
-                    } else {
-                        Log.d(TAG, "[AUTO-LISTEN] Skipped: phase=${phase.value}, isListening=${isListening.value}")
-                        shouldAutoListenAfterTts = false
+            tts.isSpeaking.drop(1).filter { !it }.collect {
+                if (!shouldAutoListenAfterTts) {
+                    return@collect
+                }
+                val autoListenEnabledInSettings = Prefs.getAutoListen(appCtx)
+                if (!autoListenEnabledInSettings) {
+                    shouldAutoListenAfterTts = false
+                    return@collect
+                }
+                if (phase.value == GenerationPhase.IDLE && !isListening.value) {
+                    delay(500L)
+                    if (!isSpeaking.value && !isListening.value && phase.value == GenerationPhase.IDLE && shouldAutoListenAfterTts) {
+                        flowController.startAutoListening()
                     }
                 }
+                shouldAutoListenAfterTts = false
+            }
         }
     }
 
     private fun applyEngineSettings() {
         val fasterFirst = Prefs.getFasterFirst(appCtx)
         val maxSentences = Prefs.getMaxSentences(appCtx)
-        Log.i(TAG, "[ViewModel] Applying engine settings: fasterFirst=$fasterFirst, maxSentences=$maxSentences")
         engine.setFasterFirst(fasterFirst)
         engine.setMaxSentences(maxSentences)
     }
@@ -195,27 +165,24 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
         return if (extensions.isBlank()) base else "$base\n\n$extensions"
     }
 
-    // Public API methods
     fun setupSttSystemFromPreferences() {
-        Log.i(TAG, "[ViewModel] setupSttSystemFromPreferences() called")
         sttManager.setupFromPreferences()
+        applyEngineSettings()
     }
 
     fun startListening() {
-        Log.i(TAG, "[ViewModel] startListening() called from UI")
         flowController.startListening()
     }
 
     fun stopAll() {
-        Log.w(TAG, "[ViewModel] stopAll() called from UI - disabling auto-listen")
         disableAutoListenAfterTts()
         viewModelScope.launch {
             flowController.stopAll()
+            interruption.reset() // ✅ Changed from stopTemporaryListener()
         }
     }
 
     fun clearConversation() {
-        Log.w(TAG, "[ViewModel] clearConversation() called from UI")
         disableAutoListenAfterTts()
         flowController.clearConversation()
     }
@@ -223,20 +190,16 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
     fun replayMessage(index: Int) {
         val entry = conversation.value.getOrNull(index)
         if (entry != null && entry.isAssistant) {
-            val text = entry.sentences.joinToString(" ")
-            Log.i(TAG, "[ViewModel] Replaying assistant message (index=$index, len=${text.length}) - disabling auto-listen")
             disableAutoListenAfterTts()
-            tts.queue(text)
-        } else {
-            Log.w(TAG, "[ViewModel] replayMessage($index) - not an assistant message or invalid index")
+            tts.queue(entry.sentences.joinToString(" "))
         }
     }
 
     override fun onCleared() {
         super.onCleared()
-        Log.w(TAG, "[ViewModel] onCleared() - ViewModel is being destroyed.")
         flowController.cleanup()
         sttManager.release()
+        interruption.reset() // ✅ Changed from stopTemporaryListener()
         tts.shutdown()
     }
 }

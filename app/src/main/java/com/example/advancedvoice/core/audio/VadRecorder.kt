@@ -20,13 +20,13 @@ class VadRecorder(
     private val scope: CoroutineScope,
     private val sampleRate: Int = 16_000,
     private val silenceThresholdRms: Double = 250.0,
-    // FIX: Two separate timeouts for better responsiveness
-    private val endOfSpeechMs: Long = 1500L,   // Shorter timeout to end the turn quickly
-    private val maxSilenceMs: Long = 5000L,     // Longer timeout for mid-speech pauses
-    private val minSpeechDurationMs: Long = 400L,
+    private val endOfSpeechMs: Long = 1500L,
+    private val maxSilenceMs: Long? = null,    // ✅ Nullable - null = infinite listening
+    private val minSpeechDurationMs: Long = 300L,
     private val channelConfig: Int = AudioFormat.CHANNEL_IN_MONO,
     private val encoding: Int = AudioFormat.ENCODING_PCM_16BIT,
-    private val frameMillis: Int = 20
+    private val frameMillis: Int = 20,
+    private val startupGracePeriodMs: Long = 300L  // ✅ NEW: Grace period parameter
 ) {
     companion object {
         private const val TAG = "VadRecorder"
@@ -110,7 +110,9 @@ class VadRecorder(
 
         recorder = rec
         isRunning = true
-        Log.i(TAG, "VAD recorder started successfully.")
+
+        val timeoutMsg = if (maxSilenceMs == null) "INFINITE" else "${maxSilenceMs}ms"
+        Log.i(TAG, "[VAD] Recorder started. Timeout: $timeoutMsg, EndOfSpeech: ${endOfSpeechMs}ms, Grace: ${startupGracePeriodMs}ms")
 
         job = scope.launch(Dispatchers.IO) {
             val frameSamples = (sampleRate / 1000) * frameMillis
@@ -118,6 +120,9 @@ class VadRecorder(
             var hasSpeech = false
             var speechStartTs = 0L
             var silenceStartTs = 0L
+
+            // ✅ Track start time to ignore initial audio (grace period)
+            val recordingStartTime = System.currentTimeMillis()
 
             while (isActive && isRunning) {
                 val read = rec.read(shortBuf, 0, shortBuf.size)
@@ -130,55 +135,85 @@ class VadRecorder(
                 val isLoud = rms >= silenceThresholdRms
                 val now = System.currentTimeMillis()
 
+                // ✅ Ignore speech during grace period (prevents detecting TTS/existing audio)
+                val inGracePeriod = (now - recordingStartTime) < startupGracePeriodMs
+                if (inGracePeriod && isLoud) {
+                    Log.d(TAG, "[VAD] Ignoring loud audio during grace period (${now - recordingStartTime}ms, RMS: $rms)")
+                    continue
+                }
+
                 if (isLoud) {
                     if (!hasSpeech) {
                         hasSpeech = true
                         speechStartTs = now
+                        Log.i(TAG, "[VAD] Speech detected! RMS: $rms")
                         _events.tryEmit(VadEvent.SpeechStart)
                     }
                     silenceStartTs = 0L
                 } else {
+                    // Silence detected
                     if (hasSpeech) {
+                        // User was speaking, now silent
                         if (silenceStartTs == 0L) {
                             silenceStartTs = now
                         }
 
                         val silenceDuration = now - silenceStartTs
+
+                        // End of current utterance (short timeout)
                         if (silenceDuration > endOfSpeechMs) {
                             val duration = now - speechStartTs
                             if (duration >= minSpeechDurationMs) {
+                                Log.i(TAG, "[VAD] Speech ended (duration=${duration}ms, silence=${silenceDuration}ms)")
                                 _events.tryEmit(VadEvent.SpeechEnd(durationMs = duration))
                             } else {
-                                _events.tryEmit(VadEvent.SilenceTimeout)
+                                Log.d(TAG, "[VAD] Speech too short (${duration}ms), treating as noise")
                             }
-                            break
+
+                            // ✅ Reset state but continue listening if no max timeout
+                            if (maxSilenceMs == null) {
+                                Log.d(TAG, "[VAD] Resetting for next utterance (infinite mode)")
+                                hasSpeech = false
+                                speechStartTs = 0L
+                                silenceStartTs = 0L
+                                continue
+                            } else {
+                                // With timeout, exit after first utterance
+                                break
+                            }
                         }
                     } else {
-                        // ✅ NEW: Handle max silence when NO speech was ever detected
-                        if (silenceStartTs == 0L) {
-                            silenceStartTs = now
-                        }
+                        // ✅ Handle max silence when NO speech detected yet
+                        // Only apply timeout if maxSilenceMs is set
+                        if (maxSilenceMs != null) {
+                            if (silenceStartTs == 0L) {
+                                silenceStartTs = now
+                            }
 
-                        val totalSilence = now - silenceStartTs
-                        if (totalSilence > maxSilenceMs) {
-                            Log.i(TAG, "[VAD] Max silence reached with no speech detected")
-                            _events.tryEmit(VadEvent.SilenceTimeout)
-                            break
+                            val totalSilence = now - silenceStartTs
+                            if (totalSilence > maxSilenceMs) {
+                                Log.i(TAG, "[VAD] Max silence timeout (${totalSilence}ms) - no speech detected")
+                                _events.tryEmit(VadEvent.SilenceTimeout)
+                                break
+                            }
                         }
+                        // If maxSilenceMs is null, just keep listening forever
                     }
                 }
 
+                // Always emit audio when we have speech
                 if (hasSpeech) {
                     _audio.tryEmit(shortBuf.toPcm16Le(read))
                 }
             }
-            Log.i(TAG, "VAD recording loop finished.")
+
+            Log.i(TAG, "[VAD] Recording loop finished. hasSpeech=$hasSpeech")
         }
     }
 
     suspend fun stop() {
         if (!isRunning) return
-        Log.i(TAG, "Stopping VAD recorder...")
+        Log.i(TAG, "[VAD] Stopping recorder...")
         isRunning = false
 
         job?.cancelAndJoin()
@@ -192,7 +227,7 @@ class VadRecorder(
                     rec.stop()
                 }
                 rec?.release()
-                Log.i(TAG, "VAD recorder stopped and released successfully.")
+                Log.i(TAG, "[VAD] Recorder stopped and released.")
             } catch (e: Exception) {
                 Log.e(TAG, "Error stopping/releasing AudioRecord: ${e.message}")
             }

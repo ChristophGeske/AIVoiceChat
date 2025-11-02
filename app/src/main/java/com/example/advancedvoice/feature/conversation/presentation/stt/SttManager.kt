@@ -13,119 +13,81 @@ import com.example.advancedvoice.feature.conversation.service.GeminiLiveSttContr
 import com.example.advancedvoice.feature.conversation.service.StandardSttController
 import com.example.advancedvoice.feature.conversation.service.SttController
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 
-/**
- * Manages STT (Speech-to-Text) setup and transcript handling.
- */
 class SttManager(
     private val app: Application,
     private val scope: CoroutineScope,
     private val stateManager: ConversationStateManager,
     private val onFinalTranscript: (String) -> Unit
+
 ) {
-    private companion object {
-        const val TAG = LoggerConfig.TAG_VM
-    }
+    private companion object { const val TAG = LoggerConfig.TAG_VM }
 
     private var stt: SttController? = null
+    private var collectorJobs = mutableListOf<Job>()
 
     fun getStt(): SttController? = stt
 
-    /**
-     * Setup STT system from preferences.
-     */
     fun setupFromPreferences() {
         val sttPref = Prefs.getSttSystem(app)
         val geminiKey = Prefs.getGeminiKey(app)
-        Log.i(TAG, "[ViewModel] setupSttSystemFromPreferences: stt=$sttPref, hasGeminiKey=${geminiKey.isNotBlank()}")
-
         val shouldUseGeminiLive = sttPref == SttSystem.GEMINI_LIVE && geminiKey.isNotBlank()
         val currentlyUsingGeminiLive = stt is GeminiLiveSttController
 
         if (stt != null && currentlyUsingGeminiLive == shouldUseGeminiLive) {
-            Log.d(TAG, "[ViewModel] STT system is already correctly configured.")
             return
         }
-
-        Log.i(TAG, "[ViewModel] Need to reconfigure STT. Current: ${stt?.javaClass?.simpleName ?: "null"}, want GeminiLive=$shouldUseGeminiLive")
+        Log.i(TAG, "[STT Manager] Reconfiguring STT. Want GeminiLive=$shouldUseGeminiLive")
 
         stt?.release()
-
         stt = if (shouldUseGeminiLive) {
             createGeminiLiveStt(geminiKey)
         } else {
-            Log.i(TAG, "[ViewModel] Creating and wiring StandardSttController.")
             StandardSttController(app, scope)
         }
-
-        Log.i(TAG, "[ViewModel] STT configured: ${stt?.javaClass?.simpleName}")
-
+        Log.i(TAG, "[STT Manager] Configured with ${stt?.javaClass?.simpleName}")
         rewireCollectors()
     }
 
-    /**
-     * Create Gemini Live STT controller.
-     */
     private fun createGeminiLiveStt(geminiKey: String): GeminiLiveSttController {
-        Log.i(TAG, "[ViewModel] Creating and wiring GeminiLiveSttController.")
-
         val liveModel = "models/gemini-2.5-flash-native-audio-preview-09-2025"
         val listenSeconds = Prefs.getListenSeconds(app)
-        val maxSilenceMs = (listenSeconds * 1000L).coerceIn(3000L, 30000L)
+        val maxSilenceMs = (listenSeconds * 1000L).coerceIn(2000L, 30000L)
 
-        val vad = VadRecorder(
-            scope = scope,
-            endOfSpeechMs = 1000L,
-            maxSilenceMs = maxSilenceMs
-        )
-
+        val vad = VadRecorder(scope = scope, maxSilenceMs = maxSilenceMs)
         val client = GeminiLiveClient(scope = scope)
         val transcriber = GeminiLiveTranscriber(scope = scope, client = client)
 
         return GeminiLiveSttController(scope, vad, client, transcriber, geminiKey, liveModel)
     }
 
-    /**
-     * Rewire STT collectors to ViewModel.
-     */
     private fun rewireCollectors() {
+        collectorJobs.forEach { it.cancel() }
+        collectorJobs.clear()
         val current = stt ?: return
-        Log.d(TAG, "[ViewModel] Rewiring STT collectors for ${current.javaClass.simpleName}")
 
-        scope.launch {
+        collectorJobs.add(scope.launch {
             current.transcripts.collectLatest { onFinalTranscript(it) }
-        }
+        })
 
         if (current is GeminiLiveSttController) {
-            scope.launch {
+            collectorJobs.add(scope.launch {
                 current.partialTranscripts.collectLatest { partialText ->
+                    // ✅ REMOVED: onPartialTranscript(partialText) call
                     stateManager.updateLastUserStreamingText(partialText)
                 }
-            }
+            })
         }
 
-        scope.launch {
-            current.errors.collectLatest { stateManager.addError(it) }
-        }
-
-        scope.launch {
-            current.isListening.collectLatest { stateManager.setListening(it) }
-        }
-
-        scope.launch {
-            current.isHearingSpeech.collectLatest { stateManager.setHearingSpeech(it) }
-        }
-
-        scope.launch {
-            current.isTranscribing.collectLatest { stateManager.setTranscribing(it) }
-        }
+        collectorJobs.add(scope.launch { current.errors.collectLatest { stateManager.addError(it) } })
+        collectorJobs.add(scope.launch { current.isListening.collectLatest { stateManager.setListening(it) } })
+        collectorJobs.add(scope.launch { current.isHearingSpeech.collectLatest { stateManager.setHearingSpeech(it) } })
+        collectorJobs.add(scope.launch { current.isTranscribing.collectLatest { stateManager.setTranscribing(it) } })
     }
 
-    /**
-     * Release STT resources.
-     */
     fun release() {
         stt?.release()
     }

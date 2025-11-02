@@ -11,7 +11,6 @@ import com.example.advancedvoice.feature.conversation.service.SttController
 import com.example.advancedvoice.feature.conversation.service.TtsController
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 /**
@@ -25,268 +24,126 @@ class ConversationFlowController(
     private val interruption: InterruptionManager,
     private val getStt: () -> SttController?,
     private val getPrefs: PrefsProvider,
-    private val onTurnComplete: () -> Unit,
-    private val onInterruption: () -> Unit
+    private val onTurnComplete: () -> Unit, // Callback to enable auto-listen
+    private val onTapToSpeak: () -> Unit      // Callback to disable auto-listen
 ) {
     private companion object {
         const val TAG = LoggerConfig.TAG_VM
-        const val TRANSCRIPT_DEBOUNCE_MS = 600L
     }
 
-    private val pendingTranscript = StringBuilder()
-    private var debounceJob: Job? = null
     var perfTimerHolder: PerfTimer? = null
-
-    // ✅ NEW: Track if current session is auto-listen
     @Volatile private var isCurrentSessionAutoListen = false
 
-    /**
-     * Start listening session (manual - user pressed button).
-     */
     fun startListening() {
         Log.i(TAG, "[ViewModel] startListening() called. isGenerating=${engine.isActive()}, isTalking=${stateManager.isSpeaking.value}")
-
-        // ✅ Mark as manual listen
         isCurrentSessionAutoListen = false
+        onTapToSpeak() // Signal a manual tap, which disables auto-listen
 
-        when {
-            engine.isActive() || stateManager.isSpeaking.value -> handleTapInterruption()
-            else -> startNormalListening()
+        // If user taps while system is busy, it's an interruption.
+        if (engine.isActive() || stateManager.isSpeaking.value) {
+            handleTapInterruption()
+        } else {
+            startListeningSession(isAutoListen = false)
         }
     }
 
-    /**
-     * Start auto-listen session (automatic after TTS finishes).
-     */
     fun startAutoListening() {
         Log.i(TAG, "[AUTO-LISTEN] startAutoListening() called.")
-
-        // ✅ Mark as auto-listen
         isCurrentSessionAutoListen = true
+        startListeningSession(isAutoListen = true)
+    }
 
+    private fun startListeningSession(isAutoListen: Boolean) {
         if (stateManager.isListening.value || stateManager.isHearingSpeech.value) {
-            Log.w(TAG, "[AUTO-LISTEN] Already listening, ignoring.")
+            Log.w(TAG, "[ViewModel] Already listening, ignoring startListeningSession call.")
             return
         }
 
+        Log.i(TAG, "[ViewModel] Starting a listening session (autoListen=$isAutoListen).")
         interruption.reset()
         stateManager.addUserStreamingPlaceholder()
 
         scope.launch {
             try {
-                getStt()?.start(isAutoListen = true)
+                getStt()?.start(isAutoListen)
             } catch (se: SecurityException) {
-                Log.w(TAG, "[AUTO-LISTEN] Mic permission denied")
-                stateManager.addError("Microphone permission denied")
-            }
-        }
-    }
-
-    /**
-     * Start normal listening session.
-     */
-    private fun startNormalListening() {
-        if (stateManager.isListening.value || stateManager.isHearingSpeech.value) {
-            Log.w(TAG, "[ViewModel] Already listening, ignoring startNormalListening call.")
-            return
-        }
-
-        Log.i(TAG, "[ViewModel] Starting a normal listening session (autoListen=$isCurrentSessionAutoListen).")
-
-        if (!interruption.isBargeInTurn && !interruption.isAccumulatingAfterInterrupt) {
-            stateManager.addUserStreamingPlaceholder()
-        }
-
-        scope.launch {
-            try {
-                getStt()?.start(isAutoListen = isCurrentSessionAutoListen)
-            } catch (se: SecurityException) {
-                Log.e(TAG, "[ViewModel] SecurityException caught", se)
-                stateManager.addError("Microphone permission denied")
+                Log.e(TAG, "[ViewModel] SecurityException for STT", se)
+                stateManager.addError("Microphone permission denied.")
             } catch (e: Exception) {
-                Log.e(TAG, "[ViewModel] Unexpected exception in start()", e)
+                Log.e(TAG, "[ViewModel] Unexpected exception in STT start()", e)
                 stateManager.addError("STT error: ${e.message}")
             }
         }
     }
 
-    /**
-     * Handle tap interruption during generation or TTS.
-     */
     private fun handleTapInterruption() {
-        val interruptingGeneration = engine.isActive()
-        val interruptingTts = stateManager.isSpeaking.value && !engine.isActive()
-
-        Log.i(TAG, "[INTERRUPT-TAP] User tapped to interrupt. (generation=$interruptingGeneration, tts=$interruptingTts)")
-
-        // ✅ ONLY disable auto-listen on manual tap (not voice)
-        onInterruption()
-
+        Log.i(TAG, "[INTERRUPT-TAP] User tapped to interrupt. Stopping all and starting new session.")
         interruption.reset()
-
         scope.launch {
             stopAll()
-            startNormalListening()
+            startListeningSession(isAutoListen = false)
         }
     }
 
-    /**
-     * Stop all activities.
-     */
     suspend fun stopAll() {
         Log.w(TAG, "[ViewModel] stopAll() called - HARD STOP initiated.")
         engine.abort(true)
         tts.stop()
         getStt()?.stop(false)
         stateManager.setPhase(GenerationPhase.IDLE)
+        interruption.reset()
         Log.w(TAG, "[ViewModel] stopAll() complete. System is now idle.")
     }
 
-    /**
-     * Handle final transcript from STT.
-     */
     fun onFinalTranscript(text: String) {
         val input = text.trim()
+        Log.i(TAG, "[STT RESULT] Raw transcript received: '$input'")
 
-        // Empty transcript handling
         if (input.isEmpty()) {
             handleEmptyTranscript()
             return
         }
 
-        Log.i(TAG, "[ViewModel] Final Transcript='${input.take(120)}'")
-
-        // During accumulation (interruption mode)
-        if (interruption.isAccumulatingAfterInterrupt) {
+        if (interruption.isAccumulatingAfterInterrupt) { // ✅ FIXED: was isAccumulating
             handleAccumulationTranscript(input)
-            return
+        } else {
+            handleNormalTranscript(input)
         }
-
-        // Old barge-in logic (backward compatibility)
-        if (interruption.isBargeInTurn) {
-            handleBargeInTranscript(input)
-            return
-        }
-
-        // Normal transcript flow
-        handleNormalTranscript(input)
     }
 
-    /**
-     * Handle empty transcript.
-     */
     private fun handleEmptyTranscript() {
         Log.w(TAG, "[ViewModel] onFinalTranscript received empty text.")
 
-        if (interruption.isAccumulatingAfterInterrupt) {
-            Log.i(TAG, "[ACCUMULATION] Empty transcript during accumulation - waiting for real input")
+        if (interruption.isAccumulatingAfterInterrupt) { // ✅ Fixed property name
+            Log.i(TAG, "[ACCUMULATION] Empty transcript during accumulation - watcher will handle it.")
             return
         }
 
-        if (interruption.isBargeInTurn) {
-            Log.i(TAG, "[VOICE-INTERRUPT] Empty after abort - false alarm, ignoring")
-            interruption.reset()
+        // If it was a normal listening session (not auto) that resulted in nothing,
+        // just clean up the placeholder. The user might have tapped by mistake.
+        if (!isCurrentSessionAutoListen) {
             stateManager.removeLastUserPlaceholderIfEmpty()
-            return
         }
-
-        val stillGenerating = engine.isActive()
-        if (stillGenerating) {
-            Log.i(TAG, "[VOICE-INTERRUPT] Empty transcript during generation - likely TTS self-hearing, ignoring")
+        // If it was an auto-listen session, it's expected to get empty transcripts if the user doesn't speak.
+        // The STT controller should handle this silently. We just clean up the UI.
+        else {
             stateManager.removeLastUserPlaceholderIfEmpty()
-            return
         }
-
-        // ✅ IMPROVED: Use explicit flag instead of heuristics
-        if (isCurrentSessionAutoListen) {
-            // Auto-listen false alarm - silent cleanup
-            Log.i(TAG, "[AUTO-LISTEN] Empty transcript - likely background noise, ignoring silently")
-            stateManager.removeLastUserPlaceholderIfEmpty()
-        } else {
-            // Manual listening failed - show error
-            Log.w(TAG, "[ViewModel] Empty transcript during manual listening - transcription failed")
-            stateManager.removeLastUserPlaceholderIfEmpty()
-            stateManager.addError("Could not transcribe audio. Please try again.")
-        }
-
-        // ✅ Reset flag after handling
-        isCurrentSessionAutoListen = false
     }
 
-    /**
-     * Handle transcript during accumulation.
-     */
     private fun handleAccumulationTranscript(input: String) {
-        Log.i(TAG, "[ACCUMULATION] Received transcript (len=${input.length})")
-
-        debounceJob?.cancel()
-
-        val combinedInput = interruption.combineTranscript(input)
-
-        Log.i(TAG, "[ACCUMULATION] Combined: total(${combinedInput.length})")
-        Log.i(TAG, "[ACCUMULATION] Text: '${combinedInput.take(150)}...'")
-
+        val combinedInput = interruption.combineTranscript(input) // ✅ Fixed method name
+        Log.i(TAG, "[ACCUMULATION] Transcript added. Combined text is now: '$combinedInput'")
         stateManager.replaceLastUser(combinedInput)
-
-        Log.d(TAG, "[ACCUMULATION] Waiting for user to finish speaking...")
     }
 
-    /**
-     * Handle transcript after barge-in.
-     */
-    private fun handleBargeInTranscript(input: String) {
-        Log.i(TAG, "[VOICE-INTERRUPT] Real transcript after abort! Combining...")
-
-        scope.launch {
-            delay(150L)
-
-            debounceJob?.cancel()
-            pendingTranscript.clear()
-
-            interruption.reset()
-
-            val combinedInput = interruption.combineTranscript(input)
-            Log.i(TAG, "[ViewModel] Combined interruption input (len=${combinedInput.length}): '${combinedInput.take(100)}...'")
-
-            stateManager.replaceLastUser(combinedInput)
-            engine.replaceLastUserMessage(combinedInput)
-            startTurnWithExistingHistory()
-        }
-    }
-
-    /**
-     * Handle normal transcript (no interruption).
-     */
     private fun handleNormalTranscript(input: String) {
-        val hasPendingText = pendingTranscript.isNotEmpty()
-
-        if (hasPendingText) {
-            pendingTranscript.append(" ").append(input)
-            Log.i(TAG, "[DEBOUNCE] Appending fragment. Combined: ${pendingTranscript.length} chars")
-        } else {
-            pendingTranscript.append(input)
-            Log.i(TAG, "[DEBOUNCE] Starting accumulation")
-        }
-
-        stateManager.replaceLastUser(pendingTranscript.toString())
-
-        debounceJob?.cancel()
-        debounceJob = scope.launch {
-            delay(TRANSCRIPT_DEBOUNCE_MS)
-
-            val finalText = pendingTranscript.toString().trim()
-            pendingTranscript.clear()
-
-            if (finalText.isNotEmpty()) {
-                Log.i(TAG, "[DEBOUNCE] Sending transcript (len=${finalText.length})")
-                startTurn(finalText)
-            }
-        }
+        // No more debounce. Send the transcript immediately.
+        Log.i(TAG, "[IMMEDIATE-SEND] Sending transcript (len=${input.length})")
+        stateManager.replaceLastUser(input)
+        startTurn(input)
     }
 
-    /**
-     * Start a new turn with user text.
-     */
     private fun startTurn(userText: String) {
         stateManager.setPhase(
             if (getPrefs.getFasterFirst()) GenerationPhase.GENERATING_FIRST
@@ -295,62 +152,38 @@ class ConversationFlowController(
 
         val model = getPrefs.getSelectedModel()
         Log.i(TAG, "[ViewModel] startTurn(model=$model) inputLen=${userText.length}")
-
         perfTimerHolder = PerfTimer(TAG, "llm").also { it.mark("llm_start") }
-        interruption.onTurnStart(System.currentTimeMillis())
 
-        // ✅ Enable auto-listen for this turn
-        onTurnComplete()
-
+        onTurnComplete() // Signal that this turn is eligible for auto-listen upon completion
         engine.startTurn(userText, model)
     }
 
-    /**
-     * Start turn with existing history (after interruption).
-     */
     fun startTurnWithExistingHistory() {
         stateManager.setPhase(
             if (getPrefs.getFasterFirst()) GenerationPhase.GENERATING_FIRST
             else GenerationPhase.SINGLE_SHOT_GENERATING
         )
-
         val model = getPrefs.getSelectedModel()
         Log.i(TAG, "[ViewModel] startTurnWithExistingHistory(model=$model)")
-
         perfTimerHolder = PerfTimer(TAG, "llm").also { it.mark("llm_start") }
-        interruption.onTurnStart(System.currentTimeMillis())
 
-        // ✅ Enable auto-listen for this turn
-        onTurnComplete()
-
+        onTurnComplete() // Also eligible for auto-listen
         engine.startTurnWithCurrentHistory(model)
     }
 
-    /**
-     * Clear conversation.
-     */
     fun clearConversation() {
-        debounceJob?.cancel()
-        pendingTranscript.clear()
         interruption.reset()
         engine.abort(true)
-        stateManager.clear()
         tts.stop()
+        stateManager.clear()
         stateManager.setPhase(GenerationPhase.IDLE)
         scope.launch { getStt()?.stop(false) }
     }
 
-    /**
-     * Clean up resources.
-     */
     fun cleanup() {
-        debounceJob?.cancel()
         interruption.reset()
     }
 
-    /**
-     * Interface for accessing preferences.
-     */
     interface PrefsProvider {
         fun getFasterFirst(): Boolean
         fun getSelectedModel(): String

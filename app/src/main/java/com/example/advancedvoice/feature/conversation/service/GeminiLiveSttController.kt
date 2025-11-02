@@ -119,11 +119,8 @@ class GeminiLiveSttController(
                             _isTranscribing.value = true
                             vad.stop()
 
-                            // Wait briefly for final transcription chunks
-                            scope.launch {
-                                delay(800L)
-                                transcriber.endTurn()
-                            }
+                            // ✅ FIXED: Removed artificial delay. Transcribe immediately.
+                            transcriber.endTurn()
                         }
                         is VadRecorder.VadEvent.Error -> errors.emit(ev.message)
                     }

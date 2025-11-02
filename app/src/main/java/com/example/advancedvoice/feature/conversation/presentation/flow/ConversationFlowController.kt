@@ -24,7 +24,8 @@ class ConversationFlowController(
     private val tts: TtsController,
     private val interruption: InterruptionManager,
     private val getStt: () -> SttController?,
-    private val getPrefs: PrefsProvider
+    private val getPrefs: PrefsProvider,
+    private val onTurnComplete: () -> Unit
 ) {
     private companion object {
         const val TAG = LoggerConfig.TAG_VM
@@ -294,6 +295,9 @@ class ConversationFlowController(
         perfTimerHolder = PerfTimer(TAG, "llm").also { it.mark("llm_start") }
         interruption.onTurnStart(System.currentTimeMillis())
 
+        // ✅ Enable auto-listen for this turn
+        onTurnComplete()
+
         engine.startTurn(userText, model)
     }
 
@@ -311,6 +315,9 @@ class ConversationFlowController(
 
         perfTimerHolder = PerfTimer(TAG, "llm").also { it.mark("llm_start") }
         interruption.onTurnStart(System.currentTimeMillis())
+
+        // ✅ Enable auto-listen for this turn
+        onTurnComplete()
 
         engine.startTurnWithCurrentHistory(model)
     }

@@ -6,6 +6,7 @@ import android.media.AudioRecord
 import android.media.MediaRecorder
 import android.util.Log
 import androidx.annotation.RequiresPermission
+import com.example.advancedvoice.core.audio.toPcm16Le
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -21,12 +22,13 @@ class VadRecorder(
     private val sampleRate: Int = 16_000,
     private val silenceThresholdRms: Double = 250.0,
     private val endOfSpeechMs: Long = 1500L,
-    private val maxSilenceMs: Long? = null,    // ✅ Nullable - null = infinite listening
+    private val maxSilenceMs: Long? = null,
     private val minSpeechDurationMs: Long = 300L,
     private val channelConfig: Int = AudioFormat.CHANNEL_IN_MONO,
     private val encoding: Int = AudioFormat.ENCODING_PCM_16BIT,
     private val frameMillis: Int = 20,
-    private val startupGracePeriodMs: Long = 300L  // ✅ NEW: Grace period parameter
+    private val startupGracePeriodMs: Long = 100L,
+    val allowMultipleUtterances: Boolean = false
 ) {
     companion object {
         private const val TAG = "VadRecorder"
@@ -45,10 +47,13 @@ class VadRecorder(
     private val _audio = MutableSharedFlow<ByteArray>(extraBufferCapacity = 64)
     val audio: SharedFlow<ByteArray> = _audio
 
-    @Volatile private var recorder: AudioRecord? = null
-    @Volatile private var job: Job? = null
+    @Volatile
+    private var recorder: AudioRecord? = null
+    @Volatile
+    private var job: Job? = null
 
-    @Volatile var isRunning: Boolean = false
+    @Volatile
+    var isRunning: Boolean = false
         private set
 
     @RequiresPermission(Manifest.permission.RECORD_AUDIO)
@@ -64,8 +69,8 @@ class VadRecorder(
             return
         }
 
-        val bytesPerSample = 2 // For ENCODING_PCM_16BIT
-        val channels = 1 // For CHANNEL_IN_MONO
+        val bytesPerSample = 2
+        val channels = 1
         val frameSizeBytes = (sampleRate / 1000) * frameMillis * bytesPerSample * channels
 
         fun alignUp(value: Int, alignment: Int): Int {
@@ -112,7 +117,7 @@ class VadRecorder(
         isRunning = true
 
         val timeoutMsg = if (maxSilenceMs == null) "INFINITE" else "${maxSilenceMs}ms"
-        Log.i(TAG, "[VAD] Recorder started. Timeout: $timeoutMsg, EndOfSpeech: ${endOfSpeechMs}ms, Grace: ${startupGracePeriodMs}ms")
+        Log.i(TAG, "[VAD] Recorder started. Timeout: $timeoutMsg, EndOfSpeech: ${endOfSpeechMs}ms, Grace: ${startupGracePeriodMs}ms, Multi-Utterance: $allowMultipleUtterances")
 
         job = scope.launch(Dispatchers.IO) {
             val frameSamples = (sampleRate / 1000) * frameMillis
@@ -120,8 +125,6 @@ class VadRecorder(
             var hasSpeech = false
             var speechStartTs = 0L
             var silenceStartTs = 0L
-
-            // ✅ Track start time to ignore initial audio (grace period)
             val recordingStartTime = System.currentTimeMillis()
 
             while (isActive && isRunning) {
@@ -134,8 +137,6 @@ class VadRecorder(
                 val rms = AudioRms.calculateRms(shortBuf, read)
                 val isLoud = rms >= silenceThresholdRms
                 val now = System.currentTimeMillis()
-
-                // ✅ Ignore speech during grace period (prevents detecting TTS/existing audio)
                 val inGracePeriod = (now - recordingStartTime) < startupGracePeriodMs
                 if (inGracePeriod && isLoud) {
                     Log.d(TAG, "[VAD] Ignoring loud audio during grace period (${now - recordingStartTime}ms, RMS: $rms)")
@@ -150,17 +151,14 @@ class VadRecorder(
                         _events.tryEmit(VadEvent.SpeechStart)
                     }
                     silenceStartTs = 0L
-                } else {
-                    // Silence detected
+                } else { // Silence detected
                     if (hasSpeech) {
-                        // User was speaking, now silent
                         if (silenceStartTs == 0L) {
                             silenceStartTs = now
                         }
 
                         val silenceDuration = now - silenceStartTs
 
-                        // End of current utterance (short timeout)
                         if (silenceDuration > endOfSpeechMs) {
                             val duration = now - speechStartTs
                             if (duration >= minSpeechDurationMs) {
@@ -170,21 +168,19 @@ class VadRecorder(
                                 Log.d(TAG, "[VAD] Speech too short (${duration}ms), treating as noise")
                             }
 
-                            // ✅ Reset state but continue listening if no max timeout
-                            if (maxSilenceMs == null) {
-                                Log.d(TAG, "[VAD] Resetting for next utterance (infinite mode)")
+                            // ✅ FIX: This logic was flawed. Now it correctly breaks or continues.
+                            if (allowMultipleUtterances) {
+                                Log.d(TAG, "[VAD] Resetting for next utterance.")
                                 hasSpeech = false
                                 speechStartTs = 0L
                                 silenceStartTs = 0L
-                                continue
+                                // No 'continue' needed, loop will just proceed.
                             } else {
-                                // With timeout, exit after first utterance
+                                // In single-utterance mode, we are done. Break the loop.
                                 break
                             }
                         }
-                    } else {
-                        // ✅ Handle max silence when NO speech detected yet
-                        // Only apply timeout if maxSilenceMs is set
+                    } else { // No speech detected yet
                         if (maxSilenceMs != null) {
                             if (silenceStartTs == 0L) {
                                 silenceStartTs = now
@@ -197,11 +193,9 @@ class VadRecorder(
                                 break
                             }
                         }
-                        // If maxSilenceMs is null, just keep listening forever
                     }
                 }
 
-                // Always emit audio when we have speech
                 if (hasSpeech) {
                     _audio.tryEmit(shortBuf.toPcm16Le(read))
                 }

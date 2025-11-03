@@ -13,9 +13,6 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 
-/**
- * Controls the conversation flow: listening, transcription, and turn management.
- */
 class ConversationFlowController(
     private val scope: CoroutineScope,
     private val stateManager: ConversationStateManager,
@@ -24,8 +21,8 @@ class ConversationFlowController(
     private val interruption: InterruptionManager,
     private val getStt: () -> SttController?,
     private val getPrefs: PrefsProvider,
-    private val onTurnComplete: () -> Unit, // Callback to enable auto-listen
-    private val onTapToSpeak: () -> Unit      // Callback to disable auto-listen
+    private val onTurnComplete: () -> Unit,
+    private val onTapToSpeak: () -> Unit
 ) {
     private companion object {
         const val TAG = LoggerConfig.TAG_VM
@@ -37,9 +34,11 @@ class ConversationFlowController(
     fun startListening() {
         Log.i(TAG, "[ViewModel] startListening() called. isGenerating=${engine.isActive()}, isTalking=${stateManager.isSpeaking.value}")
         isCurrentSessionAutoListen = false
-        onTapToSpeak() // Signal a manual tap, which disables auto-listen
+        onTapToSpeak()
 
-        // If user taps while system is busy, it's an interruption.
+        // ✅ NEW: Clear the hard-stop flag whenever the user initiates an action.
+        stateManager.setHardStop(false)
+
         if (engine.isActive() || stateManager.isSpeaking.value) {
             handleTapInterruption()
         } else {
@@ -48,29 +47,34 @@ class ConversationFlowController(
     }
 
     fun startAutoListening() {
-        Log.i(TAG, "[AUTO-LISTEN] startAutoListening() called.")
+        Log.i(TAG, "[AUTO-LISTEN] 🎙️ startAutoListening() called. Current state: listening=${stateManager.isListening.value}, speaking=${stateManager.isSpeaking.value}, phase=${stateManager.phase.value}")
         isCurrentSessionAutoListen = true
+
+        // ✅ NEW: Also clear the hard-stop flag for auto-listen.
+        stateManager.setHardStop(false)
         startListeningSession(isAutoListen = true)
     }
 
     private fun startListeningSession(isAutoListen: Boolean) {
         if (stateManager.isListening.value || stateManager.isHearingSpeech.value) {
-            Log.w(TAG, "[ViewModel] Already listening, ignoring startListeningSession call.")
+            Log.w(TAG, "[LISTEN-SESSION] ⚠️ Already listening, ignoring startListeningSession call.")
             return
         }
 
-        Log.i(TAG, "[ViewModel] Starting a listening session (autoListen=$isAutoListen).")
+        Log.i(TAG, "[LISTEN-SESSION] 🎤 Starting listening session (autoListen=$isAutoListen).")
         interruption.reset()
         stateManager.addUserStreamingPlaceholder()
 
         scope.launch {
             try {
+                Log.d(TAG, "[LISTEN-SESSION] Calling STT start()...")
                 getStt()?.start(isAutoListen)
+                Log.d(TAG, "[LISTEN-SESSION] STT start() returned")
             } catch (se: SecurityException) {
-                Log.e(TAG, "[ViewModel] SecurityException for STT", se)
+                Log.e(TAG, "[LISTEN-SESSION] ❌ SecurityException for STT", se)
                 stateManager.addError("Microphone permission denied.")
             } catch (e: Exception) {
-                Log.e(TAG, "[ViewModel] Unexpected exception in STT start()", e)
+                Log.e(TAG, "[LISTEN-SESSION] ❌ Unexpected exception in STT start()", e)
                 stateManager.addError("STT error: ${e.message}")
             }
         }
@@ -87,8 +91,11 @@ class ConversationFlowController(
 
     suspend fun stopAll() {
         Log.w(TAG, "[ViewModel] stopAll() called - HARD STOP initiated.")
+        // ✅ NEW: Set the hard-stop flag to prevent TTS race conditions.
+        stateManager.setHardStop(true)
+
         engine.abort(true)
-        tts.stop()
+        tts.stop() // This is now reinforced by the hard-stop flag.
         getStt()?.stop(false)
         stateManager.setPhase(GenerationPhase.IDLE)
         interruption.reset()
@@ -104,7 +111,7 @@ class ConversationFlowController(
             return
         }
 
-        if (interruption.isAccumulatingAfterInterrupt) { // ✅ FIXED: was isAccumulating
+        if (interruption.isAccumulatingAfterInterrupt) {
             handleAccumulationTranscript(input)
         } else {
             handleNormalTranscript(input)
@@ -114,37 +121,34 @@ class ConversationFlowController(
     private fun handleEmptyTranscript() {
         Log.w(TAG, "[ViewModel] onFinalTranscript received empty text.")
 
-        if (interruption.isAccumulatingAfterInterrupt) { // ✅ Fixed property name
+        if (interruption.isAccumulatingAfterInterrupt) {
             Log.i(TAG, "[ACCUMULATION] Empty transcript during accumulation - watcher will handle it.")
             return
         }
 
-        // If it was a normal listening session (not auto) that resulted in nothing,
-        // just clean up the placeholder. The user might have tapped by mistake.
         if (!isCurrentSessionAutoListen) {
             stateManager.removeLastUserPlaceholderIfEmpty()
-        }
-        // If it was an auto-listen session, it's expected to get empty transcripts if the user doesn't speak.
-        // The STT controller should handle this silently. We just clean up the UI.
-        else {
+        } else {
             stateManager.removeLastUserPlaceholderIfEmpty()
         }
     }
 
     private fun handleAccumulationTranscript(input: String) {
-        val combinedInput = interruption.combineTranscript(input) // ✅ Fixed method name
+        val combinedInput = interruption.combineTranscript(input)
         Log.i(TAG, "[ACCUMULATION] Transcript added. Combined text is now: '$combinedInput'")
         stateManager.replaceLastUser(combinedInput)
     }
 
     private fun handleNormalTranscript(input: String) {
-        // No more debounce. Send the transcript immediately.
         Log.i(TAG, "[IMMEDIATE-SEND] Sending transcript (len=${input.length})")
         stateManager.replaceLastUser(input)
         startTurn(input)
     }
 
     private fun startTurn(userText: String) {
+        // ✅ NEW: Clear the hard-stop flag when starting a new turn.
+        stateManager.setHardStop(false)
+
         stateManager.setPhase(
             if (getPrefs.getFasterFirst()) GenerationPhase.GENERATING_FIRST
             else GenerationPhase.SINGLE_SHOT_GENERATING
@@ -154,11 +158,14 @@ class ConversationFlowController(
         Log.i(TAG, "[ViewModel] startTurn(model=$model) inputLen=${userText.length}")
         perfTimerHolder = PerfTimer(TAG, "llm").also { it.mark("llm_start") }
 
-        onTurnComplete() // Signal that this turn is eligible for auto-listen upon completion
+        onTurnComplete()
         engine.startTurn(userText, model)
     }
 
     fun startTurnWithExistingHistory() {
+        // ✅ NEW: Clear the hard-stop flag when restarting a turn.
+        stateManager.setHardStop(false)
+
         stateManager.setPhase(
             if (getPrefs.getFasterFirst()) GenerationPhase.GENERATING_FIRST
             else GenerationPhase.SINGLE_SHOT_GENERATING
@@ -167,7 +174,7 @@ class ConversationFlowController(
         Log.i(TAG, "[ViewModel] startTurnWithExistingHistory(model=$model)")
         perfTimerHolder = PerfTimer(TAG, "llm").also { it.mark("llm_start") }
 
-        onTurnComplete() // Also eligible for auto-listen
+        onTurnComplete()
         engine.startTurnWithCurrentHistory(model)
     }
 

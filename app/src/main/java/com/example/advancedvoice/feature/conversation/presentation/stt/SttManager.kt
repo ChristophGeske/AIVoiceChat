@@ -54,14 +54,25 @@ class SttManager(
 
     private fun createGeminiLiveStt(geminiKey: String): GeminiLiveSttController {
         val liveModel = "models/gemini-2.5-flash-native-audio-preview-09-2025"
-        val listenSeconds = Prefs.getListenSeconds(app)
-        val maxSilenceMs = (listenSeconds * 1000L).coerceIn(2000L, 30000L)
 
-        val vad = VadRecorder(scope = scope, maxSilenceMs = maxSilenceMs)
+        // The user's setting now ONLY controls the initial silence timeout.
+        val listenSeconds = Prefs.getListenSeconds(app)
+        val initialSilenceTimeoutMs = (listenSeconds * 1000L).coerceIn(2000L, 30000L)
+
+        // ✅ 5. MODIFY the VadRecorder creation.
+        val vad = VadRecorder(
+            scope = scope,
+            // This is the "initial silence" timeout, controlled by the user's setting.
+            maxSilenceMs = initialSilenceTimeoutMs,
+            // This is now a fixed, short timer to detect the end of a single phrase.
+            endOfSpeechMs = 1500L,
+            // We disable multi-utterance in the VAD because the controller now handles this logic.
+            allowMultipleUtterances = false
+        )
         val client = GeminiLiveClient(scope = scope)
         val transcriber = GeminiLiveTranscriber(scope = scope, client = client)
 
-        return GeminiLiveSttController(scope, vad, client, transcriber, geminiKey, liveModel)
+        return GeminiLiveSttController(scope, app, vad, client, transcriber, geminiKey, liveModel)
     }
 
     private fun rewireCollectors() {
@@ -76,7 +87,6 @@ class SttManager(
         if (current is GeminiLiveSttController) {
             collectorJobs.add(scope.launch {
                 current.partialTranscripts.collectLatest { partialText ->
-                    // ✅ REMOVED: onPartialTranscript(partialText) call
                     stateManager.updateLastUserStreamingText(partialText)
                 }
             })

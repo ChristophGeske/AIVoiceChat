@@ -29,6 +29,9 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
 
     companion object {
         private const val TAG = LoggerConfig.TAG_VM
+        private const val TAG_AUTO_LISTEN = "AutoListen"
+        private const val TAG_INIT = "VM_Init"
+
         private const val DEFAULT_SYSTEM_PROMPT = """
             You are a helpful assistant. Answer the user's request in clear, complete sentences.
             Do not use JSON or code fences unless explicitly requested.
@@ -54,7 +57,6 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
         callbacks = EngineCallbacksFactory.create(stateManager, tts, perfTimerHolder)
     )
 
-    // ✅ REVERTED: Back to a single, unified STT Manager.
     private val sttManager: SttManager by lazy {
         SttManager(
             app = app,
@@ -108,6 +110,21 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
         applyEngineSettings()
         setupAutoListen()
         logButtonStateChanges()
+        logInitialConfiguration()
+    }
+
+    private fun logInitialConfiguration() {
+        viewModelScope.launch {
+            Log.i(TAG_INIT, "═══════════════════════════════════════")
+            Log.i(TAG_INIT, "Conversation ViewModel Initialized")
+            Log.i(TAG_INIT, "STT Type: ${sttManager.getStt()?.javaClass?.simpleName ?: "null"}")
+            Log.i(TAG_INIT, "Selected Model: ${Prefs.getSelectedModel(appCtx)}")
+            Log.i(TAG_INIT, "Faster First: ${Prefs.getFasterFirst(appCtx)}")
+            Log.i(TAG_INIT, "Auto-Listen: ${Prefs.getAutoListen(appCtx)}")
+            Log.i(TAG_INIT, "Max Sentences: ${Prefs.getMaxSentences(appCtx)}")
+            Log.i(TAG_INIT, "System Prompt Length: ${getEffectiveSystemPrompt().length}")
+            Log.i(TAG_INIT, "═══════════════════════════════════════")
+        }
     }
 
     private fun logButtonStateChanges() {
@@ -120,12 +137,12 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
 
     private fun enableAutoListenAfterTts() {
         shouldAutoListenAfterTts = true
-        Log.d(TAG, "[AUTO-LISTEN] Auto-listen enabled for next TTS completion")
+        Log.i(TAG_AUTO_LISTEN, "✅ Flag ENABLED for next TTS completion (TTS state: ${isSpeaking.value})")
     }
 
     private fun disableAutoListenAfterTts() {
         if (shouldAutoListenAfterTts) {
-            Log.w(TAG, "[AUTO-LISTEN] Auto-listen DISABLED (user action or interruption)")
+            Log.w(TAG_AUTO_LISTEN, "❌ Flag DISABLED (was enabled)")
         }
         shouldAutoListenAfterTts = false
     }
@@ -133,21 +150,60 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
     private fun setupAutoListen() {
         viewModelScope.launch {
             tts.isSpeaking.drop(1).filter { !it }.collect {
+                val autoListenFlag = shouldAutoListenAfterTts
+                val settingEnabled = Prefs.getAutoListen(appCtx)
+                val currentPhase = phase.value
+                val listening = isListening.value
+                val speaking = isSpeaking.value
+
+                Log.i(TAG_AUTO_LISTEN, "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+                Log.i(TAG_AUTO_LISTEN, "TTS STOPPED - Auto-Listen Check")
+                Log.i(TAG_AUTO_LISTEN, "  Flag: $autoListenFlag")
+                Log.i(TAG_AUTO_LISTEN, "  Setting: $settingEnabled")
+                Log.i(TAG_AUTO_LISTEN, "  Phase: $currentPhase")
+                Log.i(TAG_AUTO_LISTEN, "  Listening: $listening")
+                Log.i(TAG_AUTO_LISTEN, "  Speaking: $speaking")
+
                 if (!shouldAutoListenAfterTts) {
+                    Log.d(TAG_AUTO_LISTEN, "❌ Flag disabled, skipping")
                     return@collect
                 }
-                val autoListenEnabledInSettings = Prefs.getAutoListen(appCtx)
-                if (!autoListenEnabledInSettings) {
+
+                if (!settingEnabled) {
+                    Log.w(TAG_AUTO_LISTEN, "❌ Setting disabled, clearing flag")
                     shouldAutoListenAfterTts = false
                     return@collect
                 }
+
                 if (phase.value == GenerationPhase.IDLE && !isListening.value) {
+                    Log.i(TAG_AUTO_LISTEN, "⏳ Conditions met, waiting 500ms...")
                     delay(500L)
-                    if (!isSpeaking.value && !isListening.value && phase.value == GenerationPhase.IDLE && shouldAutoListenAfterTts) {
+
+                    val stillIdle = !isSpeaking.value &&
+                            !isListening.value &&
+                            phase.value == GenerationPhase.IDLE &&
+                            shouldAutoListenAfterTts
+
+                    Log.i(TAG_AUTO_LISTEN, "After delay:")
+                    Log.i(TAG_AUTO_LISTEN, "  Speaking: ${isSpeaking.value}")
+                    Log.i(TAG_AUTO_LISTEN, "  Listening: ${isListening.value}")
+                    Log.i(TAG_AUTO_LISTEN, "  Phase: ${phase.value}")
+                    Log.i(TAG_AUTO_LISTEN, "  Flag: $shouldAutoListenAfterTts")
+                    Log.i(TAG_AUTO_LISTEN, "  Still Idle: $stillIdle")
+
+                    if (stillIdle) {
+                        Log.i(TAG_AUTO_LISTEN, "✅✅✅ STARTING AUTO-LISTEN NOW ✅✅✅")
                         flowController.startAutoListening()
+                    } else {
+                        Log.w(TAG_AUTO_LISTEN, "❌ Conditions changed, aborting")
                     }
+                } else {
+                    Log.w(TAG_AUTO_LISTEN, "❌ Conditions not met")
                 }
+
                 shouldAutoListenAfterTts = false
+                Log.d(TAG_AUTO_LISTEN, "Flag reset to false")
+                Log.i(TAG_AUTO_LISTEN, "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
             }
         }
     }
@@ -162,12 +218,15 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
     private fun getEffectiveSystemPrompt(): String {
         val base = Prefs.getSystemPrompt(appCtx, DEFAULT_SYSTEM_PROMPT)
         val extensions = Prefs.getSystemPromptExtensions(appCtx)
+        Log.d(TAG, "[SYSTEM-PROMPT] Base: ${base.length} chars, Extensions: ${extensions.length} chars")
         return if (extensions.isBlank()) base else "$base\n\n$extensions"
     }
 
     fun setupSttSystemFromPreferences() {
+        Log.i(TAG, "[CONFIG] Setting up STT from preferences")
         sttManager.setupFromPreferences()
         applyEngineSettings()
+        logInitialConfiguration()
     }
 
     fun startListening() {
@@ -178,7 +237,7 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
         disableAutoListenAfterTts()
         viewModelScope.launch {
             flowController.stopAll()
-            interruption.reset() // ✅ Changed from stopTemporaryListener()
+            interruption.reset()
         }
     }
 
@@ -197,9 +256,10 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
 
     override fun onCleared() {
         super.onCleared()
+        Log.w(TAG, "ViewModel clearing...")
         flowController.cleanup()
         sttManager.release()
-        interruption.reset() // ✅ Changed from stopTemporaryListener()
+        interruption.reset()
         tts.shutdown()
     }
 }

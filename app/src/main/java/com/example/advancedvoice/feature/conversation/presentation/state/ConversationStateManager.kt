@@ -10,24 +10,19 @@ import com.example.advancedvoice.feature.conversation.service.TtsController
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.*
 
-/**
- * Manages all UI state for the conversation feature.
- */
 class ConversationStateManager(
     private val scope: CoroutineScope,
     private val store: ConversationStore,
     private val tts: TtsController
 ) {
-    // ✅ ADDED TAG for logging
     private companion object { const val TAG = "StateManager" }
 
-    // User conversation state
-    val conversation: StateFlow<List<ConversationEntry>> = store.state
+    // ✅ NEW: Flag to prevent TTS queuing after a manual stop.
+    @Volatile private var isHardStopped = false
 
-    // TTS state
+    val conversation: StateFlow<List<ConversationEntry>> = store.state
     val isSpeaking: StateFlow<Boolean> = tts.isSpeaking
 
-    // STT states
     private val _isListening = MutableStateFlow(false)
     val isListening: StateFlow<Boolean> = _isListening
 
@@ -37,11 +32,9 @@ class ConversationStateManager(
     private val _isTranscribing = MutableStateFlow(false)
     val isTranscribing: StateFlow<Boolean> = _isTranscribing
 
-    // Generation phase
     private val _phase = MutableStateFlow(GenerationPhase.IDLE)
     val phase: StateFlow<GenerationPhase> = _phase
 
-    // Derived controls state
     val controls: StateFlow<ControlsState> = combine(
         isSpeaking,
         isListening,
@@ -56,7 +49,18 @@ class ConversationStateManager(
         ControlsLogic.derive(false, false, false, false, GenerationPhase.IDLE)
     )
 
-    // Setters for internal use with logging
+    /**
+     * ✅ NEW: Controls the hard-stop state to prevent TTS race conditions.
+     */
+    fun setHardStop(stop: Boolean) {
+        if (isHardStopped == stop) return
+        Log.w(TAG, "[UI State] Hard Stop -> $stop")
+        isHardStopped = stop
+        if (stop) {
+            tts.stop() // Immediately stop speech and clear the queue
+        }
+    }
+
     fun setListening(value: Boolean) {
         if (_isListening.value != value) {
             Log.d(TAG, "[UI State] isListening -> $value")
@@ -89,9 +93,25 @@ class ConversationStateManager(
     fun addUserStreamingPlaceholder() = store.addUserStreamingPlaceholder()
     fun updateLastUserStreamingText(text: String) = store.updateLastUserStreamingText(text)
     fun replaceLastUser(text: String) = store.replaceLastUser(text)
-    fun addAssistant(sentences: List<String>) = store.addAssistant(sentences)
-    fun appendAssistantSentences(index: Int, sentences: List<String>) =
+
+    // ✅ MODIFIED: Check the hard-stop flag before queuing TTS.
+    fun addAssistant(sentences: List<String>) {
+        if (isHardStopped) {
+            Log.w(TAG, "🛑 Hard-stop is active, ignoring addAssistant call.")
+            return
+        }
+        store.addAssistant(sentences)
+    }
+
+    // ✅ MODIFIED: Check the hard-stop flag before queuing TTS.
+    fun appendAssistantSentences(index: Int, sentences: List<String>) {
+        if (isHardStopped) {
+            Log.w(TAG, "🛑 Hard-stop is active, ignoring appendAssistantSentences call.")
+            return
+        }
         store.appendAssistantSentences(index, sentences)
+    }
+
     fun addSystem(text: String) = store.addSystem(text)
     fun addError(text: String) = store.addError(text)
     fun removeLastEntry() = store.removeLastEntry()

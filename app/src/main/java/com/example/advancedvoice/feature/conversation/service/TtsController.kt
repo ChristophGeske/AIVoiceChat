@@ -18,7 +18,9 @@ class TtsController(
     private val scope: CoroutineScope
 ) : TextToSpeech.OnInitListener {
 
-    companion object { private const val TAG = "TtsController" }
+    companion object {
+        private const val TAG = "TTS"  // ✅ Shorter for easier filtering
+    }
 
     private val tts: TextToSpeech = TextToSpeech(app, this)
 
@@ -36,59 +38,60 @@ class TtsController(
 
     private val listener = object : UtteranceProgressListener() {
         override fun onStart(utteranceId: String?) {
-            Log.i(TAG, "[TTS] onStart: utteranceId=$utteranceId")
+            Log.i(TAG, "▶️ TTS started (id=${utteranceId?.take(8)})")
             _isSpeaking.value = true
         }
 
         override fun onDone(utteranceId: String?) {
-            Log.i(TAG, "[TTS] onDone: utteranceId=$utteranceId")
+            Log.i(TAG, "⏹️ TTS finished (id=${utteranceId?.take(8)}, queue=${queue.size})")
             scope.launch {
                 if (utteranceId != currentId) {
-                    Log.w(TAG, "[TTS] Ignoring onDone for mismatched ID.")
+                    Log.w(TAG, "⚠️ Mismatched utterance ID, ignoring onDone")
                     return@launch
                 }
                 currentId = null
                 if (queue.isNotEmpty()) {
+                    Log.d(TAG, "▶️ Playing next from queue (${queue.size} remaining)")
                     speakNext()
                 } else {
                     _isSpeaking.value = false
-                    Log.i(TAG, "[TTS] Queue is empty. Emitting queueFinished event.")
+                    Log.i(TAG, "✅ Queue empty, emitting queueFinished")
                     _queueFinished.emit(Unit)
                 }
             }
         }
 
         override fun onError(utteranceId: String?) {
-            Log.e(TAG, "[TTS] onError: utteranceId=$utteranceId")
+            Log.e(TAG, "❌ TTS error (id=${utteranceId?.take(8)})")
             onDone(utteranceId)
         }
     }
 
     override fun onInit(status: Int) {
         if (status == TextToSpeech.SUCCESS) {
-            Log.i(TAG, "[TTS] Initialization SUCCESSFUL.")
+            Log.i(TAG, "✅ TTS initialized successfully")
             tts.language = Locale.getDefault()
             tts.setOnUtteranceProgressListener(listener)
             _isReady.value = true
             if (queue.isNotEmpty() && currentId == null && !_isSpeaking.value) {
-                Log.i(TAG, "[TTS] onInit: Queue has pending items, starting playback now.")
+                Log.i(TAG, "▶️ Queue has ${queue.size} pending items, starting playback")
                 speakNext()
             }
         } else {
-            Log.e(TAG, "[TTS] Initialization FAILED with status: $status")
+            Log.e(TAG, "❌ TTS initialization FAILED (status=$status)")
             _isReady.value = false
         }
     }
 
     fun queue(text: String) {
         if (text.isBlank()) {
-            Log.w(TAG, "[TTS] queue() called with blank text. Ignoring.")
+            Log.w(TAG, "⚠️ Ignoring blank text")
             return
         }
         queue.addLast(text)
-        Log.i(TAG, "[TTS] Queued ${text.length} chars. New queue size: ${queue.size}. Text: '${text.take(80)}...'")
+        Log.i(TAG, "➕ Queued ${text.length} chars (queue=${queue.size}): '${text.take(60)}...'")
         if (_isReady.value && !_isSpeaking.value && currentId == null) {
-            Log.i(TAG, "[TTS] TTS is idle, speaking immediately.")
+            Log.i(TAG, "▶️ TTS idle, playing immediately")
             speakNext()
         }
     }
@@ -98,55 +101,47 @@ class TtsController(
         val next = queue.removeFirst()
         val id = UUID.randomUUID().toString()
         currentId = id
-        Log.i(TAG, "[TTS] speakNext() called. UtteranceId=$id, Text: '${next.take(80)}...'")
+        Log.i(TAG, "▶️ Speaking (id=${id.take(8)}, len=${next.length}): '${next.take(60)}...'")
         tts.speak(next, TextToSpeech.QUEUE_ADD, null, id)
     }
 
-    /**
-     * Stop current speech and clear queue.
-     * ✅ For immediate interruption (user interrupts assistant).
-     */
     fun stop() {
-        Log.w(TAG, "[TTS] stop() called. Halting playback and clearing queue.")
+        Log.w(TAG, "🛑 STOP called (queue=${queue.size}, speaking=${_isSpeaking.value})")
         try {
             tts.stop()
-        } catch (_: Exception) {}
+        } catch (e: Exception) {
+            Log.e(TAG, "Error stopping TTS: ${e.message}")
+        }
 
         _isSpeaking.value = false
         currentId = null
         queue.clear()
     }
 
-    /**
-     * Clear only the queue but let current speech finish.
-     * ✅ For low-latency: allows current sentence to finish naturally.
-     */
     fun clearQueue() {
-        Log.i(TAG, "[TTS] clearQueue() called. Clearing ${queue.size} pending items.")
+        Log.i(TAG, "🗑️ Clearing queue (${queue.size} items)")
         queue.clear()
-        // currentId remains - current speech will finish
     }
 
-    /**
-     * Stop current speech but keep queue.
-     * ✅ For pause functionality (if needed later).
-     */
     fun stopCurrent() {
-        Log.i(TAG, "[TTS] stopCurrent() called. Stopping current speech only.")
+        Log.i(TAG, "⏸️ Stopping current speech only")
         try {
             tts.stop()
-        } catch (_: Exception) {}
+        } catch (e: Exception) {
+            Log.e(TAG, "Error stopping current: ${e.message}")
+        }
 
         _isSpeaking.value = false
         currentId = null
-        // queue remains - can resume with speakNext()
     }
 
     fun shutdown() {
-        Log.w(TAG, "[TTS] shutdown() called.")
+        Log.w(TAG, "🔌 Shutting down TTS")
         stop()
         try {
             tts.shutdown()
-        } catch (_: Exception) {}
+        } catch (e: Exception) {
+            Log.e(TAG, "Error during shutdown: ${e.message}")
+        }
     }
 }

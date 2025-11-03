@@ -29,15 +29,18 @@ class FastFirstSentenceStrategy(
     ) {
         active = true
         scope.launch(Dispatchers.IO) {
-            var turnFinished = false // Local flag to control finally block
+            var turnFinished = false
             try {
+                // ✅ FIX: Create a Set to collect and automatically de-duplicate sources from both phases.
+                val combinedSources = mutableSetOf<Pair<String, String?>>()
+
                 val gem = GeminiService(geminiKeyProvider, http)
                 val mappedHistory = mapHistory(history)
 
-                // --- PHASE 1 ---
+                // --- PHASE 1: Get the first sentence and sources ---
                 Log.i("FastFirst", "--- PHASE 1: GENERATING FIRST SENTENCE ---")
                 val phase1SystemPrompt = "$systemPrompt\n\nIMPORTANT: Your entire response must be only a single, complete sentence."
-                val (firstSentence, sources) = gem.generateTextWithSources(
+                val (firstSentence, phase1Sources) = gem.generateTextWithSources(
                     systemPrompt = phase1SystemPrompt,
                     history = mappedHistory,
                     modelName = modelName,
@@ -46,32 +49,33 @@ class FastFirstSentenceStrategy(
                 )
 
                 if (!active || firstSentence.isBlank()) {
-                    if (firstSentence.isBlank()) Log.w("FastFirst", "Phase 1 returned empty sentence.")
-                    // If Phase 1 fails, we must end the turn.
+                    if (firstSentence.isBlank()) Log.w("FastFirst", "Phase 1 returned an empty sentence.")
                     callbacks.onTurnFinish()
                     turnFinished = true
                     return@launch
                 }
 
-                GroundingUtils.processAndDisplaySources(sources, callbacks.onSystem)
+                // ✅ FIX: Do NOT display sources yet. Just add them to our collection.
+                combinedSources.addAll(phase1Sources)
                 callbacks.onFirstSentence(firstSentence)
 
                 if (maxSentences <= 1) {
                     Log.i("FastFirst", "Max sentences is 1, skipping Phase 2.")
-                    // If we are done after Phase 1, end the turn.
+                    // ✅ FIX: Display the collected sources now since the turn is over.
+                    GroundingUtils.processAndDisplaySources(combinedSources.toList(), callbacks.onSystem)
                     callbacks.onTurnFinish()
                     turnFinished = true
                     return@launch
                 }
 
-                // --- PHASE 2 ---
+                // --- PHASE 2: Generate the rest of the response ---
                 Log.i("FastFirst", "--- PHASE 2: GENERATING REMAINDER ---")
                 val phase2History = mappedHistory + ChatMessage("assistant", firstSentence)
                 val remainingCount = maxSentences - 1
                 val plural = if (remainingCount > 1) "sentences" else "sentence"
                 val phase2SystemPrompt = "$systemPrompt\n\nContinue your previous thought. You have already said: \"$firstSentence\". Now, provide the rest of your response in AT MOST $remainingCount more $plural."
 
-                val (remainderText, remainderSources) = gem.generateTextWithSources(
+                val (remainderText, phase2Sources) = gem.generateTextWithSources(
                     systemPrompt = phase2SystemPrompt,
                     history = emptyList(),
                     modelName = modelName,
@@ -81,7 +85,8 @@ class FastFirstSentenceStrategy(
 
                 if (!active) return@launch
 
-                GroundingUtils.processAndDisplaySources(remainderSources, callbacks.onSystem)
+                // ✅ FIX: Add Phase 2 sources to our collection. Do not display yet.
+                combinedSources.addAll(phase2Sources)
 
                 if (remainderText.isNotBlank()) {
                     val remainingSentences = SentenceSplitter.splitIntoSentences(remainderText)
@@ -90,7 +95,9 @@ class FastFirstSentenceStrategy(
                     Log.w("FastFirst", "Phase 2 returned an empty remainder.")
                 }
 
-                // ✅ FIX: The turn is only finished AFTER all callbacks have been sent.
+                // ✅ FIX: Now that all sentences are delivered, display the final, combined list of sources.
+                GroundingUtils.processAndDisplaySources(combinedSources.toList(), callbacks.onSystem)
+
                 callbacks.onTurnFinish()
                 turnFinished = true
 
@@ -98,7 +105,6 @@ class FastFirstSentenceStrategy(
                 Log.e("FastFirstSentenceStrategy", "Error: ${t.message}", t)
                 if (active) callbacks.onError(t.message ?: "Generation failed")
             } finally {
-                // ✅ FIX: Use a local flag to prevent the finally block from calling onTurnFinish again.
                 if (active && !turnFinished) {
                     active = false
                     callbacks.onTurnFinish()

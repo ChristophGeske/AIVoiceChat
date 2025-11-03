@@ -35,12 +35,15 @@ class InterruptionManager(
     @Volatile
     var isBargeInTurn = false
         private set
+
     @Volatile
     var isAccumulatingAfterInterrupt = false
         private set
+
     @Volatile
     var generationStartTime = 0L
         private set
+
     @Volatile
     private var lastRestartTime = 0L
     private var interruptAccumulationJob: Job? = null
@@ -93,7 +96,7 @@ class InterruptionManager(
                     }
                 }
 
-                // ✅ FIX: Add a crucial guard clause.
+                // ✅ FIX 2: Add a crucial guard clause.
                 // The entire voice accumulation logic is ONLY supported by GeminiLiveSttController.
                 // This check prevents the crash when using Standard STT.
                 if (generating && hearingSpeech && getStt() is GeminiLiveSttController && !isBargeInTurn && !isAccumulatingAfterInterrupt) {
@@ -124,11 +127,9 @@ class InterruptionManager(
                         Log.i(TAG, "[VOICE-INTERRUPT] Starting STT with NO grace period (user already speaking)...")
                         try {
                             val stt = getStt()
-                            // This check is now safe because of the guard clause above.
                             if (stt is GeminiLiveSttController) {
                                 stt.startWithCustomGracePeriod(0L)
                             } else {
-                                // This branch is now effectively unreachable for this logic path.
                                 stt?.start(isAutoListen = false)
                             }
                             delay(500L)
@@ -166,6 +167,8 @@ class InterruptionManager(
             return
         }
         Log.i(TAG, "[VOICE-INTERRUPT] Enabling background voice detection (infinite timeout)")
+
+        // ✅ FIX 1: The background VAD must be in multi-utterance mode to properly detect interruptions.
         val recorder = VadRecorder(
             scope = scope,
             sampleRate = 16_000,
@@ -173,8 +176,10 @@ class InterruptionManager(
             endOfSpeechMs = 300L,
             maxSilenceMs = null,
             minSpeechDurationMs = 300L,
-            startupGracePeriodMs = 300L
+            startupGracePeriodMs = 300L,
+            allowMultipleUtterances = true // This ensures the VAD keeps listening
         )
+
         backgroundRecorder = recorder
         scope.launch {
             recorder.events.collect { event ->
@@ -186,6 +191,10 @@ class InterruptionManager(
                     }
                     is VadRecorder.VadEvent.SpeechEnd -> {
                         Log.i(TAG, "[VOICE-INTERRUPT] Voice ended (${event.durationMs}ms)")
+                        // In this mode, we let the user manually clear the 'hearing' state by stopping speech
+                        // Or by the VAD eventually timing out if we added a max duration.
+                        // For barge-in, we want it to stay 'hearing' until the user stops for a bit.
+                        // For simplicity, we can just set it to false here.
                         stateManager.setHearingSpeech(false)
                     }
                     is VadRecorder.VadEvent.SilenceTimeout -> {

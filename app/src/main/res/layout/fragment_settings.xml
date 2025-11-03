@@ -52,8 +52,8 @@
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
                     android:layout_marginTop="6dp"
-                    android:textColor="#64B5F6"
                     android:linksClickable="true"
+                    android:textColor="#64B5F6"
                     android:visibility="gone"
                     tools:text="Get free Gemini API Key here" />
 

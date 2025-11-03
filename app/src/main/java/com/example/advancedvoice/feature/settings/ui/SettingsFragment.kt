@@ -3,10 +3,10 @@ package com.example.advancedvoice.feature.settings.ui
 import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.os.Bundle
 import android.provider.Settings
 import android.text.Html
 import android.text.method.LinkMovementMethod
-import android.os.Bundle
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
@@ -33,7 +33,7 @@ class SettingsFragment : Fragment() {
         setupPromptSection(view)
         setupMaxSentences(view)
         setupListenSeconds(view)
-        setupAutoListen(view)      // ← ADD THIS
+        setupAutoListen(view)
         setupFasterFirst(view)
         setupSttSystem(view)
         setupTtsSettingsLink(view)
@@ -65,49 +65,58 @@ class SettingsFragment : Fragment() {
         updateModelOptionsVisibility(root)
     }
 
+    /**
+     * ✅ FIX: This function is completely rewritten to manually manage the RadioButtons,
+     * which is necessary because they are not direct children of a single RadioGroup.
+     */
     private fun setupModelRadios(root: View) {
-        val rbGeminiFlash = root.findViewById<RadioButton>(R.id.radioGeminiFlash)
-        val rbGeminiPro = root.findViewById<RadioButton>(R.id.radioGeminiPro)
-        val rbGpt5High = root.findViewById<RadioButton>(R.id.radioGpt5High)
-        val rbGpt5Medium = root.findViewById<RadioButton>(R.id.radioGpt5Medium)
-        val rbGpt5Low = root.findViewById<RadioButton>(R.id.radioGpt5Low)
-        val rbGpt5MiniHigh = root.findViewById<RadioButton>(R.id.radioGpt5MiniHigh)
-        val rbGpt5MiniMedium = root.findViewById<RadioButton>(R.id.radioGpt5MiniMedium)
+        val allModelButtons = listOf(
+            root.findViewById<RadioButton>(R.id.radioGeminiFlash),
+            root.findViewById<RadioButton>(R.id.radioGeminiPro),
+            root.findViewById<RadioButton>(R.id.radioGpt5High),
+            root.findViewById<RadioButton>(R.id.radioGpt5Medium),
+            root.findViewById<RadioButton>(R.id.radioGpt5Low),
+            root.findViewById<RadioButton>(R.id.radioGpt5MiniHigh),
+            root.findViewById<RadioButton>(R.id.radioGpt5MiniMedium)
+        )
 
-        val current = Prefs.getSelectedModel(requireContext()).lowercase()
+        // Set the initial checked state
+        val currentModel = Prefs.getSelectedModel(requireContext()).lowercase()
+        val currentEffort = Prefs.getGpt5Effort(requireContext()).lowercase()
 
-        fun select(r: RadioButton) {
-            rbGeminiFlash.isChecked = false
-            rbGeminiPro.isChecked = false
-            rbGpt5High.isChecked = false
-            rbGpt5Medium.isChecked = false
-            rbGpt5Low.isChecked = false
-            rbGpt5MiniHigh.isChecked = false
-            rbGpt5MiniMedium.isChecked = false
-            r.isChecked = true
-        }
+        allModelButtons.forEach { it.isChecked = false } // Start by unchecking all
 
         when {
-            current.startsWith("gemini-2.5-flash") -> select(rbGeminiFlash)
-            current.startsWith("gemini") -> select(rbGeminiPro)
-            current == "gpt-5" -> when (Prefs.getGpt5Effort(requireContext()).lowercase()) {
-                "high" -> select(rbGpt5High)
-                "medium" -> select(rbGpt5Medium)
-                else -> select(rbGpt5Low)
+            currentModel.startsWith("gemini-2.5-flash") -> root.findViewById<RadioButton>(R.id.radioGeminiFlash).isChecked = true
+            currentModel.startsWith("gemini") -> root.findViewById<RadioButton>(R.id.radioGeminiPro).isChecked = true
+            currentModel == "gpt-5" && currentEffort == "high" -> root.findViewById<RadioButton>(R.id.radioGpt5High).isChecked = true
+            currentModel == "gpt-5" && currentEffort == "medium" -> root.findViewById<RadioButton>(R.id.radioGpt5Medium).isChecked = true
+            currentModel == "gpt-5" -> root.findViewById<RadioButton>(R.id.radioGpt5Low).isChecked = true
+            currentModel == "gpt-5-mini" && currentEffort == "high" -> root.findViewById<RadioButton>(R.id.radioGpt5MiniHigh).isChecked = true
+            currentModel == "gpt-5-mini" -> root.findViewById<RadioButton>(R.id.radioGpt5MiniMedium).isChecked = true
+        }
+
+        // Create a single click listener to enforce mutual exclusivity
+        val modelClickListener = View.OnClickListener { clickedView ->
+            // Uncheck all buttons
+            allModelButtons.forEach { button ->
+                button.isChecked = (button.id == clickedView.id)
             }
-            current == "gpt-5-mini" -> when (Prefs.getGpt5Effort(requireContext()).lowercase()) {
-                "high" -> select(rbGpt5MiniHigh)
-                else -> select(rbGpt5MiniMedium)
+
+            // Call the appropriate function based on which button was clicked
+            when (clickedView.id) {
+                R.id.radioGeminiFlash -> onModelChosen("gemini-2.5-flash", null)
+                R.id.radioGeminiPro -> onModelChosen("gemini-2.5-pro", null)
+                R.id.radioGpt5High -> onModelChosen("gpt-5", "high")
+                R.id.radioGpt5Medium -> onModelChosen("gpt-5", "medium")
+                R.id.radioGpt5Low -> onModelChosen("gpt-5", "low")
+                R.id.radioGpt5MiniHigh -> onModelChosen("gpt-5-mini", "high")
+                R.id.radioGpt5MiniMedium -> onModelChosen("gpt-5-mini", "medium")
             }
         }
 
-        rbGeminiFlash.setOnClickListener { onModelChosen("gemini-2.5-flash", null) }
-        rbGeminiPro.setOnClickListener { onModelChosen("gemini-2.5-pro", null) }
-        rbGpt5High.setOnClickListener { onModelChosen("gpt-5", "high") }
-        rbGpt5Medium.setOnClickListener { onModelChosen("gpt-5", "medium") }
-        rbGpt5Low.setOnClickListener { onModelChosen("gpt-5", "low") }
-        rbGpt5MiniHigh.setOnClickListener { onModelChosen("gpt-5-mini", "high") }
-        rbGpt5MiniMedium.setOnClickListener { onModelChosen("gpt-5-mini", "medium") }
+        // Apply the listener to every model radio button
+        allModelButtons.forEach { it.setOnClickListener(modelClickListener) }
     }
 
     private fun onModelChosen(model: String, effort: String?) {
@@ -180,7 +189,6 @@ class SettingsFragment : Fragment() {
         }
     }
 
-    // ✅ NEW: Auto-listen setup
     private fun setupAutoListen(root: View) {
         val sw = root.findViewById<com.google.android.material.switchmaterial.SwitchMaterial>(R.id.switchAutoListen)
         sw.isChecked = Prefs.getAutoListen(requireContext())

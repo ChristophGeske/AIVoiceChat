@@ -55,18 +55,14 @@ class SttManager(
     private fun createGeminiLiveStt(geminiKey: String): GeminiLiveSttController {
         val liveModel = "models/gemini-2.5-flash-native-audio-preview-09-2025"
 
-        // The user's setting now ONLY controls the initial silence timeout.
         val listenSeconds = Prefs.getListenSeconds(app)
         val initialSilenceTimeoutMs = (listenSeconds * 1000L).coerceIn(2000L, 30000L)
 
-        // ✅ 5. MODIFY the VadRecorder creation.
+        // ✅ This is now correct. The VAD is single-utterance, and the controller handles the conversational pause.
         val vad = VadRecorder(
             scope = scope,
-            // This is the "initial silence" timeout, controlled by the user's setting.
             maxSilenceMs = initialSilenceTimeoutMs,
-            // This is now a fixed, short timer to detect the end of a single phrase.
             endOfSpeechMs = 1500L,
-            // We disable multi-utterance in the VAD because the controller now handles this logic.
             allowMultipleUtterances = false
         )
         val client = GeminiLiveClient(scope = scope)

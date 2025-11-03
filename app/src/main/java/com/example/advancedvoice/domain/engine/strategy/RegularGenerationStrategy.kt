@@ -5,14 +5,12 @@ import com.example.advancedvoice.data.common.ChatMessage
 import com.example.advancedvoice.data.gemini.GeminiService
 import com.example.advancedvoice.data.openai.OpenAiService
 import com.example.advancedvoice.domain.engine.SentenceTurnEngine
+import com.example.advancedvoice.domain.util.GroundingUtils // ✅ 1. IMPORT the new utility.
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import okhttp3.OkHttpClient
 
-/**
- * One-pass strategy: call the selected model once and return the full text.
- */
 class RegularGenerationStrategy(
     private val http: OkHttpClient,
     private val geminiKeyProvider: () -> String,
@@ -33,29 +31,42 @@ class RegularGenerationStrategy(
         scope.launch(Dispatchers.IO) {
             try {
                 val isGemini = modelName.contains("gemini", ignoreCase = true)
-                val text = if (isGemini) {
+
+                // ✅ 2. MODIFY this block to capture both text and sources.
+                if (isGemini) {
                     val gem = GeminiService(geminiKeyProvider, http)
-                    gem.generateText(
+                    // Call the method that returns both text and sources.
+                    val (text, sources) = gem.generateTextWithSources(
                         systemPrompt = systemPrompt,
                         history = mapHistory(history),
                         modelName = modelName,
                         temperature = 0.7,
                         enableGoogleSearch = true
                     )
+
+                    if (!active) return@launch
+                    callbacks.onFinalResponse(text.trim())
+                    // Use the new utility to process and display the sources.
+                    GroundingUtils.processAndDisplaySources(sources, callbacks.onSystem)
+
                 } else {
                     val openai = OpenAiService(openAiKeyProvider, http)
-                    openai.generateResponses(
+                    val result = openai.generateResponses(
                         systemPrompt = systemPrompt,
                         history = mapHistory(history),
                         model = modelName,
                         effort = "low",
                         verbosity = "low",
                         enableWebSearch = true
-                    ).text
+                    )
+
+                    if (!active) return@launch
+                    callbacks.onFinalResponse(result.text.trim())
+                    // Although OpenAI doesn't use the same grounding, this is good future-proofing.
+                    // For now, it will likely be an empty list and do nothing.
+                    GroundingUtils.processAndDisplaySources(result.sources, callbacks.onSystem)
                 }
 
-                if (!active) return@launch
-                callbacks.onFinalResponse(text.trim())
             } catch (t: Throwable) {
                 Log.e("RegularGenerationStrategy", "Error: ${t.message}", t)
                 if (active) callbacks.onError(t.message ?: "Generation failed")

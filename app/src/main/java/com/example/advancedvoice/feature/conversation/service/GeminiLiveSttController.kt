@@ -51,7 +51,6 @@ class GeminiLiveSttController(
     private var eventJob: Job? = null
     private var clientErrJob: Job? = null
     private var finalTranscriptJob: Job? = null
-
     private val stateMutex = Mutex()
 
     @Volatile
@@ -112,52 +111,10 @@ class GeminiLiveSttController(
     @RequiresPermission(Manifest.permission.RECORD_AUDIO)
     override suspend fun start(isAutoListen: Boolean) {
         stateMutex.withLock {
-            Log.i(
-                TAG,
-                "[Controller] >>> START Request processing (autoListen=$isAutoListen). Current state: listening=${isListening.value}, hearing=${isHearingSpeech.value}"
-            )
-
-            if (isListening.value || isHearingSpeech.value) {
-                internalStop(transcribe = false)
-            }
-
-            if (!ensureConnection()) {
-                Log.e(TAG, "[Controller] Could not establish connection. Aborting start.")
-                return@withLock
-            }
-
-            Log.i(TAG, "[Controller] Setup complete. Starting VAD.")
-            _isListening.value = true
-            _isHearingSpeech.value = false
-            _isTranscribing.value = false
-            turnEnded = false
-            transcriber.startAccumulating()
-
-            eventJob?.cancel(); audioJob?.cancel(); finalTranscriptJob?.cancel(); endTurnJob?.cancel()
-
-            setupVadEventHandler(vad)
-
-            audioJob = scope.launch {
-                vad.audio.collect { frame ->
-                    if (isListening.value) client.sendPcm16Le(frame)
-                }
-            }
-
-            finalTranscriptJob = scope.launch {
-                transcriber.finalTranscripts.collect { final ->
-                    Log.i(TAG, "[Controller] Collected final transcript (len=${final.length}).")
-                    _transcripts.emit(final)
-                    _isTranscribing.value = false
-                }
-            }
-
-            try {
-                vad.start()
-            } catch (se: SecurityException) {
-                Log.e(TAG, "[Controller] Microphone permission denied on start.", se)
-                errors.tryEmit("Microphone permission denied")
-                internalStop(false)
-            }
+            Log.i(TAG, "[Controller] >>> START Request (autoListen=$isAutoListen)")
+            if (isListening.value || isHearingSpeech.value) internalStop(false)
+            if (!ensureConnection()) return@withLock
+            commonStart(vad)
         }
     }
 
@@ -165,53 +122,48 @@ class GeminiLiveSttController(
     suspend fun startWithCustomGracePeriod(gracePeriodMs: Long) {
         stateMutex.withLock {
             Log.i(TAG, "[Controller] >>> START with CUSTOM grace period: ${gracePeriodMs}ms")
+            if (isListening.value || isHearingSpeech.value) internalStop(false)
+            if (!ensureConnection()) return@withLock
 
-            if (isListening.value || isHearingSpeech.value) {
-                internalStop(transcribe = false)
-            }
-
-            if (!ensureConnection()) {
-                Log.e(TAG, "[Controller] Could not establish connection. Aborting start.")
-                return@withLock
-            }
-
-            Log.i(TAG, "[Controller] Starting VAD with grace period: ${gracePeriodMs}ms")
-            _isListening.value = true
-            _isHearingSpeech.value = false
-            _isTranscribing.value = false
-            turnEnded = false
-            transcriber.startAccumulating()
-
-            eventJob?.cancel(); audioJob?.cancel(); finalTranscriptJob?.cancel(); endTurnJob?.cancel()
-
-            // ✅ FIX: The VAD for interruptions must use single-utterance mode to work with the debounce logic.
             val customVad = VadRecorder(
                 scope = scope,
                 maxSilenceMs = (Prefs.getListenSeconds(app) * 1000L).coerceIn(2000L, 30000L),
                 startupGracePeriodMs = gracePeriodMs,
                 allowMultipleUtterances = false
             )
+            commonStart(customVad)
+        }
+    }
 
-            setupVadEventHandler(customVad)
+    private fun commonStart(vadInstance: VadRecorder) {
+        Log.i(TAG, "[Controller] Setup complete. Starting VAD.")
+        _isListening.value = true
+        _isHearingSpeech.value = false
+        _isTranscribing.value = false
+        turnEnded = false
+        transcriber.startAccumulating()
 
-            audioJob = scope.launch {
-                customVad.audio.collect { frame ->
-                    if (isListening.value) client.sendPcm16Le(frame)
-                }
+        eventJob?.cancel(); audioJob?.cancel(); finalTranscriptJob?.cancel(); endTurnJob?.cancel()
+
+        setupVadEventHandler(vadInstance)
+
+        audioJob = scope.launch {
+            vadInstance.audio.collect { frame -> if (isListening.value) client.sendPcm16Le(frame) }
+        }
+
+        finalTranscriptJob = scope.launch {
+            transcriber.finalTranscripts.collect { final ->
+                Log.i(TAG, "[Controller] Collected final transcript (len=${final.length}).")
+                _transcripts.emit(final)
+                _isTranscribing.value = false
             }
+        }
 
-            finalTranscriptJob = scope.launch {
-                transcriber.finalTranscripts.collect { final ->
-                    Log.i(TAG, "[Controller] Collected final transcript (len=${final.length}).")
-                    _transcripts.emit(final)
-                    _isTranscribing.value = false
-                }
-            }
-
+        scope.launch {
             try {
-                customVad.start()
+                vadInstance.start()
             } catch (se: SecurityException) {
-                Log.e(TAG, "[Controller] Microphone permission denied on start.", se)
+                Log.e(TAG, "[Controller] Mic permission denied", se)
                 errors.tryEmit("Microphone permission denied")
                 internalStop(false)
             }
@@ -272,6 +224,8 @@ class GeminiLiveSttController(
         Log.i(TAG, "[Controller] internalStop: Cleaning up state (transcribe=$transcribe)")
 
         endTurnJob?.cancel()
+
+        // It's safer to stop the main 'vad' instance, as custom ones are temporary
         scope.launch { vad.stop() }
 
         if (transcribe && (isListening.value || isHearingSpeech.value) && !turnEnded) {

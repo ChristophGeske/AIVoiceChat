@@ -4,9 +4,8 @@ import android.util.Log
 import com.example.advancedvoice.core.text.SentenceSplitter
 import com.example.advancedvoice.data.common.ChatMessage
 import com.example.advancedvoice.data.gemini.GeminiService
-import com.example.advancedvoice.data.openai.OpenAiService
 import com.example.advancedvoice.domain.engine.SentenceTurnEngine
-import com.example.advancedvoice.domain.util.GroundingUtils // ✅ IMPORT the new utility.
+import com.example.advancedvoice.domain.util.GroundingUtils
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -15,7 +14,7 @@ import okhttp3.OkHttpClient
 class FastFirstSentenceStrategy(
     private val http: OkHttpClient,
     private val geminiKeyProvider: () -> String,
-    private val openAiKeyProvider: () -> String // Keep for consistency, even if unused
+    private val openAiKeyProvider: () -> String
 ) : IGenerationStrategy {
 
     @Volatile private var active = false
@@ -30,12 +29,51 @@ class FastFirstSentenceStrategy(
     ) {
         active = true
         scope.launch(Dispatchers.IO) {
+            var turnFinished = false // Local flag to control finally block
             try {
-                // Phase 1: Get the first sentence and sources quickly.
                 val gem = GeminiService(geminiKeyProvider, http)
-                val (fullText, sources) = gem.generateTextWithSources(
-                    systemPrompt = systemPrompt,
-                    history = mapHistory(history),
+                val mappedHistory = mapHistory(history)
+
+                // --- PHASE 1 ---
+                Log.i("FastFirst", "--- PHASE 1: GENERATING FIRST SENTENCE ---")
+                val phase1SystemPrompt = "$systemPrompt\n\nIMPORTANT: Your entire response must be only a single, complete sentence."
+                val (firstSentence, sources) = gem.generateTextWithSources(
+                    systemPrompt = phase1SystemPrompt,
+                    history = mappedHistory,
+                    modelName = modelName,
+                    temperature = 0.7,
+                    enableGoogleSearch = true
+                )
+
+                if (!active || firstSentence.isBlank()) {
+                    if (firstSentence.isBlank()) Log.w("FastFirst", "Phase 1 returned empty sentence.")
+                    // If Phase 1 fails, we must end the turn.
+                    callbacks.onTurnFinish()
+                    turnFinished = true
+                    return@launch
+                }
+
+                GroundingUtils.processAndDisplaySources(sources, callbacks.onSystem)
+                callbacks.onFirstSentence(firstSentence)
+
+                if (maxSentences <= 1) {
+                    Log.i("FastFirst", "Max sentences is 1, skipping Phase 2.")
+                    // If we are done after Phase 1, end the turn.
+                    callbacks.onTurnFinish()
+                    turnFinished = true
+                    return@launch
+                }
+
+                // --- PHASE 2 ---
+                Log.i("FastFirst", "--- PHASE 2: GENERATING REMAINDER ---")
+                val phase2History = mappedHistory + ChatMessage("assistant", firstSentence)
+                val remainingCount = maxSentences - 1
+                val plural = if (remainingCount > 1) "sentences" else "sentence"
+                val phase2SystemPrompt = "$systemPrompt\n\nContinue your previous thought. You have already said: \"$firstSentence\". Now, provide the rest of your response in AT MOST $remainingCount more $plural."
+
+                val (remainderText, remainderSources) = gem.generateTextWithSources(
+                    systemPrompt = phase2SystemPrompt,
+                    history = emptyList(),
                     modelName = modelName,
                     temperature = 0.7,
                     enableGoogleSearch = true
@@ -43,32 +81,25 @@ class FastFirstSentenceStrategy(
 
                 if (!active) return@launch
 
-                // ✅ Use the new utility to handle sources.
-                GroundingUtils.processAndDisplaySources(sources, callbacks.onSystem)
+                GroundingUtils.processAndDisplaySources(remainderSources, callbacks.onSystem)
 
-                // The rest of the logic for splitting sentences remains the same.
-                val (firstSentence, restOfText) = SentenceSplitter.extractFirstSentence(fullText)
-
-                if (firstSentence.isNotBlank()) {
-                    callbacks.onFirstSentence(firstSentence)
+                if (remainderText.isNotBlank()) {
+                    val remainingSentences = SentenceSplitter.splitIntoSentences(remainderText)
+                    callbacks.onRemainingSentences(remainingSentences)
+                } else {
+                    Log.w("FastFirst", "Phase 2 returned an empty remainder.")
                 }
 
-                // If there's more text, pass it to onRemainingSentences.
-                if (restOfText.isNotBlank()) {
-                    val remainingSentences = SentenceSplitter.splitIntoSentences(restOfText)
-                    if (remainingSentences.isNotEmpty()) {
-                        callbacks.onRemainingSentences(remainingSentences)
-                    }
-                } else if (firstSentence.isBlank()) {
-                    // If both are blank, we still need to signal the turn is over.
-                    callbacks.onFinalResponse("") // Send empty to trigger finish logic
-                }
+                // ✅ FIX: The turn is only finished AFTER all callbacks have been sent.
+                callbacks.onTurnFinish()
+                turnFinished = true
 
             } catch (t: Throwable) {
                 Log.e("FastFirstSentenceStrategy", "Error: ${t.message}", t)
                 if (active) callbacks.onError(t.message ?: "Generation failed")
             } finally {
-                if (active) {
+                // ✅ FIX: Use a local flag to prevent the finally block from calling onTurnFinish again.
+                if (active && !turnFinished) {
                     active = false
                     callbacks.onTurnFinish()
                 }

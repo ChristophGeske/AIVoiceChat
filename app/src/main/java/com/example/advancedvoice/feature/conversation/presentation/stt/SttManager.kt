@@ -55,20 +55,18 @@ class SttManager(
     private fun createGeminiLiveStt(geminiKey: String): GeminiLiveSttController {
         val liveModel = "models/gemini-2.5-flash-native-audio-preview-09-2025"
 
-        val listenSeconds = Prefs.getListenSeconds(app)
-        val initialSilenceTimeoutMs = (listenSeconds * 1000L).coerceIn(2000L, 30000L)
-
-        // ✅ This is now correct. The VAD is single-utterance, and the controller handles the conversational pause.
-        val vad = VadRecorder(
-            scope = scope,
-            maxSilenceMs = initialSilenceTimeoutMs,
-            endOfSpeechMs = 1500L,
-            allowMultipleUtterances = false
-        )
+        // ✅ REMOVED: VAD creation (MicrophoneSession creates it internally)
         val client = GeminiLiveClient(scope = scope)
         val transcriber = GeminiLiveTranscriber(scope = scope, client = client)
 
-        return GeminiLiveSttController(scope, app, vad, client, transcriber, geminiKey, liveModel)
+        return GeminiLiveSttController(
+            scope = scope,
+            app = app,
+            client = client,
+            transcriber = transcriber,
+            apiKey = geminiKey,
+            model = liveModel
+        )
     }
 
     private fun rewireCollectors() {

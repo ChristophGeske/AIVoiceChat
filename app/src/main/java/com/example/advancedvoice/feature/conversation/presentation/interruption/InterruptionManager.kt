@@ -71,91 +71,36 @@ class InterruptionManager(
             }.collect { (currentPhase, hearingSpeech, speaking) ->
                 val generating = isGenerating(currentPhase)
 
-                if (speaking && backgroundRecorder != null && !isAccumulatingAfterInterrupt) {
-                    Log.i(TAG, "[VOICE-INTERRUPT] TTS started, stopping background listener IMMEDIATELY")
-                    disableBackgroundListener()
-                }
+                // ✅ SIMPLIFIED: No background VAD needed - mic is always on!
+                // Mic is in MONITORING mode during generation/TTS
 
-                if (generating && backgroundRecorder == null && !speaking && !isAccumulatingAfterInterrupt) {
-                    Log.i(TAG, "[VOICE-INTERRUPT] Generation started, scheduling background VAD...")
-                    scope.launch {
-                        delay(800L)
-                        if (isGenerating(stateManager.phase.value) &&
-                            !stateManager.isSpeaking.value &&
-                            backgroundRecorder == null &&
-                            !isAccumulatingAfterInterrupt
-                        ) {
-                            Log.i(TAG, "[VOICE-INTERRUPT] Enabling background voice detection (after delay)")
-                            enableBackgroundListener()
-                        } else {
-                            Log.d(
-                                TAG,
-                                "[VOICE-INTERRUPT] Cancelled VAD enable (TTS started or conditions changed)"
-                            )
-                        }
-                    }
-                }
-
-                // ✅ FIX 2: Add a crucial guard clause.
-                // The entire voice accumulation logic is ONLY supported by GeminiLiveSttController.
-                // This check prevents the crash when using Standard STT.
                 if (generating && hearingSpeech && getStt() is GeminiLiveSttController && !isBargeInTurn && !isAccumulatingAfterInterrupt) {
                     val generationDuration = System.currentTimeMillis() - generationStartTime
                     if (generationDuration < MIN_GENERATION_TIME_BEFORE_INTERRUPT_MS) {
-                        Log.d(
-                            TAG,
-                            "[VOICE-INTERRUPT] Ignoring voice at ${generationDuration}ms (too early, likely noise)"
-                        )
+                        Log.d(TAG, "[VOICE-INTERRUPT] Ignoring early voice (${generationDuration}ms)")
                         return@collect
                     }
 
-                    Log.i(TAG, "[VOICE-ACCUMULATION] User speaking at ${generationDuration}ms - entering accumulation mode")
+                    Log.i(TAG, "[VOICE-ACCUMULATION] User speaking - entering accumulation mode")
                     isBargeInTurn = false
                     isAccumulatingAfterInterrupt = true
                     onInterruption()
+
                     scope.launch {
                         engine.abort(true)
                         tts.stop()
-                        disableBackgroundListener()
-                        Log.i(TAG, "[VOICE-INTERRUPT] Stopping any existing STT session...")
-                        try {
-                            getStt()?.stop(false)
-                            delay(500L)
-                        } catch (e: Exception) {
-                            Log.e(TAG, "[VOICE-INTERRUPT] Error stopping STT: ${e.message}")
+
+                        // ✅ NO DELAY NEEDED - mic is already recording!
+                        Log.i(TAG, "[VOICE-INTERRUPT] Switching to TRANSCRIBING mode (no mic restart)")
+
+                        val stt = getStt()
+                        if (stt is GeminiLiveSttController) {
+                            // Just switch mode - mic never stopped!
+                            stt.start(isAutoListen = false)
                         }
-                        Log.i(TAG, "[VOICE-INTERRUPT] Starting STT with NO grace period (user already speaking)...")
-                        try {
-                            val stt = getStt()
-                            if (stt is GeminiLiveSttController) {
-                                stt.startWithCustomGracePeriod(0L)
-                            } else {
-                                stt?.start(isAutoListen = false)
-                            }
-                            delay(500L)
-                            val sttState = stateManager.isListening.value || stateManager.isHearingSpeech.value
-                            if (!sttState && isAccumulatingAfterInterrupt) {
-                                Log.e(TAG, "[VOICE-INTERRUPT] STT failed to start! Aborting accumulation.")
-                                isAccumulatingAfterInterrupt = false
-                                stateManager.removeLastUserPlaceholderIfEmpty()
-                                stateManager.addError("Could not start speech recognition")
-                                return@launch
-                            }
-                        } catch (se: SecurityException) {
-                            Log.e(TAG, "[VOICE-INTERRUPT] Permission denied on STT start: ${se.message}")
-                            isAccumulatingAfterInterrupt = false
-                            stateManager.removeLastUserPlaceholderIfEmpty()
-                            stateManager.addError("Microphone permission is required to speak.")
-                            return@launch
-                        } catch (e: Exception) {
-                            Log.e(TAG, "[VOICE-INTERRUPT] Error starting STT: ${e.message}")
-                            isAccumulatingAfterInterrupt = false
-                            stateManager.removeLastUserPlaceholderIfEmpty()
-                            stateManager.addError("Could not start speech recognition")
-                            return@launch
-                        }
+
+                        startAccumulationWatcher()
                     }
-                    startAccumulationWatcher()
                 }
             }
         }

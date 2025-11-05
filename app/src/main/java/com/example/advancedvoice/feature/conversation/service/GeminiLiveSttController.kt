@@ -224,4 +224,23 @@ class GeminiLiveSttController(
         }
         return false
     }
+
+    fun switchMicMode(mode: MicrophoneSession.Mode) {
+        micSession?.switchMode(mode)
+
+        // Update state flags to match
+        when (mode) {
+            MicrophoneSession.Mode.IDLE -> {
+                _isListening.value = false
+                _isHearingSpeech.value = false
+            }
+            MicrophoneSession.Mode.MONITORING -> {
+                _isListening.value = false
+                _isHearingSpeech.value = false
+            }
+            MicrophoneSession.Mode.TRANSCRIBING -> {
+                _isListening.value = true
+            }
+        }
+    }
 }

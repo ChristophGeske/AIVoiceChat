@@ -4,6 +4,7 @@ import android.app.Application
 import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.example.advancedvoice.core.audio.MicrophoneSession
 import com.example.advancedvoice.core.logging.LoggerConfig
 import com.example.advancedvoice.core.network.HttpClientProvider
 import com.example.advancedvoice.core.prefs.Prefs
@@ -15,6 +16,7 @@ import com.example.advancedvoice.feature.conversation.presentation.interruption.
 import com.example.advancedvoice.feature.conversation.presentation.state.ConversationStateManager
 import com.example.advancedvoice.feature.conversation.presentation.stt.SttManager
 import com.example.advancedvoice.feature.conversation.service.ConversationStore
+import com.example.advancedvoice.feature.conversation.service.GeminiLiveSttController
 import com.example.advancedvoice.feature.conversation.service.TtsController
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.StateFlow
@@ -111,6 +113,7 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
         setupAutoListen()
         logButtonStateChanges()
         logInitialConfiguration()
+        setupTtsMonitoring()
     }
 
     private fun logInitialConfiguration() {
@@ -261,5 +264,22 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
         sttManager.release()
         interruption.reset()
         tts.shutdown()
+    }
+
+    private fun setupTtsMonitoring() {
+        viewModelScope.launch {
+            tts.isSpeaking.collect { speaking ->
+                val stt = sttManager.getStt()
+                if (stt is GeminiLiveSttController) {
+                    if (speaking) {
+                        Log.i(TAG, "[TTS] Started speaking - switching mic to IDLE")
+                        stt.switchMicMode(MicrophoneSession.Mode.IDLE)
+                    } else {
+                        Log.i(TAG, "[TTS] Stopped speaking - switching mic to MONITORING")
+                        stt.switchMicMode(MicrophoneSession.Mode.MONITORING)
+                    }
+                }
+            }
+        }
     }
 }

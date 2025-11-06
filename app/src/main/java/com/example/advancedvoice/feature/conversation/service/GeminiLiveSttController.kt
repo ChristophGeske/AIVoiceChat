@@ -132,26 +132,51 @@ class GeminiLiveSttController(
         eventJob?.cancel()
         eventJob = scope.launch {
             micSession?.vadEvents?.collect { ev ->
+                val currentMode = micSession?.currentVadMode?.value
+
                 when (ev) {
                     is VadRecorder.VadEvent.SpeechStart -> {
                         endTurnJob?.cancel()
-                        Log.d(TAG, "[VAD] SpeechStart")
-                        if (!_isHearingSpeech.value) {
-                            _isHearingSpeech.value = true
+                        Log.d(TAG, "[VAD] SpeechStart (mode=$currentMode)")
+
+                        // ✅ Process in TRANSCRIBING and MONITORING modes
+                        // ❌ Ignore only in IDLE mode (during TTS)
+                        if (currentMode != MicrophoneSession.Mode.IDLE) {
+                            if (!_isHearingSpeech.value) {
+                                _isHearingSpeech.value = true
+                            }
+                        } else {
+                            Log.d(TAG, "[VAD] Ignoring SpeechStart in IDLE mode (TTS echo)")
                         }
                     }
+
                     is VadRecorder.VadEvent.SpeechEnd -> {
-                        endTurnJob?.cancel()
-                        endTurnJob = scope.launch {
-                            Log.d(TAG, "[VAD] SpeechEnd. Starting ${END_OF_TURN_DELAY_MS}ms timer...")
-                            delay(END_OF_TURN_DELAY_MS)
-                            Log.i(TAG, "[VAD] Timer finished. Finalizing.")
-                            endTurn("ConversationalPause")
+                        Log.d(TAG, "[VAD] SpeechEnd (mode=$currentMode)")
+
+                        // ✅ Only finalize turn if in TRANSCRIBING mode
+                        if (currentMode == MicrophoneSession.Mode.TRANSCRIBING) {
+                            endTurnJob?.cancel()
+                            endTurnJob = scope.launch {
+                                Log.d(TAG, "[VAD] SpeechEnd. Starting ${END_OF_TURN_DELAY_MS}ms timer...")
+                                delay(END_OF_TURN_DELAY_MS)
+                                Log.i(TAG, "[VAD] Timer finished. Finalizing.")
+                                endTurn("ConversationalPause")
+                            }
+                        } else if (currentMode == MicrophoneSession.Mode.MONITORING) {
+                            // In monitoring mode, just update the state flag
+                            _isHearingSpeech.value = false
+                            Log.d(TAG, "[VAD] Speech ended in MONITORING mode")
+                        } else {
+                            Log.d(TAG, "[VAD] Ignoring SpeechEnd in IDLE mode")
                         }
                     }
+
                     is VadRecorder.VadEvent.SilenceTimeout -> {
-                        endTurn("SilenceTimeout")
+                        if (currentMode == MicrophoneSession.Mode.TRANSCRIBING) {
+                            endTurn("SilenceTimeout")
+                        }
                     }
+
                     is VadRecorder.VadEvent.Error -> errors.emit(ev.message)
                 }
             }
@@ -226,20 +251,28 @@ class GeminiLiveSttController(
     }
 
     fun switchMicMode(mode: MicrophoneSession.Mode) {
+        Log.i(TAG, "[Controller] Switching mic mode to: $mode")
         micSession?.switchMode(mode)
 
-        // Update state flags to match
+        // ✅ Force-clear state flags when switching modes
         when (mode) {
             MicrophoneSession.Mode.IDLE -> {
                 _isListening.value = false
                 _isHearingSpeech.value = false
+                _isTranscribing.value = false
+                endTurnJob?.cancel()
+                Log.d(TAG, "[Controller] All listening states cleared for IDLE mode")
             }
             MicrophoneSession.Mode.MONITORING -> {
                 _isListening.value = false
                 _isHearingSpeech.value = false
+                _isTranscribing.value = false
+                endTurnJob?.cancel()
+                Log.d(TAG, "[Controller] Listening states cleared for MONITORING mode")
             }
             MicrophoneSession.Mode.TRANSCRIBING -> {
-                _isListening.value = true
+                // States will be set by start()
+                Log.d(TAG, "[Controller] TRANSCRIBING mode activated")
             }
         }
     }

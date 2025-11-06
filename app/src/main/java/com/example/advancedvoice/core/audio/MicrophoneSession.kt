@@ -89,19 +89,33 @@ class MicrophoneSession(
     }
 
     fun switchMode(newMode: Mode) {
-        if (currentMode == newMode) return
+        if (vad == null) {
+            Log.w(TAG, "Cannot switch mode - VAD not started")
+            return
+        }
 
-        Log.i(TAG, "Switching mode: $currentMode → $newMode")
+        if (currentMode == newMode) {
+            Log.d(TAG, "Already in mode $newMode")
+            return
+        }
+
+        Log.i(TAG, "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+        Log.i(TAG, "MODE SWITCH: $currentMode → $newMode")
+        Log.i(TAG, "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+
         currentMode = newMode
         _currentVadMode.value = newMode
 
-        // Handle transcription state changes
         when (newMode) {
             Mode.TRANSCRIBING -> {
                 transcriber.startAccumulating()
+                Log.d(TAG, "[Mode] Audio → Gemini Live Transcriber")
             }
-            Mode.MONITORING, Mode.IDLE -> {
-                // Don't end turn here - let the controller decide
+            Mode.MONITORING -> {
+                Log.d(TAG, "[Mode] Audio → Discarded (VAD events only)")
+            }
+            Mode.IDLE -> {
+                Log.d(TAG, "[Mode] Audio → Discarded (Fully idle)")
             }
         }
     }

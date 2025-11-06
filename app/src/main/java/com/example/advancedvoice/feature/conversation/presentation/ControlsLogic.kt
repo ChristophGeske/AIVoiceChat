@@ -14,17 +14,21 @@ object ControlsLogic {
         val voiceInterruptAllowed = phase == GenerationPhase.GENERATING_FIRST ||
                 phase == GenerationPhase.SINGLE_SHOT_GENERATING
 
-        // Determine the primary button text
+        // ✅ CRITICAL: TTS speaking ALWAYS takes priority over other states
         val buttonText = when {
+            // ✅ Check TTS first - this prevents "Listening..." showing during echo
+            isSpeaking -> "Speaking (Tap to Interrupt)"
+
+            // Then check STT states
             isTranscribing -> "Transcribing..."
             isHearingSpeech -> "Listening..."
             isListening -> "Listening..."
-            // After TTS starts, the only way to interrupt is by tapping.
-            isSpeaking -> "Speaking (Tap to Interrupt)"
-            // Show "Speak to Interrupt" only when it's actually possible.
+
+            // Generation states
             isGenerating && voiceInterruptAllowed -> "Generating (Speak to Interrupt)"
-            // For phase 2 generation, no voice interrupt is allowed.
             isGenerating && !voiceInterruptAllowed -> "Generating..."
+
+            // Default idle
             else -> "Tap to Speak"
         }
 
@@ -32,8 +36,8 @@ object ControlsLogic {
         val anythingInProgress = isSpeaking || isListening || isHearingSpeech || isGenerating || isTranscribing
 
         // The main "Speak" button should always be enabled unless actively listening/transcribing.
-        // Tapping it while busy will act as an interruption.
-        val speakEnabled = !isListening && !isHearingSpeech && !isTranscribing
+        // ✅ Also disable during TTS to prevent accidental double-taps
+        val speakEnabled = !isListening && !isHearingSpeech && !isTranscribing && !isSpeaking
 
         return ControlsState(
             speakEnabled = speakEnabled,

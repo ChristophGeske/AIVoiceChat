@@ -13,9 +13,11 @@ Alternative: The best alternative to this project currently available is the voi
 
 <img width="208" height="384" alt="gemini" src="https://github.com/user-attachments/assets/7d91b730-f915-4ce5-b92a-46390ebb47ff" />
 
+The Gemini app in my tests works best when you open the app on the phone, choose 2.5 pro model and use hey google to start chatting with it.
+
 However the rate limitations of the Gemini app are very strict so you are almost required to buy a subscription to use it in practice and you have less control over the output like speed, length and style of answer which you can set in this project in the app.
 
-The Gemini app has the advantage of being more polished, and having better voice recognition software (stt) running in the cloud and more natural sounding text-to-speech (tts) output voice. These two features are something I hope to improve next as well. Also you can type as an alternative and insert files which this project doesn't support currently.
+The Google Gemini app has the advantage of being more polished, and having better voice recognition software (stt) running in the cloud and more natural sounding text-to-speech (tts) output voice. These two features are something I hope to improve next as well. Also you can type as an alternative and insert files which this project doesn't support currently.
 
 Some further disadvantages of this project app is that you need to speak very clearly for the speech-to-text model to work well. 
 
@@ -47,7 +49,7 @@ All tone or emotion in your voice is lost and can't be picked up by this voice c
 
 ## 🛠️ How It Works (Under the Hood)
 
-- Speech‑to‑Text (STT): Uses Android’s built‑in SpeechRecognizer (US English can be set by you in your phone settings) 
+- Speech‑to‑Text (STT): Uses Android’s built‑in SpeechRecognizer (US English can be set by you in your phone settings) or the much better Gemini 2.5 Live Flash multimodel. In one test i found online they predesessor of gemini live performed very well in speach recognition [Source](https://voicewriter.io/blog/best-speech-recognition-api-2025) and in my testing it often picked up my speach correctly. Maybe there are even better tools out there but for now I am happy eith the speach recognition quality and speed of the grmini live model.
 - LLM calls: Uses Google and OpenAI servers for generating responses (Should adjust automatically to your spoken language)
 - TTS: Android TextToSpeech (US English can be set by you in your phone settings)
 
@@ -59,6 +61,7 @@ SentenceTurnEngine:
 
 - STT and TTS quality can vary by device/network settings but might run locally which would make it super fast
 - Early alpha: occasional hiccups with streaming, pacing, or rate limits. The chosen sentence-by-sentence generation used is low on tokens but high on requests which for Gemini free tier might be less ideal since Gemini free tier is counting requests and not tokens.
+
 
 
 ## 🤝 Contributing

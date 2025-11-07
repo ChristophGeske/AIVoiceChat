@@ -25,7 +25,7 @@ class GeminiLiveSttController(
 
     companion object {
         private const val TAG = "GeminiLiveSTT"
-        private const val END_OF_TURN_DELAY_MS = 1200L
+        private const val END_OF_TURN_DELAY_MS = 250L
     }
 
     private val _isListening = MutableStateFlow(false)

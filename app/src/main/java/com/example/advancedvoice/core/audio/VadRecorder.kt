@@ -23,11 +23,12 @@ class VadRecorder(
     private val silenceThresholdRms: Double = 250.0,
     private val endOfSpeechMs: Long = 1500L,
     private val maxSilenceMs: Long? = null,
+    // --- CHANGE 1: Add minSpeechDurationMs parameter ---
     private val minSpeechDurationMs: Long = 300L,
     private val channelConfig: Int = AudioFormat.CHANNEL_IN_MONO,
     private val encoding: Int = AudioFormat.ENCODING_PCM_16BIT,
     private val frameMillis: Int = 20,
-    private val startupGracePeriodMs: Long = 100L,
+    private val startupGracePeriodMs: Long =  0L, // was 100L before
     val allowMultipleUtterances: Boolean = false
 ) {
     companion object {
@@ -159,6 +160,7 @@ class VadRecorder(
 
                         val silenceDuration = now - silenceStartTs
 
+                        // --- CHANGE 2: Modify the SpeechEnd logic ---
                         if (silenceDuration > endOfSpeechMs) {
                             val duration = now - speechStartTs
                             if (duration >= minSpeechDurationMs) {
@@ -168,13 +170,12 @@ class VadRecorder(
                                 Log.d(TAG, "[VAD] Speech too short (${duration}ms), treating as noise")
                             }
 
-                            // ✅ FIX: This logic was flawed. Now it correctly breaks or continues.
+                            // This logic now correctly resets state for both valid speech and noise.
                             if (allowMultipleUtterances) {
                                 Log.d(TAG, "[VAD] Resetting for next utterance.")
                                 hasSpeech = false
                                 speechStartTs = 0L
                                 silenceStartTs = 0L
-                                // No 'continue' needed, loop will just proceed.
                             } else {
                                 // In single-utterance mode, we are done. Break the loop.
                                 break

@@ -50,12 +50,14 @@ class MicrophoneSession(
 
         Log.i(TAG, "Starting continuous microphone session")
 
+        // --- CHANGE 3: Update VadRecorder instantiation ---
         vad = VadRecorder(
             scope = scope,
-            maxSilenceMs = null,  // Never timeout - keep listening
+            maxSilenceMs = null,                 // Never timeout - keep listening
             endOfSpeechMs = 1500L,
-            allowMultipleUtterances = true,  // Keep going indefinitely
-            startupGracePeriodMs = 100L
+            allowMultipleUtterances = true,      // Keep going indefinitely
+            startupGracePeriodMs = 0L, // 100L,
+            minSpeechDurationMs = 300L           // <-- Add this line
         )
 
         // Audio stream handler

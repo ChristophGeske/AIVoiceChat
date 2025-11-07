@@ -153,21 +153,27 @@ class GeminiLiveSttController(
                     is VadRecorder.VadEvent.SpeechEnd -> {
                         Log.d(TAG, "[VAD] SpeechEnd (mode=$currentMode)")
 
-                        // ✅ Only finalize turn if in TRANSCRIBING mode
+                        // The moment VAD detects speech has ended, update our state.
+                        // This makes the UI feel responsive and accurately reflects reality.
+                        if (_isHearingSpeech.value) {
+                            _isHearingSpeech.value = false
+                        }
+
+                        // Only schedule a turn finalization if we are in the middle of
+                        // an active transcription session.
                         if (currentMode == MicrophoneSession.Mode.TRANSCRIBING) {
                             endTurnJob?.cancel()
                             endTurnJob = scope.launch {
                                 Log.d(TAG, "[VAD] SpeechEnd. Starting ${END_OF_TURN_DELAY_MS}ms timer...")
                                 delay(END_OF_TURN_DELAY_MS)
+
+                                // Check if a new speech event cancelled this job in the meantime.
+                                // If not, we can safely finalize the turn.
                                 Log.i(TAG, "[VAD] Timer finished. Finalizing.")
                                 endTurn("ConversationalPause")
                             }
-                        } else if (currentMode == MicrophoneSession.Mode.MONITORING) {
-                            // In monitoring mode, just update the state flag
-                            _isHearingSpeech.value = false
-                            Log.d(TAG, "[VAD] Speech ended in MONITORING mode")
                         } else {
-                            Log.d(TAG, "[VAD] Ignoring SpeechEnd in IDLE mode")
+                            Log.d(TAG, "[VAD] Ignoring SpeechEnd in mode: $currentMode")
                         }
                     }
 

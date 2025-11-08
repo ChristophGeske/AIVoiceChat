@@ -285,12 +285,12 @@
                     android:textSize="12sp" />
             </LinearLayout>
 
-            <!-- STT system -->
+            <!-- TTS Settings Link -->
             <TextView
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="24dp"
-                android:text="Speech Recognition Engine"
+                android:text="Text-to-Speech Settings"
                 android:textAppearance="?attr/textAppearanceTitleMedium"
                 android:textColor="#FFFFFF" />
 
@@ -301,30 +301,9 @@
                 android:layout_marginStart="4dp"
                 android:layout_marginTop="4dp"
                 android:padding="8dp"
-                android:text="Text-to-Speech (TTS) Settings"
+                android:text="Open TTS Settings"
                 android:textColor="#64B5F6"
                 android:textSize="14sp" />
-
-            <RadioGroup
-                android:id="@+id/sttSystemRadioGroup"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="8dp">
-
-                <RadioButton
-                    android:id="@+id/radioSttStandard"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:text="Standard (On-device)"
-                    android:textColor="#FFFFFF" />
-
-                <RadioButton
-                    android:id="@+id/radioSttGeminiLive"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:text="Gemini Live (Fast, requires internet)"
-                    android:textColor="#FFFFFF" />
-            </RadioGroup>
 
             <!-- System Prompt -->
             <LinearLayout

@@ -1,7 +1,6 @@
 package com.example.advancedvoice.feature.conversation.presentation.interruption
 
 import android.util.Log
-import com.example.advancedvoice.core.audio.VadRecorder
 import com.example.advancedvoice.core.logging.LoggerConfig
 import com.example.advancedvoice.domain.engine.SentenceTurnEngine
 import com.example.advancedvoice.feature.conversation.presentation.GenerationPhase
@@ -14,7 +13,6 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.launch
-import java.lang.Exception
 
 class InterruptionManager(
     private val scope: CoroutineScope,
@@ -47,11 +45,9 @@ class InterruptionManager(
     @Volatile
     private var lastRestartTime = 0L
     private var interruptAccumulationJob: Job? = null
-    private var backgroundRecorder: VadRecorder? = null
 
     fun initialize() {
         monitorVoiceInterrupts()
-        monitorBackgroundListenerCleanup()
     }
 
     private fun isGenerating(phase: GenerationPhase): Boolean {
@@ -62,23 +58,6 @@ class InterruptionManager(
 
     private fun monitorVoiceInterrupts() {
         scope.launch {
-            // This part handles starting/stopping the background VAD for non-Gemini STT
-            stateManager.phase.collect { currentPhase ->
-                val generating = isGenerating(currentPhase)
-                val stt = getStt()
-
-                if (generating && stt !is GeminiLiveSttController && backgroundRecorder == null) {
-                    Log.d(TAG, "[VOICE-INTERRUPT] Standard STT detected, enabling background VAD for interruption.")
-                    enableBackgroundListener()
-                } else if (!generating && backgroundRecorder != null) {
-                    Log.d(TAG, "[VOICE-INTERRUPT] Generation ended, disabling background VAD.")
-                    disableBackgroundListener()
-                }
-            }
-        }
-
-        scope.launch {
-            // This part handles the interruption event itself, now unified for both STT types
             combine(
                 stateManager.phase,
                 stateManager.isHearingSpeech
@@ -103,106 +82,11 @@ class InterruptionManager(
 
                         val stt = getStt()
                         if (stt is GeminiLiveSttController) {
-                            // For Gemini Live, just switch the existing mic session to TRANSCRIBING
                             Log.i(TAG, "[VOICE-INTERRUPT] Switching GeminiLive to TRANSCRIBING mode")
                             stt.start(isAutoListen = false)
-                        } else {
-                            // For Standard STT, disable our background VAD and start a real STT session
-                            Log.i(TAG, "[VOICE-INTERRUPT] Disabling background VAD and starting StandardSTT")
-                            disableBackgroundListener()
-                            delay(100) // Small delay to ensure mic is released
-                            stt?.start(isAutoListen = false)
                         }
 
                         startAccumulationWatcher()
-                    }
-                }
-            }
-        }
-    }
-
-    private suspend fun enableBackgroundListener() {
-        if (backgroundRecorder != null) {
-            Log.d(TAG, "[VOICE-INTERRUPT] Background listener already active")
-            return
-        }
-        Log.i(TAG, "[VOICE-INTERRUPT] Enabling background voice detection (infinite timeout)")
-
-        // ✅ FIX 1: The background VAD must be in multi-utterance mode to properly detect interruptions.
-        val recorder = VadRecorder(
-            scope = scope,
-            sampleRate = 16_000,
-            silenceThresholdRms = 300.0,
-            endOfSpeechMs = 300L,
-            maxSilenceMs = null,
-            minSpeechDurationMs = 300L,
-            startupGracePeriodMs = 300L,
-            allowMultipleUtterances = true // This ensures the VAD keeps listening
-        )
-
-        backgroundRecorder = recorder
-        scope.launch {
-            recorder.events.collect { event ->
-                when (event) {
-                    is VadRecorder.VadEvent.SpeechStart -> {
-                        val elapsed = System.currentTimeMillis() - generationStartTime
-                        Log.i(TAG, "[VOICE-INTERRUPT] Voice detected at ${elapsed}ms")
-                        stateManager.setHearingSpeech(true)
-                    }
-                    is VadRecorder.VadEvent.SpeechEnd -> {
-                        Log.i(TAG, "[VOICE-INTERRUPT] Voice ended (${event.durationMs}ms)")
-                        // In this mode, we let the user manually clear the 'hearing' state by stopping speech
-                        // Or by the VAD eventually timing out if we added a max duration.
-                        // For barge-in, we want it to stay 'hearing' until the user stops for a bit.
-                        // For simplicity, we can just set it to false here.
-                        stateManager.setHearingSpeech(false)
-                    }
-                    is VadRecorder.VadEvent.SilenceTimeout -> {
-                        Log.d(TAG, "[VOICE-INTERRUPT] Unexpected silence timeout")
-                        disableBackgroundListener()
-                    }
-                    is VadRecorder.VadEvent.Error -> {
-                        Log.e(TAG, "[VOICE-INTERRUPT] VAD error: ${event.message}")
-                        disableBackgroundListener()
-                    }
-                }
-            }
-        }
-        try {
-            recorder.start()
-        } catch (se: SecurityException) {
-            Log.w(TAG, "[VOICE-INTERRUPT] Permission denied for background VAD: ${se.message}")
-            backgroundRecorder = null
-        }
-    }
-
-    private fun disableBackgroundListener() {
-        val recorder = backgroundRecorder ?: return
-        backgroundRecorder = null
-        Log.d(TAG, "[VOICE-INTERRUPT] Disabling background listener")
-        scope.launch {
-            recorder.stop()
-        }
-    }
-
-    private fun monitorBackgroundListenerCleanup() {
-        scope.launch {
-            stateManager.phase.collect { currentPhase ->
-                if (currentPhase == GenerationPhase.IDLE &&
-                    backgroundRecorder != null &&
-                    !isBargeInTurn &&
-                    !isAccumulatingAfterInterrupt
-                ) {
-                    delay(300L)
-                    if (stateManager.phase.value == GenerationPhase.IDLE &&
-                        !isBargeInTurn &&
-                        !isAccumulatingAfterInterrupt &&
-                        backgroundRecorder != null
-                    ) {
-                        Log.d(TAG, "[VOICE-INTERRUPT] Generation ended, stopping background listener")
-                        scope.launch {
-                            disableBackgroundListener()
-                        }
                     }
                 }
             }
@@ -216,13 +100,18 @@ class InterruptionManager(
             val startTime = System.currentTimeMillis()
             var lastCheck = startTime
             var consecutiveNotBusyCount = 0
+
             while (isAccumulatingAfterInterrupt) {
                 delay(500L)
                 val elapsed = System.currentTimeMillis() - startTime
                 val listening = stateManager.isListening.value
                 val hearing = stateManager.isHearingSpeech.value
                 val transcribing = stateManager.isTranscribing.value
-                val isBusy = listening || hearing || transcribing
+
+                // ✅ FIX: Only count listening/transcribing as busy, not just hearing (noise)
+                // This prevents MONITORING mode noise from blocking finalization
+                val isBusy = listening || transcribing
+
                 if (System.currentTimeMillis() - lastCheck >= 2000L) {
                     Log.d(
                         TAG,
@@ -230,6 +119,7 @@ class InterruptionManager(
                     )
                     lastCheck = System.currentTimeMillis()
                 }
+
                 if (!isBusy) {
                     consecutiveNotBusyCount++
                     if (consecutiveNotBusyCount >= 3) {
@@ -240,6 +130,7 @@ class InterruptionManager(
                 } else {
                     consecutiveNotBusyCount = 0
                 }
+
                 if (elapsed > INTERRUPT_ACCUMULATION_TIMEOUT) {
                     Log.w(TAG, "[ACCUMULATION] Timeout (${elapsed}ms), force finalizing")
                     scope.launch {
@@ -266,11 +157,14 @@ class InterruptionManager(
             Log.d(TAG, "[ACCUMULATION] Already finalized")
             return
         }
+
         val lastUserEntry = stateManager.conversation.value.lastOrNull { it.speaker == "You" }
         val accumulatedText = lastUserEntry?.sentences?.joinToString(" ")?.trim() ?: ""
         Log.i(TAG, "[ACCUMULATION] Finalizing (len=${accumulatedText.length}): '${accumulatedText.take(100)}...'")
+
         val now = System.currentTimeMillis()
         val timeSinceLastRestart = now - lastRestartTime
+
         if (timeSinceLastRestart < MIN_RESTART_INTERVAL_MS) {
             Log.w(TAG, "[ACCUMULATION] Too soon, delaying...")
             scope.launch {
@@ -279,17 +173,27 @@ class InterruptionManager(
             }
             return
         }
+
         isAccumulatingAfterInterrupt = false
         isBargeInTurn = false
         interruptAccumulationJob?.cancel()
+
+        // ✅ FIX: Don't call stop() which switches to IDLE. Just clear the state flags.
+        // The mic should stay in MONITORING mode to allow interruptions during next generation.
         scope.launch {
-            disableBackgroundListener()
-            getStt()?.stop(false)
             delay(200L)
             stateManager.setListening(false)
             stateManager.setHearingSpeech(false)
             stateManager.setTranscribing(false)
+
+            // ✅ Explicitly switch to MONITORING (not IDLE) so interruptions work during next LLM generation
+            val stt = getStt()
+            if (stt is GeminiLiveSttController) {
+                Log.i(TAG, "[ACCUMULATION] Switching to MONITORING for next turn")
+                stt.switchMicMode(com.example.advancedvoice.core.audio.MicrophoneSession.Mode.MONITORING)
+            }
         }
+
         if (accumulatedText.isNotEmpty()) {
             Log.i(TAG, "[ACCUMULATION] Restarting turn with accumulated text")
             lastRestartTime = now
@@ -321,7 +225,6 @@ class InterruptionManager(
         isBargeInTurn = false
         isAccumulatingAfterInterrupt = false
         scope.launch {
-            disableBackgroundListener()
             stateManager.setListening(false)
             stateManager.setHearingSpeech(false)
             stateManager.setTranscribing(false)

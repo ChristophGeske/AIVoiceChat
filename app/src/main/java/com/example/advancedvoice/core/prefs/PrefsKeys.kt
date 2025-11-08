@@ -11,9 +11,6 @@ object PrefsKeys {
     const val SELECTED_MODEL = "selected_model"
     const val GPT5_EFFORT = "gpt5_effort" // minimal|low|medium|high
 
-    // STT
-    const val STT_SYSTEM = "stt_system" // "STANDARD" | "GEMINI_LIVE"
-
     // Engine config
     const val FASTER_FIRST = "faster_first"            // Boolean
     const val MAX_SENTENCES = "max_sentences"          // Int

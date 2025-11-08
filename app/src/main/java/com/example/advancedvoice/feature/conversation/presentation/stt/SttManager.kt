@@ -2,15 +2,12 @@ package com.example.advancedvoice.feature.conversation.presentation.stt
 
 import android.app.Application
 import android.util.Log
-import com.example.advancedvoice.core.audio.VadRecorder
 import com.example.advancedvoice.core.logging.LoggerConfig
 import com.example.advancedvoice.core.prefs.Prefs
-import com.example.advancedvoice.core.prefs.SttSystem
 import com.example.advancedvoice.data.gemini_live.GeminiLiveClient
 import com.example.advancedvoice.data.gemini_live.GeminiLiveTranscriber
 import com.example.advancedvoice.feature.conversation.presentation.state.ConversationStateManager
 import com.example.advancedvoice.feature.conversation.service.GeminiLiveSttController
-import com.example.advancedvoice.feature.conversation.service.StandardSttController
 import com.example.advancedvoice.feature.conversation.service.SttController
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
@@ -22,7 +19,6 @@ class SttManager(
     private val scope: CoroutineScope,
     private val stateManager: ConversationStateManager,
     private val onFinalTranscript: (String) -> Unit
-
 ) {
     private companion object { const val TAG = LoggerConfig.TAG_VM }
 
@@ -32,30 +28,28 @@ class SttManager(
     fun getStt(): SttController? = stt
 
     fun setupFromPreferences() {
-        val sttPref = Prefs.getSttSystem(app)
         val geminiKey = Prefs.getGeminiKey(app)
-        val shouldUseGeminiLive = sttPref == SttSystem.GEMINI_LIVE && geminiKey.isNotBlank()
-        val currentlyUsingGeminiLive = stt is GeminiLiveSttController
 
-        if (stt != null && currentlyUsingGeminiLive == shouldUseGeminiLive) {
+        if (geminiKey.isBlank()) {
+            Log.w(TAG, "[STT Manager] No Gemini API key - STT will not be available")
+            stt?.release()
+            stt = null
             return
         }
-        Log.i(TAG, "[STT Manager] Reconfiguring STT. Want GeminiLive=$shouldUseGeminiLive")
 
-        stt?.release()
-        stt = if (shouldUseGeminiLive) {
-            createGeminiLiveStt(geminiKey)
-        } else {
-            StandardSttController(app, scope)
+        if (stt != null) {
+            Log.d(TAG, "[STT Manager] GeminiLive STT already configured")
+            return
         }
-        Log.i(TAG, "[STT Manager] Configured with ${stt?.javaClass?.simpleName}")
+
+        Log.i(TAG, "[STT Manager] Configuring GeminiLive STT")
+        stt = createGeminiLiveStt(geminiKey)
         rewireCollectors()
     }
 
     private fun createGeminiLiveStt(geminiKey: String): GeminiLiveSttController {
         val liveModel = "models/gemini-2.5-flash-native-audio-preview-09-2025"
 
-        // ✅ REMOVED: VAD creation (MicrophoneSession creates it internally)
         val client = GeminiLiveClient(scope = scope)
         val transcriber = GeminiLiveTranscriber(scope = scope, client = client)
 

@@ -3,8 +3,6 @@ package com.example.advancedvoice.core.prefs
 import android.content.Context
 import android.content.SharedPreferences
 
-enum class SttSystem { STANDARD, GEMINI_LIVE }
-
 object Prefs {
 
     private fun sp(context: Context): SharedPreferences =
@@ -35,16 +33,6 @@ object Prefs {
 
     fun setGpt5Effort(context: Context, value: String) =
         sp(context).edit().putString(PrefsKeys.GPT5_EFFORT, value).apply()
-
-    // STT
-    fun getSttSystem(context: Context): SttSystem =
-        when (sp(context).getString(PrefsKeys.STT_SYSTEM, SttSystem.STANDARD.name) ?: SttSystem.STANDARD.name) {
-            SttSystem.GEMINI_LIVE.name -> SttSystem.GEMINI_LIVE
-            else -> SttSystem.STANDARD
-        }
-
-    fun setSttSystem(context: Context, system: SttSystem) =
-        sp(context).edit().putString(PrefsKeys.STT_SYSTEM, system.name).apply()
 
     // ENGINE CONFIG
     fun getFasterFirst(context: Context): Boolean =

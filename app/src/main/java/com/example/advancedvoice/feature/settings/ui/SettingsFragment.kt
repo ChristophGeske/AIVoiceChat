@@ -1,8 +1,6 @@
 package com.example.advancedvoice.feature.settings.ui
 
-import android.Manifest
 import android.content.Intent
-import android.content.pm.PackageManager
 import android.os.Bundle
 import android.provider.Settings
 import android.text.Html
@@ -13,12 +11,10 @@ import android.view.ViewGroup
 import android.widget.RadioButton
 import android.widget.TextView
 import android.widget.Toast
-import androidx.core.content.ContextCompat
 import androidx.core.widget.doAfterTextChanged
 import androidx.fragment.app.Fragment
 import com.example.advancedvoice.R
 import com.example.advancedvoice.core.prefs.Prefs
-import com.example.advancedvoice.core.prefs.SttSystem
 import com.google.android.material.textfield.TextInputEditText
 
 class SettingsFragment : Fragment() {
@@ -35,7 +31,6 @@ class SettingsFragment : Fragment() {
         setupListenSeconds(view)
         setupAutoListen(view)
         setupFasterFirst(view)
-        setupSttSystem(view)
         setupTtsSettingsLink(view)
     }
 
@@ -65,10 +60,6 @@ class SettingsFragment : Fragment() {
         updateModelOptionsVisibility(root)
     }
 
-    /**
-     * ✅ FIX: This function is completely rewritten to manually manage the RadioButtons,
-     * which is necessary because they are not direct children of a single RadioGroup.
-     */
     private fun setupModelRadios(root: View) {
         val allModelButtons = listOf(
             root.findViewById<RadioButton>(R.id.radioGeminiFlash),
@@ -80,11 +71,10 @@ class SettingsFragment : Fragment() {
             root.findViewById<RadioButton>(R.id.radioGpt5MiniMedium)
         )
 
-        // Set the initial checked state
         val currentModel = Prefs.getSelectedModel(requireContext()).lowercase()
         val currentEffort = Prefs.getGpt5Effort(requireContext()).lowercase()
 
-        allModelButtons.forEach { it.isChecked = false } // Start by unchecking all
+        allModelButtons.forEach { it.isChecked = false }
 
         when {
             currentModel.startsWith("gemini-2.5-flash") -> root.findViewById<RadioButton>(R.id.radioGeminiFlash).isChecked = true
@@ -96,14 +86,11 @@ class SettingsFragment : Fragment() {
             currentModel == "gpt-5-mini" -> root.findViewById<RadioButton>(R.id.radioGpt5MiniMedium).isChecked = true
         }
 
-        // Create a single click listener to enforce mutual exclusivity
         val modelClickListener = View.OnClickListener { clickedView ->
-            // Uncheck all buttons
             allModelButtons.forEach { button ->
                 button.isChecked = (button.id == clickedView.id)
             }
 
-            // Call the appropriate function based on which button was clicked
             when (clickedView.id) {
                 R.id.radioGeminiFlash -> onModelChosen("gemini-2.5-flash", null)
                 R.id.radioGeminiPro -> onModelChosen("gemini-2.5-pro", null)
@@ -115,7 +102,6 @@ class SettingsFragment : Fragment() {
             }
         }
 
-        // Apply the listener to every model radio button
         allModelButtons.forEach { it.setOnClickListener(modelClickListener) }
     }
 
@@ -211,23 +197,6 @@ class SettingsFragment : Fragment() {
         sw.setOnCheckedChangeListener { _, isChecked ->
             Prefs.setFasterFirst(requireContext(), isChecked)
             warning.visibility = if (isChecked) View.VISIBLE else View.GONE
-        }
-    }
-
-    private fun setupSttSystem(root: View) {
-        val rStd = root.findViewById<RadioButton>(R.id.radioSttStandard)
-        val rLive = root.findViewById<RadioButton>(R.id.radioSttGeminiLive)
-        val saved = Prefs.getSttSystem(requireContext())
-        if (saved == SttSystem.GEMINI_LIVE) rLive.isChecked = true else rStd.isChecked = true
-
-        rStd.setOnClickListener { Prefs.setSttSystem(requireContext(), SttSystem.STANDARD); checkRecordPermission() }
-        rLive.setOnClickListener { Prefs.setSttSystem(requireContext(), SttSystem.GEMINI_LIVE); checkRecordPermission() }
-    }
-
-    private fun checkRecordPermission() {
-        val granted = ContextCompat.checkSelfPermission(requireContext(), Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
-        if (!granted) {
-            Toast.makeText(requireContext(), "Tip: allow microphone permission for voice input.", Toast.LENGTH_SHORT).show()
         }
     }
 

@@ -50,14 +50,16 @@ class MicrophoneSession(
 
         Log.i(TAG, "Starting continuous microphone session")
 
-        // --- CHANGE 3: Update VadRecorder instantiation ---
+        // ✅ OPTIMIZED VAD PARAMETERS
         vad = VadRecorder(
             scope = scope,
-            maxSilenceMs = null,                 // Never timeout - keep listening
-            endOfSpeechMs = 1500L,
-            allowMultipleUtterances = true,      // Keep going indefinitely
-            startupGracePeriodMs = 0L, // 100L,
-            minSpeechDurationMs = 300L           // <-- Add this line
+            sampleRate = 16_000,                    // Standard rate for speech
+            silenceThresholdRms = 350.0,            // ✅ Slightly higher to reduce noise false positives
+            maxSilenceMs = null,                    // Never timeout - keep listening
+            endOfSpeechMs = 1200L,                  // ✅ REDUCED from 1500L for faster response
+            allowMultipleUtterances = true,         // Keep going indefinitely
+            startupGracePeriodMs = 0L,              // ✅ ALREADY CORRECT - no startup delay
+            minSpeechDurationMs = 150L              // ✅ REDUCED from 300L to catch first words faster
         )
 
         // Audio stream handler

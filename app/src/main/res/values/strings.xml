@@ -40,7 +40,6 @@
     <!-- Errors -->
     <string name="error_tts_init">Text-to-Speech initialization failed.</string>
     <string name="error_permission_denied">Audio permission is required to use the voice feature.</string>
-    <string name="error_stt">Speech recognition failed. Please try again.</string>
     <string name="error_gemini">Error communicating with the AI. Please check your connection and API key.</string>
 
     <!-- Template strings used by fragment layout previews -->
@@ -50,7 +49,7 @@
     <string name="faster_first_label">Faster First Response</string>
     <string name="faster_first_desc">Using this setting results in the first sentence being generated with the same model you choose, but only one sentence is generated, which reduces generation time and thinking is disabled for this first sentence. This often results in slightly worse quality responses, especially for science and math questions.</string>
 
-    <!-- NEW: System Prompt Strings -->
+    <!-- System Prompt Strings -->
     <string name="system_prompt_label">System Prompt</string>
     <string name="system_prompt_hint">Custom instructions for the assistant...</string>
     <string name="reset_prompt">Reset to Default</string>

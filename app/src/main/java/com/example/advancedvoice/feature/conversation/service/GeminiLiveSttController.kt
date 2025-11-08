@@ -49,7 +49,6 @@ class GeminiLiveSttController(
     private var finalTranscriptJob: Job? = null
     private var endTurnJob: Job? = null
 
-    // ✅ NEW: Single continuous microphone session
     private var micSession: MicrophoneSession? = null
 
     @Volatile private var turnEnded = false
@@ -96,7 +95,7 @@ class GeminiLiveSttController(
 
         if (!ensureConnection()) return
 
-        // ✅ Start continuous mic session if not already running
+        // Start continuous mic session if not already running
         if (micSession == null) {
             micSession = MicrophoneSession(scope, app, client, transcriber)
             try {
@@ -115,7 +114,6 @@ class GeminiLiveSttController(
         _isTranscribing.value = false
         turnEnded = false
 
-        // ✅ Switch mode instead of starting/stopping
         micSession?.switchMode(MicrophoneSession.Mode.TRANSCRIBING)
 
         finalTranscriptJob?.cancel()
@@ -139,8 +137,6 @@ class GeminiLiveSttController(
                         endTurnJob?.cancel()
                         Log.d(TAG, "[VAD] SpeechStart (mode=$currentMode)")
 
-                        // ✅ Process in TRANSCRIBING and MONITORING modes
-                        // ❌ Ignore only in IDLE mode (during TTS)
                         if (currentMode != MicrophoneSession.Mode.IDLE) {
                             if (!_isHearingSpeech.value) {
                                 _isHearingSpeech.value = true
@@ -153,22 +149,15 @@ class GeminiLiveSttController(
                     is VadRecorder.VadEvent.SpeechEnd -> {
                         Log.d(TAG, "[VAD] SpeechEnd (mode=$currentMode)")
 
-                        // The moment VAD detects speech has ended, update our state.
-                        // This makes the UI feel responsive and accurately reflects reality.
                         if (_isHearingSpeech.value) {
                             _isHearingSpeech.value = false
                         }
 
-                        // Only schedule a turn finalization if we are in the middle of
-                        // an active transcription session.
                         if (currentMode == MicrophoneSession.Mode.TRANSCRIBING) {
                             endTurnJob?.cancel()
                             endTurnJob = scope.launch {
                                 Log.d(TAG, "[VAD] SpeechEnd. Starting ${END_OF_TURN_DELAY_MS}ms timer...")
                                 delay(END_OF_TURN_DELAY_MS)
-
-                                // Check if a new speech event cancelled this job in the meantime.
-                                // If not, we can safely finalize the turn.
                                 Log.i(TAG, "[VAD] Timer finished. Finalizing.")
                                 endTurn("ConversationalPause")
                             }
@@ -198,7 +187,6 @@ class GeminiLiveSttController(
         _isHearingSpeech.value = false
         _isTranscribing.value = true
 
-        // ✅ Don't stop mic - just end transcription and switch to monitoring
         micSession?.endCurrentTranscription()
         micSession?.switchMode(MicrophoneSession.Mode.MONITORING)
     }
@@ -216,7 +204,6 @@ class GeminiLiveSttController(
             _isHearingSpeech.value = false
             _isTranscribing.value = false
 
-            // ✅ Switch to IDLE instead of stopping
             micSession?.switchMode(MicrophoneSession.Mode.IDLE)
         }
 
@@ -260,7 +247,6 @@ class GeminiLiveSttController(
         Log.i(TAG, "[Controller] Switching mic mode to: $mode")
         micSession?.switchMode(mode)
 
-        // ✅ Force-clear state flags when switching modes
         when (mode) {
             MicrophoneSession.Mode.IDLE -> {
                 _isListening.value = false
@@ -277,7 +263,6 @@ class GeminiLiveSttController(
                 Log.d(TAG, "[Controller] Listening states cleared for MONITORING mode")
             }
             MicrophoneSession.Mode.TRANSCRIBING -> {
-                // States will be set by start()
                 Log.d(TAG, "[Controller] TRANSCRIBING mode activated")
             }
         }

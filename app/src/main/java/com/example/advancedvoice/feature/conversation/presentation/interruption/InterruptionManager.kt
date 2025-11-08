@@ -62,19 +62,30 @@ class InterruptionManager(
 
     private fun monitorVoiceInterrupts() {
         scope.launch {
+            // This part handles starting/stopping the background VAD for non-Gemini STT
+            stateManager.phase.collect { currentPhase ->
+                val generating = isGenerating(currentPhase)
+                val stt = getStt()
+
+                if (generating && stt !is GeminiLiveSttController && backgroundRecorder == null) {
+                    Log.d(TAG, "[VOICE-INTERRUPT] Standard STT detected, enabling background VAD for interruption.")
+                    enableBackgroundListener()
+                } else if (!generating && backgroundRecorder != null) {
+                    Log.d(TAG, "[VOICE-INTERRUPT] Generation ended, disabling background VAD.")
+                    disableBackgroundListener()
+                }
+            }
+        }
+
+        scope.launch {
+            // This part handles the interruption event itself, now unified for both STT types
             combine(
                 stateManager.phase,
-                stateManager.isHearingSpeech,
-                stateManager.isSpeaking
-            ) { currentPhase, hearingSpeech, speaking ->
-                Triple(currentPhase, hearingSpeech, speaking)
-            }.collect { (currentPhase, hearingSpeech, speaking) ->
-                val generating = isGenerating(currentPhase)
-
-                // ✅ SIMPLIFIED: No background VAD needed - mic is always on!
-                // Mic is in MONITORING mode during generation/TTS
-
-                if (generating && hearingSpeech && getStt() is GeminiLiveSttController && !isBargeInTurn && !isAccumulatingAfterInterrupt) {
+                stateManager.isHearingSpeech
+            ) { currentPhase, hearingSpeech ->
+                isGenerating(currentPhase) to hearingSpeech
+            }.collect { (generating, hearingSpeech) ->
+                if (generating && hearingSpeech && !isAccumulatingAfterInterrupt) {
                     val generationDuration = System.currentTimeMillis() - generationStartTime
                     if (generationDuration < MIN_GENERATION_TIME_BEFORE_INTERRUPT_MS) {
                         Log.d(TAG, "[VOICE-INTERRUPT] Ignoring early voice (${generationDuration}ms)")
@@ -90,13 +101,17 @@ class InterruptionManager(
                         engine.abort(true)
                         tts.stop()
 
-                        // ✅ NO DELAY NEEDED - mic is already recording!
-                        Log.i(TAG, "[VOICE-INTERRUPT] Switching to TRANSCRIBING mode (no mic restart)")
-
                         val stt = getStt()
                         if (stt is GeminiLiveSttController) {
-                            // Just switch mode - mic never stopped!
+                            // For Gemini Live, just switch the existing mic session to TRANSCRIBING
+                            Log.i(TAG, "[VOICE-INTERRUPT] Switching GeminiLive to TRANSCRIBING mode")
                             stt.start(isAutoListen = false)
+                        } else {
+                            // For Standard STT, disable our background VAD and start a real STT session
+                            Log.i(TAG, "[VOICE-INTERRUPT] Disabling background VAD and starting StandardSTT")
+                            disableBackgroundListener()
+                            delay(100) // Small delay to ensure mic is released
+                            stt?.start(isAutoListen = false)
                         }
 
                         startAccumulationWatcher()

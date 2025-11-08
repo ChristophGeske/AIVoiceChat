@@ -29,11 +29,8 @@ class FastFirstSentenceStrategy(
     ) {
         active = true
         scope.launch(Dispatchers.IO) {
-            var turnFinished = false
             try {
-                // ✅ FIX: Create a Set to collect and automatically de-duplicate sources from both phases.
                 val combinedSources = mutableSetOf<Pair<String, String?>>()
-
                 val gem = GeminiService(geminiKeyProvider, http)
                 val mappedHistory = mapHistory(history)
 
@@ -48,23 +45,27 @@ class FastFirstSentenceStrategy(
                     enableGoogleSearch = true
                 )
 
+                // --- CHANGE 1: CRITICAL CHECK AFTER NETWORK CALL ---
+                // If we were aborted while waiting for the network, or if the API returned nothing,
+                // we must exit immediately to prevent a race condition.
                 if (!active || firstSentence.isBlank()) {
-                    if (firstSentence.isBlank()) Log.w("FastFirst", "Phase 1 returned an empty sentence.")
-                    callbacks.onTurnFinish()
-                    turnFinished = true
-                    return@launch
+                    if (firstSentence.isBlank()) {
+                        Log.w("FastFirst", "Phase 1 returned an empty sentence.")
+                        // Only call onTurnFinish if we weren't aborted. The engine handles it otherwise.
+                        if (active) callbacks.onTurnFinish()
+                    } else {
+                        Log.w("FastFirst", "Aborted during Phase 1 network call.")
+                    }
+                    return@launch // EXIT COROUTINE
                 }
 
-                // ✅ FIX: Do NOT display sources yet. Just add them to our collection.
                 combinedSources.addAll(phase1Sources)
                 callbacks.onFirstSentence(firstSentence)
 
                 if (maxSentences <= 1) {
                     Log.i("FastFirst", "Max sentences is 1, skipping Phase 2.")
-                    // ✅ FIX: Display the collected sources now since the turn is over.
                     GroundingUtils.processAndDisplaySources(combinedSources.toList(), callbacks.onSystem)
                     callbacks.onTurnFinish()
-                    turnFinished = true
                     return@launch
                 }
 
@@ -77,15 +78,18 @@ class FastFirstSentenceStrategy(
 
                 val (remainderText, phase2Sources) = gem.generateTextWithSources(
                     systemPrompt = phase2SystemPrompt,
-                    history = emptyList(),
+                    history = phase2History, // <-- FIX: Use the updated history
                     modelName = modelName,
                     temperature = 0.7,
                     enableGoogleSearch = true
                 )
 
-                if (!active) return@launch
+                // --- CHANGE 2: CRITICAL CHECK AFTER SECOND NETWORK CALL ---
+                if (!active) {
+                    Log.w("FastFirst", "Aborted during Phase 2 network call.")
+                    return@launch
+                }
 
-                // ✅ FIX: Add Phase 2 sources to our collection. Do not display yet.
                 combinedSources.addAll(phase2Sources)
 
                 if (remainderText.isNotBlank()) {
@@ -95,20 +99,21 @@ class FastFirstSentenceStrategy(
                     Log.w("FastFirst", "Phase 2 returned an empty remainder.")
                 }
 
-                // ✅ FIX: Now that all sentences are delivered, display the final, combined list of sources.
                 GroundingUtils.processAndDisplaySources(combinedSources.toList(), callbacks.onSystem)
-
                 callbacks.onTurnFinish()
-                turnFinished = true
 
             } catch (t: Throwable) {
                 Log.e("FastFirstSentenceStrategy", "Error: ${t.message}", t)
-                if (active) callbacks.onError(t.message ?: "Generation failed")
-            } finally {
-                if (active && !turnFinished) {
-                    active = false
+                if (active) {
+                    callbacks.onError(t.message ?: "Generation failed")
+                    // Ensure the turn is finished even on error
                     callbacks.onTurnFinish()
                 }
+            } finally {
+                // --- CHANGE 3: REMOVE THE DANGEROUS FINALLY BLOCK LOGIC ---
+                // This was causing the race condition. The logical paths above now correctly
+                // handle all exit conditions. We just need to mark this instance inactive.
+                active = false
             }
         }
     }

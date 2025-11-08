@@ -179,8 +179,11 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
                 }
 
                 if (phase.value == GenerationPhase.IDLE && !isListening.value) {
-                    Log.i(TAG_AUTO_LISTEN, "⏳ Conditions met, waiting 500ms...")
-                    delay(500L)
+                    // --- THE FIX ---
+                    // 500ms is too long and creates a race condition with user noise.
+                    // A very short delay is enough to let the state settle.
+                    Log.i(TAG_AUTO_LISTEN, "⏳ Conditions met, waiting 150ms...")
+                    delay(150L) // Changed from 500L
 
                     val stillIdle = !isSpeaking.value &&
                             !isListening.value &&

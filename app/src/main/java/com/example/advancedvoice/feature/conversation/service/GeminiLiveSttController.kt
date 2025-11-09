@@ -100,7 +100,7 @@ class GeminiLiveSttController(
 
     @RequiresPermission(Manifest.permission.RECORD_AUDIO)
     override suspend fun start(isAutoListen: Boolean) {
-        Log.i(TAG, "[Controller] >>> START Request (autoListen=$isAutoListen)")
+        Log.i("STT_CTRL", "start(autoListen=$isAutoListen)")
         if (!ensureConnection()) return
 
         if (micSession == null) {
@@ -116,20 +116,21 @@ class GeminiLiveSttController(
             }
         }
 
-        // IMPORTANT: capture current speech state BEFORE we touch flags
+        // Capture current speech state BEFORE we touch flags
         val speechAlreadyInProgress = _isHearingSpeech.value
+        Log.i("STT_CTRL", "speechAlreadyInProgress=$speechAlreadyInProgress")
 
         _isListening.value = true
-        // CHANGED: keep the true value if speech is already happening to avoid flicker
         _isHearingSpeech.value = speechAlreadyInProgress
         _isTranscribing.value = false
         turnEnded = false
 
-        // CHANGED: Do NOT reset VAD if speech is already in progress, or we can lose pre-roll
+        // Only reset VAD when speech is NOT already in progress
         if (!speechAlreadyInProgress) {
+            Log.i("VAD_RESET", "Resetting VAD (reason=STT.start, speechAlreadyInProgress=false)")
             micSession?.resetVadDetection()
         } else {
-            Log.i(TAG, "[Controller] Not resetting VAD (speech already in progress)")
+            Log.i("VAD_RESET", "Skipping VAD reset (reason=STT.start, speechAlreadyInProgress=true)")
         }
 
         // Capture partials to detect ASR activity
@@ -148,8 +149,6 @@ class GeminiLiveSttController(
             false
         }
 
-        // We still need to switch into TRANSCRIBING to send audio to the transcriber.
-        // MicrophoneSession will flush MONITORING pre-roll on this switch.
         micSession?.switchMode(MicrophoneSession.Mode.TRANSCRIBING)
 
         finalTranscriptJob?.cancel()

@@ -20,6 +20,12 @@ class MicrophoneSession(
 ) {
     companion object {
         private const val TAG = "MicSession"
+
+        // Focused debug tags (use these in Logcat filter)
+        private const val TAG_MODE = "MODE"
+        private const val TAG_VAD_RESET = "VAD_RESET"
+        private const val TAG_PRE_ROLL = "PRE_ROLL"
+
         private const val BUFFER_SIZE_MS = 1000L // keep up to 1s of pre-roll in MONITORING
         private const val FRAME_SIZE_MS = 20L
         private const val MAX_BUFFERED_FRAMES = (BUFFER_SIZE_MS / FRAME_SIZE_MS).toInt()
@@ -58,7 +64,7 @@ class MicrophoneSession(
             sampleRate = 16_000,
             silenceThresholdRms = 350.0,
             maxSilenceMs = null, // continuous
-            endOfSpeechMs = 800L, // ✅ CHANGE THIS LINE (was 1200L) This line controls how long the system waits in silence before deciding you've finished speaking.
+            endOfSpeechMs = 800L, // how long silence before end-of-speech
             allowMultipleUtterances = true,
             startupGracePeriodMs = 0L,
             minSpeechDurationMs = 150L
@@ -86,6 +92,7 @@ class MicrophoneSession(
     }
 
     fun resetVadDetection() {
+        Log.i(TAG_VAD_RESET, "resetDetection() requested by MicrophoneSession")
         vad?.resetDetection()
     }
 
@@ -100,7 +107,9 @@ class MicrophoneSession(
         val bufferedFrames = audioBuffer.toList()
         audioBuffer.clear()
         if (bufferedFrames.isNotEmpty()) {
-            Log.i(TAG, "Flushing ${bufferedFrames.size} buffered audio frames to transcriber")
+            // 20 ms per frame
+            val approxMs = bufferedFrames.size * FRAME_SIZE_MS
+            Log.i(TAG_PRE_ROLL, "Flushing ${bufferedFrames.size} buffered frames (~${approxMs}ms) to transcriber")
             scope.launch {
                 bufferedFrames.forEach { frame ->
                     client.sendPcm16Le(frame)
@@ -109,7 +118,7 @@ class MicrophoneSession(
         }
     }
 
-    fun switchMode(newMode: Mode, preserveVad: Boolean = false) {
+    fun switchMode(newMode: Mode) {
         if (vad == null) {
             Log.w(TAG, "Cannot switch mode - VAD not started")
             return
@@ -119,9 +128,7 @@ class MicrophoneSession(
             return
         }
 
-        Log.i(TAG, "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-        Log.i(TAG, "MODE SWITCH: $currentMode → $newMode")
-        Log.i(TAG, "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+        Log.i(TAG_MODE, "MODE SWITCH: $currentMode → $newMode")
 
         val previousMode = currentMode
         currentMode = newMode
@@ -129,23 +136,27 @@ class MicrophoneSession(
 
         when (newMode) {
             Mode.TRANSCRIBING -> {
-                // Preserve VAD detection mid-utterance so we don't lose pre-roll
-                if (!preserveVad) {
+                // KEY FIX: Preserve VAD state when coming from MONITORING (barge-in)
+                if (previousMode != Mode.MONITORING) {
+                    Log.i(TAG_VAD_RESET, "Resetting VAD (previousMode=$previousMode)")
                     resetVadDetection()
                 } else {
-                    Log.d(TAG, "[Mode] TRANSCRIBING - preserving VAD state (no reset)")
+                    Log.i(TAG_VAD_RESET, "Preserving VAD (previousMode=MONITORING) to keep in-flight speech")
                 }
 
                 transcriber.startAccumulating()
                 if (previousMode == Mode.MONITORING) {
                     flushBufferToTranscriber()
                 } else if (previousMode == Mode.IDLE) {
+                    // Coming from TTS → do not use any stale buffer that may contain echo
                     Log.w(TAG, "[Mode] Clearing buffer from IDLE (may contain TTS echo)")
                     audioBuffer.clear()
                 }
                 Log.d(TAG, "[Mode] Audio → Gemini Live Transcriber")
             }
             Mode.MONITORING -> {
+                // Keep pre-roll buffer while monitoring so we can flush first words.
+                // But if we just came from IDLE (post-TTS), clear it to avoid echo.
                 if (previousMode == Mode.IDLE) {
                     audioBuffer.clear()
                     Log.d(TAG, "[Mode] MONITORING after IDLE → cleared buffer (echo prevention)")
@@ -154,6 +165,8 @@ class MicrophoneSession(
                 }
             }
             Mode.IDLE -> {
+                // Full idle: reset VAD and clear buffer.
+                Log.i(TAG_VAD_RESET, "Resetting VAD (entering IDLE)")
                 resetVadDetection()
                 audioBuffer.clear()
                 Log.d(TAG, "[Mode] Audio → Discarded (Fully idle)")

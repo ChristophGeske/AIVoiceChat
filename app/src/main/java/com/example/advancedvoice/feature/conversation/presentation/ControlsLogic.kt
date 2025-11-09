@@ -23,12 +23,12 @@ object ControlsLogic {
 
             // Priority 3: Generating response (MUST be before listening checks)
             isGenerating && voiceInterruptAllowed -> "Generating (Speak to Interrupt)"
-            isGenerating && !voiceInterruptAllowed -> "Generating..."
+            isGenerating -> "Generating..."
 
-            // Priority 4: Actively hearing speech (only if not generating/speaking)
+            // Priority 4: Actively listening AND hearing speech
             isListening && isHearingSpeech -> "Listening..."
 
-            // Priority 5: Listening for speech (only if not generating/speaking)
+            // Priority 5: Listening for speech
             isListening -> "Listening..."
 
             // Priority 6: Idle
@@ -37,7 +37,6 @@ object ControlsLogic {
 
         val anythingInProgress = isSpeaking || isListening || isHearingSpeech || isGenerating || isTranscribing
 
-        // ✅ Button enabled unless actively listening/transcribing
         val speakEnabled = !isListening && !isTranscribing
 
         return ControlsState(

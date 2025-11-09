@@ -38,7 +38,6 @@ class ConversationFlowController(
         isCurrentSessionAutoListen = false
         onTapToSpeak()
 
-        // Clear the hard-stop flag whenever the user initiates an action
         stateManager.setHardStop(false)
 
         if (engine.isActive() || stateManager.isSpeaking.value) {
@@ -52,7 +51,6 @@ class ConversationFlowController(
         Log.i(TAG, "[AUTO-LISTEN] 🎙️ startAutoListening() called. Current state: listening=${stateManager.isListening.value}, speaking=${stateManager.isSpeaking.value}, phase=${stateManager.phase.value}")
         isCurrentSessionAutoListen = true
 
-        // Also clear the hard-stop flag for auto-listen
         stateManager.setHardStop(false)
         startListeningSession(isAutoListen = true)
     }
@@ -93,11 +91,10 @@ class ConversationFlowController(
 
     suspend fun stopAll() {
         Log.w(TAG, "[ViewModel] stopAll() called - HARD STOP initiated.")
-        // Set the hard-stop flag to prevent TTS race conditions
         stateManager.setHardStop(true)
 
         engine.abort(true)
-        tts.stop() // This is now reinforced by the hard-stop flag
+        tts.stop()
         getStt()?.stop(false)
         stateManager.setPhase(GenerationPhase.IDLE)
         interruption.reset()
@@ -107,6 +104,19 @@ class ConversationFlowController(
     fun onFinalTranscript(text: String) {
         val input = text.trim()
         Log.i(TAG, "[STT RESULT] Raw transcript received: '$input'")
+
+        // Ask InterruptionManager whether this is a barge-in transcript to handle (noise/real speech).
+        val wasHandledHere = interruption.checkTranscriptForInterruption(input)
+        if (wasHandledHere) {
+            // If it was noise, InterruptionManager flushes the held assistant.
+            // If it was real speech, it entered accumulation.
+            Log.i(TAG, "[STT RESULT] Barge-in path handled by InterruptionManager")
+            return
+        } else {
+            // Not a barge-in evaluation transcript (or evaluation concluded as noise and we returned false).
+            // Ensure any held assistant gets flushed now.
+            interruption.flushBufferedAssistantIfAny()
+        }
 
         if (input.isEmpty()) {
             handleEmptyTranscript()
@@ -128,17 +138,15 @@ class ConversationFlowController(
             return
         }
 
-        // ✅ FIX: Check if this was an auto-listen session
         if (isCurrentSessionAutoListen) {
             Log.i(TAG, "[AUTO-LISTEN] Empty transcript from auto-listen session")
             stateManager.removeLastUserPlaceholderIfEmpty()
 
-            // ✅ If auto-listen is still enabled, try again (with a limit to prevent infinite loops)
             if (getPrefs.getAutoListen() && autoListenRetryCount < MAX_AUTO_LISTEN_RETRIES) {
                 autoListenRetryCount++
                 Log.i(TAG, "[AUTO-LISTEN] Retrying auto-listen (attempt $autoListenRetryCount/$MAX_AUTO_LISTEN_RETRIES)")
                 scope.launch {
-                    delay(500L) // Short delay before retry
+                    delay(500L)
                     if (stateManager.phase.value == GenerationPhase.IDLE &&
                         !stateManager.isListening.value &&
                         !stateManager.isSpeaking.value) {
@@ -146,7 +154,6 @@ class ConversationFlowController(
                     }
                 }
             } else {
-                // ✅ Max retries reached or auto-listen disabled, switch to IDLE
                 Log.w(TAG, "[AUTO-LISTEN] Max retries reached or disabled, switching to IDLE")
                 autoListenRetryCount = 0
                 scope.launch {
@@ -157,7 +164,6 @@ class ConversationFlowController(
                 }
             }
         } else {
-            // ✅ Manual session with no speech - just clean up
             Log.i(TAG, "[MANUAL-LISTEN] No speech detected in manual session")
             stateManager.removeLastUserPlaceholderIfEmpty()
         }
@@ -171,13 +177,12 @@ class ConversationFlowController(
 
     private fun handleNormalTranscript(input: String) {
         Log.i(TAG, "[IMMEDIATE-SEND] Sending transcript (len=${input.length})")
-        autoListenRetryCount = 0  // ✅ Reset on successful input
+        autoListenRetryCount = 0
         stateManager.replaceLastUser(input)
         startTurn(input)
     }
 
     private fun startTurn(userText: String) {
-        // Clear the hard-stop flag when starting a new turn
         stateManager.setHardStop(false)
 
         stateManager.setPhase(
@@ -189,12 +194,13 @@ class ConversationFlowController(
         Log.i(TAG, "[ViewModel] startTurn(model=$model) inputLen=${userText.length}")
         perfTimerHolder = PerfTimer(TAG, "llm").also { it.mark("llm_start") }
 
+        interruption.onTurnStart(System.currentTimeMillis())
+
         onTurnComplete()
         engine.startTurn(userText, model)
     }
 
     fun startTurnWithExistingHistory() {
-        // Clear the hard-stop flag when restarting a turn
         stateManager.setHardStop(false)
 
         stateManager.setPhase(
@@ -204,6 +210,8 @@ class ConversationFlowController(
         val model = getPrefs.getSelectedModel()
         Log.i(TAG, "[ViewModel] startTurnWithExistingHistory(model=$model)")
         perfTimerHolder = PerfTimer(TAG, "llm").also { it.mark("llm_start") }
+
+        interruption.onTurnStart(System.currentTimeMillis())
 
         onTurnComplete()
         engine.startTurnWithCurrentHistory(model)

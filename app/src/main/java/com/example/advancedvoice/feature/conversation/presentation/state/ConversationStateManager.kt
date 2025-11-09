@@ -18,7 +18,6 @@ class ConversationStateManager(
 ) {
     private companion object { const val TAG = "StateManager" }
 
-    // ✅ NEW: Flag to prevent TTS queuing after a manual stop.
     @Volatile private var isHardStopped = false
 
     val conversation: StateFlow<List<ConversationEntry>> = store.state
@@ -51,7 +50,7 @@ class ConversationStateManager(
     )
 
     init {
-        // ✅ Debug logging to track state changes causing button updates
+        // ✅ Enhanced debug logging
         scope.launch {
             combine(
                 isListening,
@@ -60,22 +59,20 @@ class ConversationStateManager(
                 isSpeaking,
                 phase
             ) { listening, hearing, transcribing, speaking, ph ->
-                Quintuple(listening, hearing, transcribing, speaking, ph)
-            }.collect { (listening, hearing, transcribing, speaking, ph) ->
-                Log.d(TAG, "[State] L=$listening H=$hearing T=$transcribing S=$speaking P=$ph → Btn=\"${controls.value.speakButtonText}\"")
+                StateSnapshot(listening, hearing, transcribing, speaking, ph)
+            }.collect { snapshot ->
+                val btnText = controls.value.speakButtonText
+                Log.d(TAG, "[State] L=${snapshot.listening} H=${snapshot.hearing} T=${snapshot.transcribing} S=${snapshot.speaking} P=${snapshot.phase} → \"$btnText\"")
             }
         }
     }
 
-    /**
-     * ✅ NEW: Controls the hard-stop state to prevent TTS race conditions.
-     */
     fun setHardStop(stop: Boolean) {
         if (isHardStopped == stop) return
         Log.w(TAG, "[UI State] Hard Stop -> $stop")
         isHardStopped = stop
         if (stop) {
-            tts.stop() // Immediately stop speech and clear the queue
+            tts.stop()
         }
     }
 
@@ -107,12 +104,10 @@ class ConversationStateManager(
         }
     }
 
-    // Store delegates
     fun addUserStreamingPlaceholder() = store.addUserStreamingPlaceholder()
     fun updateLastUserStreamingText(text: String) = store.updateLastUserStreamingText(text)
     fun replaceLastUser(text: String) = store.replaceLastUser(text)
 
-    // ✅ MODIFIED: Check the hard-stop flag before queuing TTS.
     fun addAssistant(sentences: List<String>) {
         if (isHardStopped) {
             Log.w(TAG, "🛑 Hard-stop is active, ignoring addAssistant call.")
@@ -121,7 +116,6 @@ class ConversationStateManager(
         store.addAssistant(sentences)
     }
 
-    // ✅ MODIFIED: Check the hard-stop flag before queuing TTS.
     fun appendAssistantSentences(index: Int, sentences: List<String>) {
         if (isHardStopped) {
             Log.w(TAG, "🛑 Hard-stop is active, ignoring appendAssistantSentences call.")
@@ -145,6 +139,11 @@ class ConversationStateManager(
         }
     }
 
-    // Helper data class for combine
-    private data class Quintuple<A, B, C, D, E>(val a: A, val b: B, val c: C, val d: D, val e: E)
+    private data class StateSnapshot(
+        val listening: Boolean,
+        val hearing: Boolean,
+        val transcribing: Boolean,
+        val speaking: Boolean,
+        val phase: GenerationPhase
+    )
 }

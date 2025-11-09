@@ -20,7 +20,7 @@ class MicrophoneSession(
 ) {
     companion object {
         private const val TAG = "MicSession"
-        private const val BUFFER_SIZE_MS = 1000L
+        private const val BUFFER_SIZE_MS = 1000L // keep up to 1s of pre-roll in MONITORING
         private const val FRAME_SIZE_MS = 20L
         private const val MAX_BUFFERED_FRAMES = (BUFFER_SIZE_MS / FRAME_SIZE_MS).toInt()
     }
@@ -31,11 +31,7 @@ class MicrophoneSession(
 
     private val audioBuffer = ConcurrentLinkedQueue<ByteArray>()
 
-    enum class Mode {
-        TRANSCRIBING,
-        MONITORING,
-        IDLE
-    }
+    enum class Mode { TRANSCRIBING, MONITORING, IDLE }
 
     @Volatile private var currentMode = Mode.IDLE
 
@@ -55,17 +51,14 @@ class MicrophoneSession(
         }
 
         Log.i(TAG, "Starting continuous microphone session")
-
-        // ✅ FIXED: Don't use VAD silence timeout for continuous sessions
-        // The timeout is handled by GeminiLiveSttController.sessionTimeoutJob instead
         Log.i(TAG, "VAD configured with NO silence timeout (continuous session mode)")
 
         vad = VadRecorder(
             scope = scope,
             sampleRate = 16_000,
             silenceThresholdRms = 350.0,
-            maxSilenceMs = null, // ✅ FIXED: null = infinite, no automatic timeout
-            endOfSpeechMs = 1200L,
+            maxSilenceMs = null, // continuous
+            endOfSpeechMs = 800L, // ✅ CHANGE THIS LINE (was 1200L) This line controls how long the system waits in silence before deciding you've finished speaking.
             allowMultipleUtterances = true,
             startupGracePeriodMs = 0L,
             minSpeechDurationMs = 150L
@@ -74,15 +67,9 @@ class MicrophoneSession(
         audioJob = scope.launch {
             vad?.audio?.collect { frame ->
                 when (currentMode) {
-                    Mode.TRANSCRIBING -> {
-                        client.sendPcm16Le(frame)
-                    }
-                    Mode.MONITORING -> {
-                        bufferAudio(frame)
-                    }
-                    Mode.IDLE -> {
-                        // Discard audio
-                    }
+                    Mode.TRANSCRIBING -> client.sendPcm16Le(frame)
+                    Mode.MONITORING -> bufferAudio(frame)
+                    Mode.IDLE -> { /* discard */ }
                 }
             }
         }
@@ -98,9 +85,12 @@ class MicrophoneSession(
         }
     }
 
+    fun resetVadDetection() {
+        vad?.resetDetection()
+    }
+
     private fun bufferAudio(frame: ByteArray) {
         audioBuffer.offer(frame.copyOf())
-
         while (audioBuffer.size > MAX_BUFFERED_FRAMES) {
             audioBuffer.poll()
         }
@@ -109,7 +99,6 @@ class MicrophoneSession(
     private fun flushBufferToTranscriber() {
         val bufferedFrames = audioBuffer.toList()
         audioBuffer.clear()
-
         if (bufferedFrames.isNotEmpty()) {
             Log.i(TAG, "Flushing ${bufferedFrames.size} buffered audio frames to transcriber")
             scope.launch {
@@ -125,7 +114,6 @@ class MicrophoneSession(
             Log.w(TAG, "Cannot switch mode - VAD not started")
             return
         }
-
         if (currentMode == newMode) {
             Log.d(TAG, "Already in mode $newMode")
             return
@@ -141,25 +129,31 @@ class MicrophoneSession(
 
         when (newMode) {
             Mode.TRANSCRIBING -> {
+                // Start accumulating ASR and flush any pre-roll from MONITORING
+                resetVadDetection()
                 transcriber.startAccumulating()
-
                 if (previousMode == Mode.MONITORING) {
                     flushBufferToTranscriber()
                 } else if (previousMode == Mode.IDLE) {
+                    // Coming from TTS → do not use any stale buffer that may contain echo
                     Log.w(TAG, "[Mode] Clearing buffer from IDLE (may contain TTS echo)")
                     audioBuffer.clear()
                 }
-
                 Log.d(TAG, "[Mode] Audio → Gemini Live Transcriber")
             }
             Mode.MONITORING -> {
+                // Keep pre-roll buffer while monitoring so we can flush first words.
+                // But if we just came from IDLE (post-TTS), clear it to avoid echo.
                 if (previousMode == Mode.IDLE) {
                     audioBuffer.clear()
-                    Log.d(TAG, "[Mode] Cleared buffer after IDLE (TTS echo prevention)")
+                    Log.d(TAG, "[Mode] MONITORING after IDLE → cleared buffer (echo prevention)")
+                } else {
+                    Log.d(TAG, "[Mode] MONITORING → keeping pre-roll buffer")
                 }
-                Log.d(TAG, "[Mode] Audio → Buffered (VAD events only)")
             }
             Mode.IDLE -> {
+                // Full idle: reset VAD and clear buffer.
+                resetVadDetection()
                 audioBuffer.clear()
                 Log.d(TAG, "[Mode] Audio → Discarded (Fully idle)")
             }
@@ -172,7 +166,7 @@ class MicrophoneSession(
             transcriber.endTurn()
             currentMode = Mode.MONITORING
             _currentVadMode.value = Mode.MONITORING
-            audioBuffer.clear()
+            // Keep buffer in MONITORING (we already cleared on entering from IDLE)
         }
     }
 
@@ -184,15 +178,12 @@ class MicrophoneSession(
     private suspend fun cleanup() {
         audioJob?.cancel()
         eventsJob?.cancel()
-
-        vad?.stop()
+        try { vad?.stop() } catch (_: Throwable) {}
         vad = null
-
         audioBuffer.clear()
         currentMode = Mode.IDLE
         _currentVadMode.value = Mode.IDLE
         _isActive.value = false
-
         Log.i(TAG, "Session cleanup complete")
     }
 }

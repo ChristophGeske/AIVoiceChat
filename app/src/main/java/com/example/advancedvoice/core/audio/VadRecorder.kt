@@ -28,7 +28,7 @@ class VadRecorder(
     private val encoding: Int = AudioFormat.ENCODING_PCM_16BIT,
     private val frameMillis: Int = 20,
     private val startupGracePeriodMs: Long = 0L,
-    val allowMultipleUtterances: Boolean = false
+    val allowMultipleUtterances: Boolean = true
 ) {
     companion object {
         private const val TAG = "VadRecorder"
@@ -47,14 +47,22 @@ class VadRecorder(
     private val _audio = MutableSharedFlow<ByteArray>(extraBufferCapacity = 64)
     val audio: SharedFlow<ByteArray> = _audio
 
-    @Volatile
-    private var recorder: AudioRecord? = null
-    @Volatile
-    private var job: Job? = null
+    @Volatile private var recorder: AudioRecord? = null
+    @Volatile private var job: Job? = null
 
-    @Volatile
-    var isRunning: Boolean = false
+    @Volatile var isRunning: Boolean = false
         private set
+
+    // Expose current speech activity and allow external reset
+    @Volatile var isSpeechActive: Boolean = false
+        private set
+    @Volatile private var resetRequested = false
+
+    fun resetDetection() {
+        // Will be applied in the IO loop atomically
+        resetRequested = true
+        Log.d(TAG, "[VAD] resetDetection() requested")
+    }
 
     @RequiresPermission(Manifest.permission.RECORD_AUDIO)
     suspend fun start() {
@@ -115,8 +123,9 @@ class VadRecorder(
 
         recorder = rec
         isRunning = true
+        isSpeechActive = false
+        resetRequested = false
 
-        // ✅ IMPROVED: Better logging for continuous vs timed sessions
         val timeoutMsg = if (maxSilenceMs == null) "CONTINUOUS (no timeout)" else "${maxSilenceMs}ms"
         Log.i(TAG, "[VAD] Recorder started. Mode: $timeoutMsg, EndOfSpeech: ${endOfSpeechMs}ms, Grace: ${startupGracePeriodMs}ms, Multi-Utterance: $allowMultipleUtterances")
 
@@ -135,6 +144,17 @@ class VadRecorder(
                     break
                 }
 
+                // Apply external reset atomically
+                if (resetRequested) {
+                    hasSpeech = false
+                    speechStartTs = 0L
+                    silenceStartTs = 0L
+                    isSpeechActive = false
+                    resetRequested = false
+                    // Do not emit events on reset; just clear internal state
+                    Log.d(TAG, "[VAD] Detection state reset (hasSpeech=false)")
+                }
+
                 val rms = AudioRms.calculateRms(shortBuf, read)
                 val isLoud = rms >= silenceThresholdRms
                 val now = System.currentTimeMillis()
@@ -147,6 +167,7 @@ class VadRecorder(
                 if (isLoud) {
                     if (!hasSpeech) {
                         hasSpeech = true
+                        isSpeechActive = true
                         speechStartTs = now
                         Log.i(TAG, "[VAD] Speech detected! RMS: $rms")
                         _events.tryEmit(VadEvent.SpeechStart)
@@ -157,7 +178,6 @@ class VadRecorder(
                         if (silenceStartTs == 0L) {
                             silenceStartTs = now
                         }
-
                         val silenceDuration = now - silenceStartTs
 
                         if (silenceDuration > endOfSpeechMs) {
@@ -172,6 +192,7 @@ class VadRecorder(
                             if (allowMultipleUtterances) {
                                 Log.d(TAG, "[VAD] Resetting for next utterance.")
                                 hasSpeech = false
+                                isSpeechActive = false
                                 speechStartTs = 0L
                                 silenceStartTs = 0L
                             } else {
@@ -179,12 +200,10 @@ class VadRecorder(
                             }
                         }
                     } else {
-                        // ✅ Only check silence timeout if configured (not null)
                         if (maxSilenceMs != null) {
                             if (silenceStartTs == 0L) {
                                 silenceStartTs = now
                             }
-
                             val totalSilence = now - silenceStartTs
                             if (totalSilence > maxSilenceMs) {
                                 Log.i(TAG, "[VAD] Max silence timeout (${totalSilence}ms) - no speech detected")
@@ -192,7 +211,6 @@ class VadRecorder(
                                 break
                             }
                         }
-                        // ✅ If maxSilenceMs is null, just keep running forever
                     }
                 }
 

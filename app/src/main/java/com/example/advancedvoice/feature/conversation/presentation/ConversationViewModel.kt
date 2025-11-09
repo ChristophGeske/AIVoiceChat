@@ -179,7 +179,6 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
                 }
 
                 if (phase.value == GenerationPhase.IDLE && !isListening.value) {
-                    // ✅ FIXED: Reduced delay to prevent race condition with VAD
                     Log.i(TAG_AUTO_LISTEN, "⏳ Conditions met, waiting 150ms...")
                     delay(150L)
 
@@ -208,6 +207,13 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
                 shouldAutoListenAfterTts = false
                 Log.d(TAG_AUTO_LISTEN, "Flag reset to false")
                 Log.i(TAG_AUTO_LISTEN, "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+            }
+        }
+
+        // ✅ NEW: Monitor when auto-listen flag gets disabled by isHearingSpeech changes
+        viewModelScope.launch {
+            stateManager.isHearingSpeech.collect { hearing ->
+                Log.d(TAG_AUTO_LISTEN, "[DEBUG] isHearingSpeech=$hearing, flag=$shouldAutoListenAfterTts, phase=${phase.value}, speaking=${isSpeaking.value}")
             }
         }
     }
@@ -277,7 +283,7 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
                         stt.switchMicMode(MicrophoneSession.Mode.IDLE)
                     } else {
                         Log.i(TAG, "[TTS] Stopped speaking - switching mic to MONITORING")
-                        stt.notifyTtsStopped() // ✅ NEW: Notify STT controller
+                        stt.notifyTtsStopped()
                         stt.switchMicMode(MicrophoneSession.Mode.MONITORING)
                     }
                 }

@@ -26,6 +26,7 @@ class GeminiLiveSttController(
     companion object {
         private const val TAG = "GeminiLiveSTT"
         private const val END_OF_TURN_DELAY_MS = 250L
+        private const val POST_TTS_GRACE_PERIOD_MS = 400L // Ignore VAD briefly after TTS stops
     }
 
     private val _isListening = MutableStateFlow(false)
@@ -48,10 +49,13 @@ class GeminiLiveSttController(
     private var clientErrJob: Job? = null
     private var finalTranscriptJob: Job? = null
     private var endTurnJob: Job? = null
+    private var sessionTimeoutJob: Job? = null
 
     private var micSession: MicrophoneSession? = null
 
     @Volatile private var turnEnded = false
+    @Volatile private var speechStartedInCurrentSession = false
+    @Volatile private var lastTtsStopTime = 0L // ✅ NEW: Track when TTS stopped
 
     init {
         connect()
@@ -95,7 +99,6 @@ class GeminiLiveSttController(
 
         if (!ensureConnection()) return
 
-        // Start continuous mic session if not already running
         if (micSession == null) {
             micSession = MicrophoneSession(scope, app, client, transcriber)
             try {
@@ -109,10 +112,21 @@ class GeminiLiveSttController(
             }
         }
 
+        // ✅ FIX: Check if speech is already in progress BEFORE we reset the flag
+        val speechAlreadyInProgress = _isHearingSpeech.value
+
         _isListening.value = true
         _isHearingSpeech.value = false
         _isTranscribing.value = false
         turnEnded = false
+
+        // ✅ If speech was already detected (e.g., during interruption), mark it as started
+        speechStartedInCurrentSession = if (speechAlreadyInProgress) {
+            Log.i(TAG, "[Controller] Starting with speech already in progress - marking as started")
+            true
+        } else {
+            false
+        }
 
         micSession?.switchMode(MicrophoneSession.Mode.TRANSCRIBING)
 
@@ -122,6 +136,24 @@ class GeminiLiveSttController(
                 Log.i(TAG, "[Controller] Final transcript (len=${final.length})")
                 _transcripts.emit(final)
                 _isTranscribing.value = false
+            }
+        }
+
+        // Start overall session timeout for manual sessions
+        if (!isAutoListen) {
+            val listenSeconds = com.example.advancedvoice.core.prefs.Prefs.getListenSeconds(app)
+            val timeoutMs = listenSeconds * 1000L
+
+            Log.i(TAG, "[Controller] Starting ${listenSeconds}s session timeout for manual listen")
+            sessionTimeoutJob?.cancel()
+            sessionTimeoutJob = scope.launch {
+                delay(timeoutMs)
+                Log.w(TAG, "[Controller] ⏱️ Session timeout after ${listenSeconds}s - no speech detected")
+
+                // Only timeout if still listening and no speech was detected
+                if (_isListening.value && !turnEnded) {
+                    endTurn("SessionTimeout")
+                }
             }
         }
     }
@@ -134,12 +166,25 @@ class GeminiLiveSttController(
 
                 when (ev) {
                     is VadRecorder.VadEvent.SpeechStart -> {
+                        // ✅ NEW: Ignore VAD shortly after TTS stops (echo prevention)
+                        val timeSinceTts = System.currentTimeMillis() - lastTtsStopTime
+                        if (lastTtsStopTime > 0 && timeSinceTts < POST_TTS_GRACE_PERIOD_MS) {
+                            Log.w(TAG, "[VAD] Ignoring SpeechStart (${timeSinceTts}ms after TTS - likely echo)")
+                            return@collect
+                        }
+
                         endTurnJob?.cancel()
+                        sessionTimeoutJob?.cancel()
                         Log.d(TAG, "[VAD] SpeechStart (mode=$currentMode)")
 
                         if (currentMode != MicrophoneSession.Mode.IDLE) {
                             if (!_isHearingSpeech.value) {
                                 _isHearingSpeech.value = true
+                            }
+
+                            if (currentMode == MicrophoneSession.Mode.TRANSCRIBING) {
+                                speechStartedInCurrentSession = true
+                                Log.d(TAG, "[VAD] Speech started in current TRANSCRIBING session")
                             }
                         } else {
                             Log.d(TAG, "[VAD] Ignoring SpeechStart in IDLE mode (TTS echo)")
@@ -154,6 +199,12 @@ class GeminiLiveSttController(
                         }
 
                         if (currentMode == MicrophoneSession.Mode.TRANSCRIBING) {
+                            // Only finalize if we saw a SpeechStart in THIS session
+                            if (!speechStartedInCurrentSession) {
+                                Log.w(TAG, "[VAD] Ignoring orphaned SpeechEnd (no SpeechStart in current session)")
+                                return@collect
+                            }
+
                             endTurnJob?.cancel()
                             endTurnJob = scope.launch {
                                 Log.d(TAG, "[VAD] SpeechEnd. Starting ${END_OF_TURN_DELAY_MS}ms timer...")
@@ -168,6 +219,7 @@ class GeminiLiveSttController(
 
                     is VadRecorder.VadEvent.SilenceTimeout -> {
                         if (currentMode == MicrophoneSession.Mode.TRANSCRIBING) {
+                            Log.i(TAG, "[VAD] Silence timeout - user didn't speak")
                             endTurn("SilenceTimeout")
                         }
                     }
@@ -189,12 +241,16 @@ class GeminiLiveSttController(
 
         micSession?.endCurrentTranscription()
         micSession?.switchMode(MicrophoneSession.Mode.MONITORING)
+
+        speechStartedInCurrentSession = false
+        sessionTimeoutJob?.cancel()
     }
 
     override suspend fun stop(transcribe: Boolean) {
         Log.w(TAG, "[Controller] >>> STOP Request (transcribe=$transcribe)")
 
         endTurnJob?.cancel()
+        sessionTimeoutJob?.cancel()
 
         if (transcribe && (isListening.value || isHearingSpeech.value) && !turnEnded) {
             Log.i(TAG, "[Controller] Transcribing on stop.")
@@ -208,6 +264,7 @@ class GeminiLiveSttController(
         }
 
         turnEnded = false
+        speechStartedInCurrentSession = false
     }
 
     private suspend fun releaseAndReconnect() {
@@ -219,6 +276,7 @@ class GeminiLiveSttController(
         eventJob?.cancel()
         clientErrJob?.cancel()
         finalTranscriptJob?.cancel()
+        sessionTimeoutJob?.cancel()
 
         transcriber.disconnect()
         delay(500)
@@ -253,6 +311,8 @@ class GeminiLiveSttController(
                 _isHearingSpeech.value = false
                 _isTranscribing.value = false
                 endTurnJob?.cancel()
+                sessionTimeoutJob?.cancel()
+                speechStartedInCurrentSession = false
                 Log.d(TAG, "[Controller] All listening states cleared for IDLE mode")
             }
             MicrophoneSession.Mode.MONITORING -> {
@@ -260,11 +320,19 @@ class GeminiLiveSttController(
                 _isHearingSpeech.value = false
                 _isTranscribing.value = false
                 endTurnJob?.cancel()
+                sessionTimeoutJob?.cancel()
+                speechStartedInCurrentSession = false
                 Log.d(TAG, "[Controller] Listening states cleared for MONITORING mode")
             }
             MicrophoneSession.Mode.TRANSCRIBING -> {
                 Log.d(TAG, "[Controller] TRANSCRIBING mode activated")
             }
         }
+    }
+
+    // ✅ NEW: Called by ViewModel when TTS stops to prevent echo detection
+    fun notifyTtsStopped() {
+        lastTtsStopTime = System.currentTimeMillis()
+        Log.d(TAG, "[Controller] TTS stopped at ${lastTtsStopTime}, grace period: ${POST_TTS_GRACE_PERIOD_MS}ms")
     }
 }

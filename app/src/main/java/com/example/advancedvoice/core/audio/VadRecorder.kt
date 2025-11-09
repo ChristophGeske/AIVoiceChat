@@ -23,12 +23,11 @@ class VadRecorder(
     private val silenceThresholdRms: Double = 250.0,
     private val endOfSpeechMs: Long = 1500L,
     private val maxSilenceMs: Long? = null,
-    // --- CHANGE 1: Add minSpeechDurationMs parameter ---
     private val minSpeechDurationMs: Long = 300L,
     private val channelConfig: Int = AudioFormat.CHANNEL_IN_MONO,
     private val encoding: Int = AudioFormat.ENCODING_PCM_16BIT,
     private val frameMillis: Int = 20,
-    private val startupGracePeriodMs: Long =  0L, // was 100L before
+    private val startupGracePeriodMs: Long = 0L,
     val allowMultipleUtterances: Boolean = false
 ) {
     companion object {
@@ -117,8 +116,9 @@ class VadRecorder(
         recorder = rec
         isRunning = true
 
-        val timeoutMsg = if (maxSilenceMs == null) "INFINITE" else "${maxSilenceMs}ms"
-        Log.i(TAG, "[VAD] Recorder started. Timeout: $timeoutMsg, EndOfSpeech: ${endOfSpeechMs}ms, Grace: ${startupGracePeriodMs}ms, Multi-Utterance: $allowMultipleUtterances")
+        // ✅ IMPROVED: Better logging for continuous vs timed sessions
+        val timeoutMsg = if (maxSilenceMs == null) "CONTINUOUS (no timeout)" else "${maxSilenceMs}ms"
+        Log.i(TAG, "[VAD] Recorder started. Mode: $timeoutMsg, EndOfSpeech: ${endOfSpeechMs}ms, Grace: ${startupGracePeriodMs}ms, Multi-Utterance: $allowMultipleUtterances")
 
         job = scope.launch(Dispatchers.IO) {
             val frameSamples = (sampleRate / 1000) * frameMillis
@@ -152,7 +152,7 @@ class VadRecorder(
                         _events.tryEmit(VadEvent.SpeechStart)
                     }
                     silenceStartTs = 0L
-                } else { // Silence detected
+                } else {
                     if (hasSpeech) {
                         if (silenceStartTs == 0L) {
                             silenceStartTs = now
@@ -160,7 +160,6 @@ class VadRecorder(
 
                         val silenceDuration = now - silenceStartTs
 
-                        // --- CHANGE 2: Modify the SpeechEnd logic ---
                         if (silenceDuration > endOfSpeechMs) {
                             val duration = now - speechStartTs
                             if (duration >= minSpeechDurationMs) {
@@ -170,18 +169,17 @@ class VadRecorder(
                                 Log.d(TAG, "[VAD] Speech too short (${duration}ms), treating as noise")
                             }
 
-                            // This logic now correctly resets state for both valid speech and noise.
                             if (allowMultipleUtterances) {
                                 Log.d(TAG, "[VAD] Resetting for next utterance.")
                                 hasSpeech = false
                                 speechStartTs = 0L
                                 silenceStartTs = 0L
                             } else {
-                                // In single-utterance mode, we are done. Break the loop.
                                 break
                             }
                         }
-                    } else { // No speech detected yet
+                    } else {
+                        // ✅ Only check silence timeout if configured (not null)
                         if (maxSilenceMs != null) {
                             if (silenceStartTs == 0L) {
                                 silenceStartTs = now
@@ -194,6 +192,7 @@ class VadRecorder(
                                 break
                             }
                         }
+                        // ✅ If maxSilenceMs is null, just keep running forever
                     }
                 }
 

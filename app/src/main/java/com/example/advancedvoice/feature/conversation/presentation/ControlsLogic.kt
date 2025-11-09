@@ -10,34 +10,35 @@ object ControlsLogic {
     ): ControlsState {
         val isGenerating = phase != GenerationPhase.IDLE
 
-        // Voice interruption is only allowed BEFORE the first sentence is delivered.
         val voiceInterruptAllowed = phase == GenerationPhase.GENERATING_FIRST ||
                 phase == GenerationPhase.SINGLE_SHOT_GENERATING
 
-        // ✅ CRITICAL: TTS speaking ALWAYS takes priority over other states
+        // ✅ FIXED: Strict priority order - generating/speaking ALWAYS override listening states
         val buttonText = when {
-            // ✅ Check TTS first - this prevents "Listening..." showing during echo
+            // Priority 1: TTS is speaking
             isSpeaking -> "Speaking (Tap to Interrupt)"
 
-            // Then check STT states
+            // Priority 2: Transcribing STT result
             isTranscribing -> "Transcribing..."
-            isHearingSpeech -> "Listening..."
-            isListening -> "Listening..."
 
-            // Generation states
+            // Priority 3: Generating response (MUST be before listening checks)
             isGenerating && voiceInterruptAllowed -> "Generating (Speak to Interrupt)"
             isGenerating && !voiceInterruptAllowed -> "Generating..."
 
-            // Default idle
+            // Priority 4: Actively hearing speech (only if not generating/speaking)
+            isListening && isHearingSpeech -> "Listening..."
+
+            // Priority 5: Listening for speech (only if not generating/speaking)
+            isListening -> "Listening..."
+
+            // Priority 6: Idle
             else -> "Tap to Speak"
         }
 
-        // The "Stop" button is for any background activity.
         val anythingInProgress = isSpeaking || isListening || isHearingSpeech || isGenerating || isTranscribing
 
-        // The main "Speak" button should always be enabled unless actively listening/transcribing.
-        // ✅ Also disable during TTS to prevent accidental double-taps
-        val speakEnabled = !isListening && !isHearingSpeech && !isTranscribing && !isSpeaking
+        // ✅ Button enabled unless actively listening/transcribing
+        val speakEnabled = !isListening && !isTranscribing
 
         return ControlsState(
             speakEnabled = speakEnabled,

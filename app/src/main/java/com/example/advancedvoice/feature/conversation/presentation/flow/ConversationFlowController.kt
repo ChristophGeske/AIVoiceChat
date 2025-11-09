@@ -10,7 +10,7 @@ import com.example.advancedvoice.feature.conversation.presentation.state.Convers
 import com.example.advancedvoice.feature.conversation.service.SttController
 import com.example.advancedvoice.feature.conversation.service.TtsController
 import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 class ConversationFlowController(
@@ -26,17 +26,19 @@ class ConversationFlowController(
 ) {
     private companion object {
         const val TAG = LoggerConfig.TAG_VM
+        const val MAX_AUTO_LISTEN_RETRIES = 2
     }
 
     var perfTimerHolder: PerfTimer? = null
     @Volatile private var isCurrentSessionAutoListen = false
+    @Volatile private var autoListenRetryCount = 0
 
     fun startListening() {
         Log.i(TAG, "[ViewModel] startListening() called. isGenerating=${engine.isActive()}, isTalking=${stateManager.isSpeaking.value}")
         isCurrentSessionAutoListen = false
         onTapToSpeak()
 
-        // ✅ NEW: Clear the hard-stop flag whenever the user initiates an action.
+        // Clear the hard-stop flag whenever the user initiates an action
         stateManager.setHardStop(false)
 
         if (engine.isActive() || stateManager.isSpeaking.value) {
@@ -50,7 +52,7 @@ class ConversationFlowController(
         Log.i(TAG, "[AUTO-LISTEN] 🎙️ startAutoListening() called. Current state: listening=${stateManager.isListening.value}, speaking=${stateManager.isSpeaking.value}, phase=${stateManager.phase.value}")
         isCurrentSessionAutoListen = true
 
-        // ✅ NEW: Also clear the hard-stop flag for auto-listen.
+        // Also clear the hard-stop flag for auto-listen
         stateManager.setHardStop(false)
         startListeningSession(isAutoListen = true)
     }
@@ -91,11 +93,11 @@ class ConversationFlowController(
 
     suspend fun stopAll() {
         Log.w(TAG, "[ViewModel] stopAll() called - HARD STOP initiated.")
-        // ✅ NEW: Set the hard-stop flag to prevent TTS race conditions.
+        // Set the hard-stop flag to prevent TTS race conditions
         stateManager.setHardStop(true)
 
         engine.abort(true)
-        tts.stop() // This is now reinforced by the hard-stop flag.
+        tts.stop() // This is now reinforced by the hard-stop flag
         getStt()?.stop(false)
         stateManager.setPhase(GenerationPhase.IDLE)
         interruption.reset()
@@ -126,9 +128,37 @@ class ConversationFlowController(
             return
         }
 
-        if (!isCurrentSessionAutoListen) {
+        // ✅ FIX: Check if this was an auto-listen session
+        if (isCurrentSessionAutoListen) {
+            Log.i(TAG, "[AUTO-LISTEN] Empty transcript from auto-listen session")
             stateManager.removeLastUserPlaceholderIfEmpty()
+
+            // ✅ If auto-listen is still enabled, try again (with a limit to prevent infinite loops)
+            if (getPrefs.getAutoListen() && autoListenRetryCount < MAX_AUTO_LISTEN_RETRIES) {
+                autoListenRetryCount++
+                Log.i(TAG, "[AUTO-LISTEN] Retrying auto-listen (attempt $autoListenRetryCount/$MAX_AUTO_LISTEN_RETRIES)")
+                scope.launch {
+                    delay(500L) // Short delay before retry
+                    if (stateManager.phase.value == GenerationPhase.IDLE &&
+                        !stateManager.isListening.value &&
+                        !stateManager.isSpeaking.value) {
+                        startAutoListening()
+                    }
+                }
+            } else {
+                // ✅ Max retries reached or auto-listen disabled, switch to IDLE
+                Log.w(TAG, "[AUTO-LISTEN] Max retries reached or disabled, switching to IDLE")
+                autoListenRetryCount = 0
+                scope.launch {
+                    getStt()?.stop(false)
+                    delay(100L)
+                    stateManager.setListening(false)
+                    stateManager.setHearingSpeech(false)
+                }
+            }
         } else {
+            // ✅ Manual session with no speech - just clean up
+            Log.i(TAG, "[MANUAL-LISTEN] No speech detected in manual session")
             stateManager.removeLastUserPlaceholderIfEmpty()
         }
     }
@@ -141,12 +171,13 @@ class ConversationFlowController(
 
     private fun handleNormalTranscript(input: String) {
         Log.i(TAG, "[IMMEDIATE-SEND] Sending transcript (len=${input.length})")
+        autoListenRetryCount = 0  // ✅ Reset on successful input
         stateManager.replaceLastUser(input)
         startTurn(input)
     }
 
     private fun startTurn(userText: String) {
-        // ✅ NEW: Clear the hard-stop flag when starting a new turn.
+        // Clear the hard-stop flag when starting a new turn
         stateManager.setHardStop(false)
 
         stateManager.setPhase(
@@ -163,7 +194,7 @@ class ConversationFlowController(
     }
 
     fun startTurnWithExistingHistory() {
-        // ✅ NEW: Clear the hard-stop flag when restarting a turn.
+        // Clear the hard-stop flag when restarting a turn
         stateManager.setHardStop(false)
 
         stateManager.setPhase(

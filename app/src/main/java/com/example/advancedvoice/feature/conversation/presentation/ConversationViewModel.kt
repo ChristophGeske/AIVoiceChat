@@ -179,11 +179,9 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
                 }
 
                 if (phase.value == GenerationPhase.IDLE && !isListening.value) {
-                    // --- THE FIX ---
-                    // 500ms is too long and creates a race condition with user noise.
-                    // A very short delay is enough to let the state settle.
+                    // ✅ FIXED: Reduced delay to prevent race condition with VAD
                     Log.i(TAG_AUTO_LISTEN, "⏳ Conditions met, waiting 150ms...")
-                    delay(150L) // Changed from 500L
+                    delay(150L)
 
                     val stillIdle = !isSpeaking.value &&
                             !isListening.value &&
@@ -279,6 +277,7 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
                         stt.switchMicMode(MicrophoneSession.Mode.IDLE)
                     } else {
                         Log.i(TAG, "[TTS] Stopped speaking - switching mic to MONITORING")
+                        stt.notifyTtsStopped() // ✅ NEW: Notify STT controller
                         stt.switchMicMode(MicrophoneSession.Mode.MONITORING)
                     }
                 }

@@ -9,6 +9,7 @@ import com.example.advancedvoice.feature.conversation.service.ConversationStore
 import com.example.advancedvoice.feature.conversation.service.TtsController
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.*
+import kotlinx.coroutines.launch
 
 class ConversationStateManager(
     private val scope: CoroutineScope,
@@ -48,6 +49,23 @@ class ConversationStateManager(
         SharingStarted.Eagerly,
         ControlsLogic.derive(false, false, false, false, GenerationPhase.IDLE)
     )
+
+    init {
+        // ✅ Debug logging to track state changes causing button updates
+        scope.launch {
+            combine(
+                isListening,
+                isHearingSpeech,
+                isTranscribing,
+                isSpeaking,
+                phase
+            ) { listening, hearing, transcribing, speaking, ph ->
+                Quintuple(listening, hearing, transcribing, speaking, ph)
+            }.collect { (listening, hearing, transcribing, speaking, ph) ->
+                Log.d(TAG, "[State] L=$listening H=$hearing T=$transcribing S=$speaking P=$ph → Btn=\"${controls.value.speakButtonText}\"")
+            }
+        }
+    }
 
     /**
      * ✅ NEW: Controls the hard-stop state to prevent TTS race conditions.
@@ -126,4 +144,7 @@ class ConversationStateManager(
             store.removeLastEntry()
         }
     }
+
+    // Helper data class for combine
+    private data class Quintuple<A, B, C, D, E>(val a: A, val b: B, val c: C, val d: D, val e: E)
 }

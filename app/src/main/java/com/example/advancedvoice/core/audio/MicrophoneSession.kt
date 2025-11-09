@@ -109,7 +109,7 @@ class MicrophoneSession(
         }
     }
 
-    fun switchMode(newMode: Mode) {
+    fun switchMode(newMode: Mode, preserveVad: Boolean = false) {
         if (vad == null) {
             Log.w(TAG, "Cannot switch mode - VAD not started")
             return
@@ -129,21 +129,23 @@ class MicrophoneSession(
 
         when (newMode) {
             Mode.TRANSCRIBING -> {
-                // Start accumulating ASR and flush any pre-roll from MONITORING
-                resetVadDetection()
+                // Preserve VAD detection mid-utterance so we don't lose pre-roll
+                if (!preserveVad) {
+                    resetVadDetection()
+                } else {
+                    Log.d(TAG, "[Mode] TRANSCRIBING - preserving VAD state (no reset)")
+                }
+
                 transcriber.startAccumulating()
                 if (previousMode == Mode.MONITORING) {
                     flushBufferToTranscriber()
                 } else if (previousMode == Mode.IDLE) {
-                    // Coming from TTS → do not use any stale buffer that may contain echo
                     Log.w(TAG, "[Mode] Clearing buffer from IDLE (may contain TTS echo)")
                     audioBuffer.clear()
                 }
                 Log.d(TAG, "[Mode] Audio → Gemini Live Transcriber")
             }
             Mode.MONITORING -> {
-                // Keep pre-roll buffer while monitoring so we can flush first words.
-                // But if we just came from IDLE (post-TTS), clear it to avoid echo.
                 if (previousMode == Mode.IDLE) {
                     audioBuffer.clear()
                     Log.d(TAG, "[Mode] MONITORING after IDLE → cleared buffer (echo prevention)")
@@ -152,7 +154,6 @@ class MicrophoneSession(
                 }
             }
             Mode.IDLE -> {
-                // Full idle: reset VAD and clear buffer.
                 resetVadDetection()
                 audioBuffer.clear()
                 Log.d(TAG, "[Mode] Audio → Discarded (Fully idle)")

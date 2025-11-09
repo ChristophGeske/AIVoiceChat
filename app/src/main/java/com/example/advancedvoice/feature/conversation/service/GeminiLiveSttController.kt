@@ -116,15 +116,21 @@ class GeminiLiveSttController(
             }
         }
 
+        // IMPORTANT: capture current speech state BEFORE we touch flags
         val speechAlreadyInProgress = _isHearingSpeech.value
 
         _isListening.value = true
-        _isHearingSpeech.value = false
+        // CHANGED: keep the true value if speech is already happening to avoid flicker
+        _isHearingSpeech.value = speechAlreadyInProgress
         _isTranscribing.value = false
         turnEnded = false
 
-        // Reset VAD so we get a fresh SpeechStart for this session
-        micSession?.resetVadDetection()
+        // CHANGED: Do NOT reset VAD if speech is already in progress, or we can lose pre-roll
+        if (!speechAlreadyInProgress) {
+            micSession?.resetVadDetection()
+        } else {
+            Log.i(TAG, "[Controller] Not resetting VAD (speech already in progress)")
+        }
 
         // Capture partials to detect ASR activity
         partialJob?.cancel()
@@ -142,6 +148,8 @@ class GeminiLiveSttController(
             false
         }
 
+        // We still need to switch into TRANSCRIBING to send audio to the transcriber.
+        // MicrophoneSession will flush MONITORING pre-roll on this switch.
         micSession?.switchMode(MicrophoneSession.Mode.TRANSCRIBING)
 
         finalTranscriptJob?.cancel()
@@ -177,8 +185,8 @@ class GeminiLiveSttController(
                     is VadRecorder.VadEvent.SpeechStart -> {
                         val timeSinceTts = System.currentTimeMillis() - lastTtsStopTime
 
-                        // Fix: Only suppress immediately-after-TTS SpeechStart in IDLE/MONITORING.
-                        // If we're already TRANSCRIBING, do NOT ignore it (prevents orphan + 9s timeout).
+                        // Only suppress immediately-after-TTS SpeechStart in IDLE/MONITORING.
+                        // If we're already TRANSCRIBING, do NOT ignore it.
                         val shouldSuppressEcho = (currentMode == MicrophoneSession.Mode.IDLE ||
                                 currentMode == MicrophoneSession.Mode.MONITORING) &&
                                 lastTtsStopTime > 0 &&

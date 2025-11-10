@@ -161,15 +161,23 @@ class GeminiLiveSttController(
         }
 
         if (!isAutoListen) {
-            val listenSeconds = com.example.advancedvoice.core.prefs.Prefs.getListenSeconds(app)
-            val timeoutMs = listenSeconds * 1000L
-            Log.i(TAG, "[Controller] Starting ${listenSeconds}s session timeout for manual listen")
-            sessionTimeoutJob?.cancel()
-            sessionTimeoutJob = scope.launch {
-                delay(timeoutMs)
-                Log.w(TAG, "[Controller] ⏱️ Session timeout after ${listenSeconds}s - no speech detected")
-                if (_isListening.value && !turnEnded) {
-                    endTurn("SessionTimeout")
+            sessionTimeoutJob?.cancel() // Cancel any previous timeout job
+            if (speechAlreadyInProgress) {
+                // If we are starting while the user is already talking (i.e., a barge-in),
+                // the SpeechStart event that normally cancels the timeout has already passed.
+                // Therefore, we should not start a new timeout at all.
+                Log.i(TAG, "[Controller] Skipping session timeout because speech is already in progress.")
+            } else {
+                // This is a fresh listening session, so start a timeout to detect if the user never speaks.
+                val listenSeconds = com.example.advancedvoice.core.prefs.Prefs.getListenSeconds(app)
+                val timeoutMs = listenSeconds * 1000L
+                Log.i(TAG, "[Controller] Starting ${listenSeconds}s session timeout for manual listen")
+                sessionTimeoutJob = scope.launch {
+                    delay(timeoutMs)
+                    Log.w(TAG, "[Controller] ⏱️ Session timeout after ${listenSeconds}s - no speech detected")
+                    if (_isListening.value && !turnEnded) {
+                        endTurn("SessionTimeout")
+                    }
                 }
             }
         }

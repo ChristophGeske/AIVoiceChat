@@ -56,7 +56,7 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
         geminiKeyProvider = { Prefs.getGeminiKey(appCtx) },
         openAiKeyProvider = { Prefs.getOpenAiKey(appCtx) },
         systemPromptProvider = { getEffectiveSystemPrompt() },
-        callbacks = EngineCallbacksFactory.create(stateManager, tts, perfTimerHolder)
+        callbacks = EngineCallbacksFactory.create(stateManager, tts, perfTimerHolder) { interruption }
     )
 
     private val sttManager: SttManager by lazy {
@@ -169,12 +169,20 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
 
                 if (!shouldAutoListenAfterTts) {
                     Log.d(TAG_AUTO_LISTEN, "❌ Flag disabled, skipping")
+                    val stt = sttManager.getStt()
+                    if (stt is GeminiLiveSttController) {
+                        stt.switchMicMode(com.example.advancedvoice.core.audio.MicrophoneSession.Mode.IDLE)
+                    }
                     return@collect
                 }
 
                 if (!settingEnabled) {
                     Log.w(TAG_AUTO_LISTEN, "❌ Setting disabled, clearing flag")
                     shouldAutoListenAfterTts = false
+                    val stt = sttManager.getStt()
+                    if (stt is GeminiLiveSttController) {
+                        stt.switchMicMode(com.example.advancedvoice.core.audio.MicrophoneSession.Mode.IDLE)
+                    }
                     return@collect
                 }
 
@@ -284,7 +292,12 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
                     } else {
                         Log.i(TAG, "[TTS] Stopped speaking - switching mic to MONITORING")
                         stt.notifyTtsStopped()
-                        stt.switchMicMode(MicrophoneSession.Mode.MONITORING)
+                        // Only switch to MONITORING if auto-listen is enabled, otherwise stay IDLE
+                        if (Prefs.getAutoListen(appCtx) && shouldAutoListenAfterTts) {
+                            stt.switchMicMode(MicrophoneSession.Mode.MONITORING)
+                        } else {
+                            stt.switchMicMode(MicrophoneSession.Mode.IDLE)
+                        }
                     }
                 }
             }

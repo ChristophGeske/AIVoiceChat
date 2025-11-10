@@ -161,17 +161,13 @@ class GeminiLiveSttController(
         }
 
         if (!isAutoListen) {
-            sessionTimeoutJob?.cancel() // Cancel any previous timeout job
+            sessionTimeoutJob?.cancel()
             if (speechAlreadyInProgress) {
-                // If we are starting while the user is already talking (i.e., a barge-in),
-                // the SpeechStart event that normally cancels the timeout has already passed.
-                // Therefore, we should not start a new timeout at all.
                 Log.i(TAG, "[Controller] Skipping session timeout because speech is already in progress.")
             } else {
-                // This is a fresh listening session, so start a timeout to detect if the user never speaks.
                 val listenSeconds = com.example.advancedvoice.core.prefs.Prefs.getListenSeconds(app)
                 val timeoutMs = listenSeconds * 1000L
-                Log.i(TAG, "[Controller] Starting ${listenSeconds}s session timeout for manual listen")
+                Log.i(TAG, "[Controller] Starting ${listenSeconds}s session timeout (autoListen=$isAutoListen)")
                 sessionTimeoutJob = scope.launch {
                     delay(timeoutMs)
                     Log.w(TAG, "[Controller] ⏱️ Session timeout after ${listenSeconds}s - no speech detected")
@@ -291,7 +287,16 @@ class GeminiLiveSttController(
             _isListening.value = false
             _isHearingSpeech.value = false
             _isTranscribing.value = false
-            micSession?.switchMode(MicrophoneSession.Mode.IDLE)
+
+            // ✅ FIX: Actually stop the mic session when going idle
+            Log.i(TAG, "[Controller] Stopping microphone session completely")
+            micSession?.stop()
+            micSession = null
+
+            // Cancel all jobs
+            eventJob?.cancel()
+            finalTranscriptJob?.cancel()
+            partialJob?.cancel()
         }
 
         turnEnded = false
@@ -338,20 +343,31 @@ class GeminiLiveSttController(
 
     fun switchMicMode(mode: MicrophoneSession.Mode) {
         Log.i(TAG, "[Controller] Switching mic mode to: $mode")
-        micSession?.switchMode(mode)
+
         when (mode) {
             MicrophoneSession.Mode.IDLE -> {
+                // ✅ FIX: Stop the session entirely in IDLE
+                Log.i(TAG, "[Controller] IDLE mode - stopping mic session")
+                scope.launch {
+                    micSession?.stop()
+                    micSession = null
+                }
+
                 _isListening.value = false
                 _isHearingSpeech.value = false
                 _isTranscribing.value = false
                 endTurnJob?.cancel()
                 sessionTimeoutJob?.cancel()
+                eventJob?.cancel()
+                finalTranscriptJob?.cancel()
+                partialJob?.cancel()
                 speechStartedInCurrentSession = false
                 lastPartialLen = 0
                 lastPartialTimeMs = 0L
                 Log.d(TAG, "[Controller] All listening states cleared for IDLE mode")
             }
             MicrophoneSession.Mode.MONITORING -> {
+                micSession?.switchMode(mode)
                 _isListening.value = false
                 _isHearingSpeech.value = false
                 _isTranscribing.value = false
@@ -363,6 +379,7 @@ class GeminiLiveSttController(
                 Log.d(TAG, "[Controller] Listening states cleared for MONITORING mode")
             }
             MicrophoneSession.Mode.TRANSCRIBING -> {
+                micSession?.switchMode(mode)
                 Log.d(TAG, "[Controller] TRANSCRIBING mode activated")
             }
         }

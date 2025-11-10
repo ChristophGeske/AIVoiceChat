@@ -165,7 +165,6 @@ class MicrophoneSession(
                 }
             }
             Mode.IDLE -> {
-                // Full idle: reset VAD and clear buffer.
                 Log.i(TAG_VAD_RESET, "Resetting VAD (entering IDLE)")
                 resetVadDetection()
                 audioBuffer.clear()

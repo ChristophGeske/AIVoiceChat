@@ -7,6 +7,7 @@ import com.example.advancedvoice.domain.engine.SentenceTurnEngine
 import com.example.advancedvoice.feature.conversation.presentation.GenerationPhase
 import com.example.advancedvoice.feature.conversation.presentation.interruption.InterruptionManager
 import com.example.advancedvoice.feature.conversation.presentation.state.ConversationStateManager
+import com.example.advancedvoice.feature.conversation.service.GeminiLiveSttController
 import com.example.advancedvoice.feature.conversation.service.SttController
 import com.example.advancedvoice.feature.conversation.service.TtsController
 import kotlinx.coroutines.CoroutineScope
@@ -138,34 +139,20 @@ class ConversationFlowController(
             return
         }
 
-        if (isCurrentSessionAutoListen) {
-            Log.i(TAG, "[AUTO-LISTEN] Empty transcript from auto-listen session")
-            stateManager.removeLastUserPlaceholderIfEmpty()
+        Log.i(TAG, "[EMPTY] Removing placeholder (autoListen=$isCurrentSessionAutoListen)")
+        stateManager.removeLastUserPlaceholderIfEmpty()
 
-            if (getPrefs.getAutoListen() && autoListenRetryCount < MAX_AUTO_LISTEN_RETRIES) {
-                autoListenRetryCount++
-                Log.i(TAG, "[AUTO-LISTEN] Retrying auto-listen (attempt $autoListenRetryCount/$MAX_AUTO_LISTEN_RETRIES)")
-                scope.launch {
-                    delay(500L)
-                    if (stateManager.phase.value == GenerationPhase.IDLE &&
-                        !stateManager.isListening.value &&
-                        !stateManager.isSpeaking.value) {
-                        startAutoListening()
-                    }
-                }
-            } else {
-                Log.w(TAG, "[AUTO-LISTEN] Max retries reached or disabled, switching to IDLE")
-                autoListenRetryCount = 0
-                scope.launch {
-                    getStt()?.stop(false)
-                    delay(100L)
-                    stateManager.setListening(false)
-                    stateManager.setHearingSpeech(false)
-                }
+        // ✅ FIX: Fully stop STT and switch to IDLE
+        scope.launch {
+            getStt()?.stop(false)  // Stop the session
+            delay(100L)
+            stateManager.setListening(false)
+            stateManager.setHearingSpeech(false)
+            stateManager.setTranscribing(false)
+            val stt = getStt()
+            if (stt is GeminiLiveSttController) {
+                stt.switchMicMode(com.example.advancedvoice.core.audio.MicrophoneSession.Mode.IDLE)
             }
-        } else {
-            Log.i(TAG, "[MANUAL-LISTEN] No speech detected in manual session")
-            stateManager.removeLastUserPlaceholderIfEmpty()
         }
     }
 

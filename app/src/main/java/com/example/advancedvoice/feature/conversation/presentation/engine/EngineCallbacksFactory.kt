@@ -6,6 +6,7 @@ import com.example.advancedvoice.core.text.SentenceSplitter
 import com.example.advancedvoice.core.util.PerfTimer
 import com.example.advancedvoice.domain.engine.SentenceTurnEngine
 import com.example.advancedvoice.feature.conversation.presentation.GenerationPhase
+import com.example.advancedvoice.feature.conversation.presentation.interruption.InterruptionManager
 import com.example.advancedvoice.feature.conversation.presentation.state.ConversationStateManager
 import com.example.advancedvoice.feature.conversation.service.TtsController
 
@@ -18,7 +19,8 @@ object EngineCallbacksFactory {
     fun create(
         stateManager: ConversationStateManager,
         tts: TtsController,
-        perfTimerHolder: PerfTimerHolder
+        perfTimerHolder: PerfTimerHolder,
+        getInterruption: () -> InterruptionManager
     ): SentenceTurnEngine.Callbacks {
         return SentenceTurnEngine.Callbacks(
             onStreamDelta = {},
@@ -70,19 +72,33 @@ object EngineCallbacksFactory {
                 perfTimerHolder.current?.mark("llm_done")
                 perfTimerHolder.current?.logSummary("llm_start", "llm_done")
                 Log.i(TAG, "[ENGINE_CB] onFinalResponse received (len=${full.length})")
-                stateManager.setPhase(GenerationPhase.IDLE)
 
                 val sentences = SentenceSplitter.splitIntoSentences(full)
                 if (sentences.isNotEmpty()) {
-                    // Check if already added (prevent duplicates in single-shot mode)
-                    val lastEntry = stateManager.conversation.value.lastOrNull()
-                    if (lastEntry == null || !lastEntry.isAssistant || lastEntry.sentences.isEmpty()) {
-                        Log.d(TAG, "[ENGINE_CB] Adding ${sentences.size} sentences from final response")
-                        stateManager.addAssistant(sentences)
-                        tts.queue(sentences.joinToString(" "))
+                    val fullText = sentences.joinToString(" ")
+
+                    // ✅ Check buffering BEFORE extracting grounding or changing phase
+                    val shouldBuffer = getInterruption().maybeHandleAssistantFinalResponse(fullText)
+
+                    if (shouldBuffer) {
+                        Log.d(TAG, "[ENGINE_CB] Response buffered - NO grounding extraction, phase unchanged")
+                        // DO NOT extract grounding, DO NOT set phase to IDLE
+                        // The response is on hold pending barge-in evaluation
                     } else {
-                        Log.w(TAG, "[ENGINE_CB] Final response already exists, skipping duplicate")
+                        // ✅ Normal path - response is NOT buffered
+                        stateManager.setPhase(GenerationPhase.IDLE)
+
+                        val lastEntry = stateManager.conversation.value.lastOrNull()
+                        if (lastEntry == null || !lastEntry.isAssistant || lastEntry.sentences.isEmpty()) {
+                            Log.d(TAG, "[ENGINE_CB] Adding ${sentences.size} sentences from final response")
+                            stateManager.addAssistant(sentences)
+                            tts.queue(fullText)
+                        } else {
+                            Log.w(TAG, "[ENGINE_CB] Final response already exists, skipping duplicate")
+                        }
                     }
+                } else {
+                    stateManager.setPhase(GenerationPhase.IDLE)
                 }
             },
 

@@ -14,7 +14,6 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
 
 class GeminiLiveSttController(
@@ -61,7 +60,6 @@ class GeminiLiveSttController(
     @Volatile private var speechStartedInCurrentSession = false
     @Volatile private var lastTtsStopTime = 0L
 
-    // Track ASR activity to handle orphaned SpeechEnd or finalize robustly
     @Volatile private var lastPartialLen = 0
     @Volatile private var lastPartialTimeMs = 0L
 
@@ -116,7 +114,6 @@ class GeminiLiveSttController(
             }
         }
 
-        // Capture current speech state BEFORE we touch flags
         val speechAlreadyInProgress = _isHearingSpeech.value
         Log.i("STT_CTRL", "speechAlreadyInProgress=$speechAlreadyInProgress")
 
@@ -125,7 +122,6 @@ class GeminiLiveSttController(
         _isTranscribing.value = false
         turnEnded = false
 
-        // Only reset VAD when speech is NOT already in progress
         if (!speechAlreadyInProgress) {
             Log.i("VAD_RESET", "Resetting VAD (reason=STT.start, speechAlreadyInProgress=false)")
             micSession?.resetVadDetection()
@@ -133,7 +129,6 @@ class GeminiLiveSttController(
             Log.i("VAD_RESET", "Skipping VAD reset (reason=STT.start, speechAlreadyInProgress=true)")
         }
 
-        // Capture partials to detect ASR activity
         partialJob?.cancel()
         partialJob = scope.launch {
             partialTranscripts.collect { txt ->
@@ -160,20 +155,18 @@ class GeminiLiveSttController(
             }
         }
 
-        if (!isAutoListen) {
-            sessionTimeoutJob?.cancel()
-            if (speechAlreadyInProgress) {
-                Log.i(TAG, "[Controller] Skipping session timeout because speech is already in progress.")
-            } else {
-                val listenSeconds = com.example.advancedvoice.core.prefs.Prefs.getListenSeconds(app)
-                val timeoutMs = listenSeconds * 1000L
-                Log.i(TAG, "[Controller] Starting ${listenSeconds}s session timeout (autoListen=$isAutoListen)")
-                sessionTimeoutJob = scope.launch {
-                    delay(timeoutMs)
-                    Log.w(TAG, "[Controller] ⏱️ Session timeout after ${listenSeconds}s - no speech detected")
-                    if (_isListening.value && !turnEnded) {
-                        endTurn("SessionTimeout")
-                    }
+        sessionTimeoutJob?.cancel()
+        if (speechAlreadyInProgress) {
+            Log.i(TAG, "[Controller] Skipping session timeout because speech is already in progress.")
+        } else {
+            val listenSeconds = com.example.advancedvoice.core.prefs.Prefs.getListenSeconds(app)
+            val timeoutMs = listenSeconds * 1000L
+            Log.i(TAG, "[Controller] Starting ${listenSeconds}s session timeout (autoListen=$isAutoListen)")
+            sessionTimeoutJob = scope.launch {
+                delay(timeoutMs)
+                Log.w(TAG, "[Controller] ⏱️ Session timeout after ${listenSeconds}s - no speech detected")
+                if (_isListening.value && !turnEnded) {
+                    endTurn("SessionTimeout")
                 }
             }
         }
@@ -188,8 +181,6 @@ class GeminiLiveSttController(
                     is VadRecorder.VadEvent.SpeechStart -> {
                         val timeSinceTts = System.currentTimeMillis() - lastTtsStopTime
 
-                        // Only suppress immediately-after-TTS SpeechStart in IDLE/MONITORING.
-                        // If we're already TRANSCRIBING, do NOT ignore it.
                         val shouldSuppressEcho = (currentMode == MicrophoneSession.Mode.IDLE ||
                                 currentMode == MicrophoneSession.Mode.MONITORING) &&
                                 lastTtsStopTime > 0 &&
@@ -220,8 +211,6 @@ class GeminiLiveSttController(
                         if (_isHearingSpeech.value) _isHearingSpeech.value = false
 
                         if (currentMode == MicrophoneSession.Mode.TRANSCRIBING) {
-                            // Fallback: if we never marked SpeechStart but we did get ASR partials,
-                            // treat this as a valid speech segment to avoid "orphan" + long timeout.
                             if (!speechStartedInCurrentSession && lastPartialLen > 0) {
                                 Log.w(TAG, "[VAD] Promoting orphaned SpeechEnd due to ASR partials (len=$lastPartialLen)")
                                 speechStartedInCurrentSession = true
@@ -264,22 +253,19 @@ class GeminiLiveSttController(
         _isListening.value = false
         _isHearingSpeech.value = false
 
-        // ✅ FIX: Only transcribe if we actually heard speech
         if (speechStartedInCurrentSession) {
             _isTranscribing.value = true
             micSession?.endCurrentTranscription()
             micSession?.switchMode(MicrophoneSession.Mode.MONITORING)
         } else {
-            // No speech detected - emit empty transcript immediately
             Log.i(TAG, "[VAD] No speech detected, emitting empty transcript")
             _isTranscribing.value = false
             scope.launch {
-                _transcripts.emit("")  // Trigger the empty transcript handling
+                _transcripts.emit("")
             }
             micSession?.switchMode(MicrophoneSession.Mode.MONITORING)
         }
 
-        // Reset for next session
         speechStartedInCurrentSession = false
         lastPartialLen = 0
         lastPartialTimeMs = 0L
@@ -299,12 +285,14 @@ class GeminiLiveSttController(
             _isHearingSpeech.value = false
             _isTranscribing.value = false
 
-            // ✅ FIX: Actually stop the mic session when going idle
             Log.i(TAG, "[Controller] Stopping microphone session completely")
-            micSession?.stop()
+            val sessionToStop = micSession
             micSession = null
 
-            // Cancel all jobs
+            scope.launch {
+                sessionToStop?.stop()
+            }
+
             eventJob?.cancel()
             finalTranscriptJob?.cancel()
             partialJob?.cancel()
@@ -357,11 +345,18 @@ class GeminiLiveSttController(
 
         when (mode) {
             MicrophoneSession.Mode.IDLE -> {
-                // ✅ FIX: Stop the session entirely in IDLE
                 Log.i(TAG, "[Controller] IDLE mode - stopping mic session")
-                scope.launch {
-                    micSession?.stop()
-                    micSession = null
+
+                // ✅ FIX: Set to null FIRST (synchronously), then stop in background
+                val sessionToStop = micSession
+                micSession = null  // Immediately null so start() will create new session
+
+                if (sessionToStop != null) {
+                    scope.launch {
+                        sessionToStop.stop()
+                    }
+                } else {
+                    Log.d(TAG, "[Controller] No mic session to stop (already null)")
                 }
 
                 _isListening.value = false

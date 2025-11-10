@@ -5,7 +5,6 @@ import com.example.advancedvoice.core.text.SentenceSplitter
 import com.example.advancedvoice.data.common.ChatMessage
 import com.example.advancedvoice.data.gemini.GeminiService
 import com.example.advancedvoice.domain.engine.SentenceTurnEngine
-import com.example.advancedvoice.domain.util.GroundingUtils
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -30,7 +29,6 @@ class FastFirstSentenceStrategy(
         active = true
         scope.launch(Dispatchers.IO) {
             try {
-                val combinedSources = mutableSetOf<Pair<String, String?>>()
                 val gem = GeminiService(geminiKeyProvider, http)
                 val mappedHistory = mapHistory(history)
 
@@ -45,26 +43,20 @@ class FastFirstSentenceStrategy(
                     enableGoogleSearch = true
                 )
 
-                // --- CHANGE 1: CRITICAL CHECK AFTER NETWORK CALL ---
-                // If we were aborted while waiting for the network, or if the API returned nothing,
-                // we must exit immediately to prevent a race condition.
                 if (!active || firstSentence.isBlank()) {
                     if (firstSentence.isBlank()) {
                         Log.w("FastFirst", "Phase 1 returned an empty sentence.")
-                        // Only call onTurnFinish if we weren't aborted. The engine handles it otherwise.
                         if (active) callbacks.onTurnFinish()
                     } else {
                         Log.w("FastFirst", "Aborted during Phase 1 network call.")
                     }
-                    return@launch // EXIT COROUTINE
+                    return@launch
                 }
 
-                combinedSources.addAll(phase1Sources)
-                callbacks.onFirstSentence(firstSentence)
+                callbacks.onFirstSentence(firstSentence, phase1Sources)  // ✅ Pass sources to callback
 
                 if (maxSentences <= 1) {
-                    Log.i("FastFirst", "Max sentences is 1, skipping Phase 2.")
-                    GroundingUtils.processAndDisplaySources(combinedSources.toList(), callbacks.onSystem)
+                    Log.i("FastFirst", "Max sentences is 1, finishing.")
                     callbacks.onTurnFinish()
                     return@launch
                 }
@@ -78,41 +70,33 @@ class FastFirstSentenceStrategy(
 
                 val (remainderText, phase2Sources) = gem.generateTextWithSources(
                     systemPrompt = phase2SystemPrompt,
-                    history = phase2History, // <-- FIX: Use the updated history
+                    history = phase2History,
                     modelName = modelName,
                     temperature = 0.7,
                     enableGoogleSearch = true
                 )
 
-                // --- CHANGE 2: CRITICAL CHECK AFTER SECOND NETWORK CALL ---
                 if (!active) {
                     Log.w("FastFirst", "Aborted during Phase 2 network call.")
                     return@launch
                 }
 
-                combinedSources.addAll(phase2Sources)
-
                 if (remainderText.isNotBlank()) {
                     val remainingSentences = SentenceSplitter.splitIntoSentences(remainderText)
-                    callbacks.onRemainingSentences(remainingSentences)
+                    callbacks.onRemainingSentences(remainingSentences, phase2Sources)  // ✅ Pass sources to callback
                 } else {
                     Log.w("FastFirst", "Phase 2 returned an empty remainder.")
                 }
 
-                GroundingUtils.processAndDisplaySources(combinedSources.toList(), callbacks.onSystem)
                 callbacks.onTurnFinish()
 
             } catch (t: Throwable) {
                 Log.e("FastFirstSentenceStrategy", "Error: ${t.message}", t)
                 if (active) {
                     callbacks.onError(t.message ?: "Generation failed")
-                    // Ensure the turn is finished even on error
                     callbacks.onTurnFinish()
                 }
             } finally {
-                // --- CHANGE 3: REMOVE THE DANGEROUS FINALLY BLOCK LOGIC ---
-                // This was causing the race condition. The logical paths above now correctly
-                // handle all exit conditions. We just need to mark this instance inactive.
                 active = false
             }
         }

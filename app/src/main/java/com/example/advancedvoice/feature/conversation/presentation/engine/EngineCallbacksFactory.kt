@@ -5,6 +5,7 @@ import com.example.advancedvoice.core.logging.LoggerConfig
 import com.example.advancedvoice.core.text.SentenceSplitter
 import com.example.advancedvoice.core.util.PerfTimer
 import com.example.advancedvoice.domain.engine.SentenceTurnEngine
+import com.example.advancedvoice.domain.util.GroundingUtils
 import com.example.advancedvoice.feature.conversation.presentation.GenerationPhase
 import com.example.advancedvoice.feature.conversation.presentation.interruption.InterruptionManager
 import com.example.advancedvoice.feature.conversation.presentation.state.ConversationStateManager
@@ -16,6 +17,8 @@ import com.example.advancedvoice.feature.conversation.service.TtsController
 object EngineCallbacksFactory {
     private const val TAG = LoggerConfig.TAG_VM
 
+    @Volatile private var lastResponseWasBuffered = false
+
     fun create(
         stateManager: ConversationStateManager,
         tts: TtsController,
@@ -26,75 +29,74 @@ object EngineCallbacksFactory {
             onStreamDelta = {},
             onStreamSentence = {},
 
-            onFirstSentence = { text ->
-                Log.i(TAG, "[ENGINE_CB] onFirstSentence received (len=${text.length})")
+            onFirstSentence = { text, sources ->
+                Log.i(TAG, "[ENGINE_CB] onFirstSentence received (len=${text.length}, sources=${sources.size})")
                 stateManager.setPhase(GenerationPhase.GENERATING_REMAINDER)
 
-                // Only add if not already present (prevent duplicates)
                 val lastEntry = stateManager.conversation.value.lastOrNull()
                 if (lastEntry == null || !lastEntry.isAssistant || lastEntry.sentences.isEmpty()) {
                     stateManager.addAssistant(listOf(text))
                     tts.queue(text)
+                    // ✅ Display grounding for first sentence (never buffered)
+                    if (sources.isNotEmpty()) {
+                        GroundingUtils.processAndDisplaySources(sources, stateManager::addSystem)
+                    }
                     Log.d(TAG, "[ENGINE_CB] Added first sentence to conversation and TTS")
                 } else {
                     Log.w(TAG, "[ENGINE_CB] First sentence already exists, skipping duplicate")
                 }
             },
 
-            onRemainingSentences = { sentences ->
-                Log.i(TAG, "[ENGINE_CB] onRemainingSentences received (count=${sentences.size})")
+            onRemainingSentences = { sentences, sources ->
+                Log.i(TAG, "[ENGINE_CB] onRemainingSentences received (count=${sentences.size}, sources=${sources.size})")
                 stateManager.setPhase(GenerationPhase.IDLE)
 
                 val idx = stateManager.conversation.value.indexOfLast { it.isAssistant }
                 if (idx >= 0 && sentences.isNotEmpty()) {
                     val current = stateManager.conversation.value[idx].sentences
-
-                    // ✅ FIXED: Strategy sends ONLY remaining sentences, so no need to calculate delta
-                    // Just verify we're not duplicating (safety check)
                     val actualNew = sentences.filterIndexed { index, sentence ->
                         val globalIndex = current.size + index
-                        globalIndex >= current.size  // Only include if beyond current
+                        globalIndex >= current.size
                     }
 
                     if (actualNew.isNotEmpty()) {
-                        Log.d(TAG, "[ENGINE_CB] Appending ${actualNew.size} new sentences (current: ${current.size}, incoming: ${sentences.size})")
+                        Log.d(TAG, "[ENGINE_CB] Appending ${actualNew.size} new sentences")
                         stateManager.appendAssistantSentences(idx, actualNew)
-
-                        // ✅ Queue to TTS (join for natural speech flow)
                         tts.queue(actualNew.joinToString(" "))
-                    } else {
-                        Log.d(TAG, "[ENGINE_CB] No new sentences to append (all already present)")
+
+                        // ✅ Display grounding for remainder (never buffered in fast-first mode)
+                        if (sources.isNotEmpty()) {
+                            GroundingUtils.processAndDisplaySources(sources, stateManager::addSystem)
+                        }
                     }
                 }
             },
 
-            onFinalResponse = { full ->
+            onFinalResponse = { fullText, sources ->
                 perfTimerHolder.current?.mark("llm_done")
                 perfTimerHolder.current?.logSummary("llm_start", "llm_done")
-                Log.i(TAG, "[ENGINE_CB] onFinalResponse received (len=${full.length})")
+                Log.i(TAG, "[ENGINE_CB] onFinalResponse received (len=${fullText.length}, sources=${sources.size})")
 
-                val sentences = SentenceSplitter.splitIntoSentences(full)
+                val sentences = SentenceSplitter.splitIntoSentences(fullText)
                 if (sentences.isNotEmpty()) {
-                    val fullText = sentences.joinToString(" ")
-
-                    // ✅ Check buffering BEFORE extracting grounding or changing phase
-                    val shouldBuffer = getInterruption().maybeHandleAssistantFinalResponse(fullText)
+                    val text = sentences.joinToString(" ")
+                    val shouldBuffer = getInterruption().maybeHandleAssistantFinalResponse(text)
 
                     if (shouldBuffer) {
-                        Log.d(TAG, "[ENGINE_CB] Response buffered - NO grounding extraction, phase unchanged")
-                        // DO NOT extract grounding, DO NOT set phase to IDLE
-                        // The response is on hold pending barge-in evaluation
+                        Log.d(TAG, "[ENGINE_CB] ⏸️ Response buffered - NO grounding display")
+                        // ✅ DO NOT display grounding for buffered responses
                     } else {
-                        // ✅ Normal path - response is NOT buffered
                         stateManager.setPhase(GenerationPhase.IDLE)
-
                         val lastEntry = stateManager.conversation.value.lastOrNull()
                         if (lastEntry == null || !lastEntry.isAssistant || lastEntry.sentences.isEmpty()) {
                             Log.d(TAG, "[ENGINE_CB] Adding ${sentences.size} sentences from final response")
                             stateManager.addAssistant(sentences)
-                            tts.queue(fullText)
-                        } else {
-                            Log.w(TAG, "[ENGINE_CB] Final response already exists, skipping duplicate")
+                            tts.queue(text)
+
+                            // ✅ Only display grounding for non-buffered responses
+                            if (sources.isNotEmpty()) {
+                                GroundingUtils.processAndDisplaySources(sources, stateManager::addSystem)
+                            }
                         }
                     }
                 } else {
@@ -105,6 +107,7 @@ object EngineCallbacksFactory {
             onTurnFinish = {
                 Log.i(TAG, "[ENGINE_CB] onTurnFinish received.")
                 perfTimerHolder.current = null
+                lastResponseWasBuffered = false  // ✅ Reset for next turn
                 stateManager.setPhase(GenerationPhase.IDLE)
             },
 
@@ -115,17 +118,14 @@ object EngineCallbacksFactory {
             onError = { msg ->
                 perfTimerHolder.current?.mark("llm_done")
                 perfTimerHolder.current?.logSummary("llm_start", "llm_done")
+                lastResponseWasBuffered = false  // ✅ Reset on error
                 stateManager.setPhase(GenerationPhase.IDLE)
                 stateManager.addError(msg)
             }
         )
     }
 
-    /**
-     * Holder for PerfTimer to allow callbacks to update it.
-     */
     class PerfTimerHolder {
         var current: PerfTimer? = null
     }
 }
-

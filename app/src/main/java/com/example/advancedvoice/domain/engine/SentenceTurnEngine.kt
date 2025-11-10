@@ -30,9 +30,9 @@ class SentenceTurnEngine(
     data class Callbacks(
         val onStreamDelta: (String) -> Unit,
         val onStreamSentence: (String) -> Unit,
-        val onFirstSentence: (String) -> Unit,
-        val onRemainingSentences: (List<String>) -> Unit,
-        val onFinalResponse: (String) -> Unit,
+        val onFirstSentence: (String, List<Pair<String, String?>>) -> Unit,  // ✅ Added sources
+        val onRemainingSentences: (List<String>, List<Pair<String, String?>>) -> Unit,  // ✅ Added sources
+        val onFinalResponse: (String, List<Pair<String, String?>>) -> Unit,  // ✅ Added sources
         val onTurnFinish: () -> Unit,
         val onSystem: (String) -> Unit,
         val onError: (String) -> Unit
@@ -208,29 +208,29 @@ class SentenceTurnEngine(
                     }
                 }
             },
-            onFirstSentence = { firstSentence ->
+            onFirstSentence = { firstSentence, sources ->  // ✅ Add sources parameter
                 if (active) {
                     uiScope.launch {
-                        Log.i(TAG, "→ onFirstSentence: '${firstSentence.take(80)}...'")
+                        Log.i(TAG, "→ onFirstSentence: '${firstSentence.take(80)}...', sources=${sources.size}")
                         addAssistant(firstSentence)
-                        callbacks.onFirstSentence(firstSentence)
+                        callbacks.onFirstSentence(firstSentence, sources)  // ✅ Pass sources
                     }
                 }
             },
-            onRemainingSentences = { sentences ->
+            onRemainingSentences = { sentences, sources ->  // ✅ Add sources parameter
                 if (active) {
                     uiScope.launch {
-                        Log.i(TAG, "→ onRemainingSentences: count=${sentences.size}")
-                        callbacks.onRemainingSentences(sentences)
+                        Log.i(TAG, "→ onRemainingSentences: count=${sentences.size}, sources=${sources.size}")
+                        callbacks.onRemainingSentences(sentences, sources)  // ✅ Pass sources
                     }
                 }
             },
-            onFinalResponse = { fullText ->
+            onFinalResponse = { fullText, sources ->  // ✅ Add sources parameter
                 if (active) {
                     uiScope.launch {
-                        Log.i(TAG, "→ onFinalResponse(len=${fullText.length})")
+                        Log.i(TAG, "→ onFinalResponse(len=${fullText.length}, sources=${sources.size})")
                         addAssistant(fullText)
-                        callbacks.onFinalResponse(fullText)
+                        callbacks.onFinalResponse(fullText, sources)  // ✅ Pass sources
                     }
                 }
             },

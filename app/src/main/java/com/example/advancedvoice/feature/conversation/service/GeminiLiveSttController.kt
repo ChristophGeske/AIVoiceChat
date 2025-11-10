@@ -263,10 +263,21 @@ class GeminiLiveSttController(
         Log.i(TAG, "[VAD] Turn ending: '$reason'")
         _isListening.value = false
         _isHearingSpeech.value = false
-        _isTranscribing.value = true
 
-        micSession?.endCurrentTranscription()
-        micSession?.switchMode(MicrophoneSession.Mode.MONITORING)
+        // ✅ FIX: Only transcribe if we actually heard speech
+        if (speechStartedInCurrentSession) {
+            _isTranscribing.value = true
+            micSession?.endCurrentTranscription()
+            micSession?.switchMode(MicrophoneSession.Mode.MONITORING)
+        } else {
+            // No speech detected - emit empty transcript immediately
+            Log.i(TAG, "[VAD] No speech detected, emitting empty transcript")
+            _isTranscribing.value = false
+            scope.launch {
+                _transcripts.emit("")  // Trigger the empty transcript handling
+            }
+            micSession?.switchMode(MicrophoneSession.Mode.MONITORING)
+        }
 
         // Reset for next session
         speechStartedInCurrentSession = false

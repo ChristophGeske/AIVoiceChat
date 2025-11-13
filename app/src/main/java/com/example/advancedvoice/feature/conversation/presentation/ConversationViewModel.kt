@@ -76,7 +76,8 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
             tts = tts,
             getStt = { sttManager.getStt() },
             startTurnWithExistingHistory = { flowController.startTurnWithExistingHistory() },
-            onInterruption = { disableAutoListenAfterTts() }
+            onInterruption = { disableAutoListenAfterTts() },
+            onNoiseConfirmed = { enableAutoListenAfterTts() }
         )
     }
 

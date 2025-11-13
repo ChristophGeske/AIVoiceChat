@@ -1,6 +1,7 @@
 package com.example.advancedvoice.domain.strategy
 
 import android.util.Log
+import com.example.advancedvoice.core.logging.LoggerConfig
 import com.example.advancedvoice.core.text.SentenceSplitter
 import com.example.advancedvoice.data.common.ChatMessage
 import com.example.advancedvoice.data.gemini.GeminiService
@@ -16,6 +17,10 @@ class FastFirstSentenceStrategy(
     private val openAiKeyProvider: () -> String
 ) : IGenerationStrategy {
 
+    companion object {
+        private const val TAG = LoggerConfig.TAG_STRATEGY
+    }
+
     @Volatile private var active = false
 
     override fun execute(
@@ -27,14 +32,22 @@ class FastFirstSentenceStrategy(
         callbacks: SentenceTurnEngine.Callbacks
     ) {
         active = true
+        Log.i(TAG, "═══════════════════════════════════")
+        Log.i(TAG, "[FAST-FIRST] Starting generation")
+        Log.i(TAG, "  Model: $modelName")
+        Log.i(TAG, "  Max Sentences: $maxSentences")
+        Log.i(TAG, "  History size: ${history.size}")
+        Log.i(TAG, "═══════════════════════════════════")
+
         scope.launch(Dispatchers.IO) {
             try {
                 val gem = GeminiService(geminiKeyProvider, http)
                 val mappedHistory = mapHistory(history)
 
-                // --- PHASE 1: Get the first sentence and sources ---
-                Log.i("FastFirst", "--- PHASE 1: GENERATING FIRST SENTENCE ---")
+                // --- PHASE 1: Get the first sentence ---
+                Log.i(TAG, "[PHASE-1] 🚀 Requesting first sentence from Gemini...")
                 val phase1SystemPrompt = "$systemPrompt\n\nIMPORTANT: Your entire response must be only a single, complete sentence."
+
                 val (firstSentence, phase1Sources) = gem.generateTextWithSources(
                     systemPrompt = phase1SystemPrompt,
                     history = mappedHistory,
@@ -43,26 +56,32 @@ class FastFirstSentenceStrategy(
                     enableGoogleSearch = true
                 )
 
-                if (!active || firstSentence.isBlank()) {
-                    if (firstSentence.isBlank()) {
-                        Log.w("FastFirst", "Phase 1 returned an empty sentence.")
-                        if (active) callbacks.onTurnFinish()
-                    } else {
-                        Log.w("FastFirst", "Aborted during Phase 1 network call.")
-                    }
+                Log.i(TAG, "[PHASE-1] ✅ Response received (len=${firstSentence.length}): '${firstSentence.take(100)}...'")
+                Log.d(TAG, "[PHASE-1] Sources: ${phase1Sources.size} items")
+
+                if (!active) {
+                    Log.w(TAG, "[PHASE-1] ❌ ABORTED (active=false) - discarding result")
                     return@launch
                 }
 
-                callbacks.onFirstSentence(firstSentence, phase1Sources)  // ✅ Pass sources to callback
-
-                if (maxSentences <= 1) {
-                    Log.i("FastFirst", "Max sentences is 1, finishing.")
+                if (firstSentence.isBlank()) {
+                    Log.e(TAG, "[PHASE-1] ❌ EMPTY RESPONSE from Gemini!")
+                    callbacks.onError("LLM returned empty response")
                     callbacks.onTurnFinish()
                     return@launch
                 }
 
-                // --- PHASE 2: Generate the rest of the response ---
-                Log.i("FastFirst", "--- PHASE 2: GENERATING REMAINDER ---")
+                Log.i(TAG, "[PHASE-1] ✅ Calling onFirstSentence callback")
+                callbacks.onFirstSentence(firstSentence, phase1Sources)
+
+                if (maxSentences <= 1) {
+                    Log.i(TAG, "[PHASE-1] Max sentences is 1, finishing")
+                    callbacks.onTurnFinish()
+                    return@launch
+                }
+
+                // --- PHASE 2: Generate the rest ---
+                Log.i(TAG, "[PHASE-2] 🚀 Requesting remaining ${maxSentences - 1} sentences...")
                 val phase2History = mappedHistory + ChatMessage("assistant", firstSentence)
                 val remainingCount = maxSentences - 1
                 val plural = if (remainingCount > 1) "sentences" else "sentence"
@@ -76,33 +95,41 @@ class FastFirstSentenceStrategy(
                     enableGoogleSearch = true
                 )
 
+                Log.i(TAG, "[PHASE-2] ✅ Response received (len=${remainderText.length})")
+
                 if (!active) {
-                    Log.w("FastFirst", "Aborted during Phase 2 network call.")
+                    Log.w(TAG, "[PHASE-2] ❌ ABORTED (active=false) - discarding result")
                     return@launch
                 }
 
                 if (remainderText.isNotBlank()) {
                     val remainingSentences = SentenceSplitter.splitIntoSentences(remainderText)
-                    callbacks.onRemainingSentences(remainingSentences, phase2Sources)  // ✅ Pass sources to callback
+                    Log.i(TAG, "[PHASE-2] ✅ Calling onRemainingSentences (count=${remainingSentences.size})")
+                    callbacks.onRemainingSentences(remainingSentences, phase2Sources)
                 } else {
-                    Log.w("FastFirst", "Phase 2 returned an empty remainder.")
+                    Log.w(TAG, "[PHASE-2] ⚠️ Empty remainder, only first sentence available")
                 }
 
+                Log.i(TAG, "[COMPLETE] ✅ Generation finished successfully")
                 callbacks.onTurnFinish()
 
             } catch (t: Throwable) {
-                Log.e("FastFirstSentenceStrategy", "Error: ${t.message}", t)
+                Log.e(TAG, "[ERROR] ❌ Exception during generation", t)
+                Log.e(TAG, "[ERROR] Message: ${t.message}")
+                Log.e(TAG, "[ERROR] Stack trace:", t)
                 if (active) {
                     callbacks.onError(t.message ?: "Generation failed")
                     callbacks.onTurnFinish()
                 }
             } finally {
                 active = false
+                Log.d(TAG, "[CLEANUP] Strategy completed, active=false")
             }
         }
     }
 
     override fun abort() {
+        Log.w(TAG, "[ABORT] ❌ Abort requested, setting active=false")
         active = false
     }
 

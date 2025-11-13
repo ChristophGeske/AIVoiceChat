@@ -142,9 +142,33 @@ class ConversationFlowController(
         Log.i(TAG, "[EMPTY] Removing placeholder (autoListen=$isCurrentSessionAutoListen)")
         stateManager.removeLastUserPlaceholderIfEmpty()
 
-        // ✅ FIX: Fully stop STT and switch to IDLE
+        // ✅ NEW: During auto-listen, retry on false positives instead of stopping
+        if (isCurrentSessionAutoListen && autoListenRetryCount < MAX_AUTO_LISTEN_RETRIES) {
+            Log.w(TAG, "[EMPTY] Auto-listen false positive (retry ${autoListenRetryCount + 1}/$MAX_AUTO_LISTEN_RETRIES) - restarting session")
+            autoListenRetryCount++
+
+            scope.launch {
+                // Brief delay to let VAD settle
+                delay(300L)
+
+                // Restart auto-listen session
+                if (!stateManager.isListening.value && stateManager.phase.value == GenerationPhase.IDLE) {
+                    Log.i(TAG, "[EMPTY] Restarting auto-listen session")
+                    startListeningSession(isAutoListen = true)
+                } else {
+                    Log.w(TAG, "[EMPTY] Cannot restart - state changed (listening=${stateManager.isListening.value}, phase=${stateManager.phase.value})")
+                }
+            }
+            return
+        }
+
+        // Max retries reached or manual mode → stop listening
+        if (isCurrentSessionAutoListen) {
+            Log.w(TAG, "[EMPTY] Max auto-listen retries reached, stopping")
+        }
+
         scope.launch {
-            getStt()?.stop(false)  // Stop the session
+            getStt()?.stop(false)
             delay(100L)
             stateManager.setListening(false)
             stateManager.setHearingSpeech(false)
@@ -164,7 +188,7 @@ class ConversationFlowController(
 
     private fun handleNormalTranscript(input: String) {
         Log.i(TAG, "[IMMEDIATE-SEND] Sending transcript (len=${input.length})")
-        autoListenRetryCount = 0
+        autoListenRetryCount = 0  // ✅ Reset retry counter on successful transcript
         stateManager.replaceLastUser(input)
         startTurn(input)
     }

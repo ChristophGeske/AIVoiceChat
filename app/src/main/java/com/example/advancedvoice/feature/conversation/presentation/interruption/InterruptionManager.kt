@@ -220,15 +220,17 @@ class InterruptionManager(
             tts.queue(held)
             interruptedDuringEvaluation = false
 
+            // ✅ Re-enable auto-listen flag
             onNoiseConfirmed()
             Log.d(TAG, "[NOISE] Re-enabled auto-listen flag (turn completing normally)")
         } else {
             Log.d(TAG, "[NOISE] No buffered response to flush")
 
-            // ✅ NEW: Only resume if we're NOT generating (i.e., this was during playback, not a new turn)
+            // Check if we're generating (don't resume if so)
             val isGenerating = stateManager.phase.value != GenerationPhase.IDLE
 
             if (interruptedDuringEvaluation && !isGenerating) {
+                // We interrupted playback, and we're not generating a new response → resume
                 Log.d(TAG, "[NOISE] Attempting to resume interrupted TTS (not generating)")
                 val lastAssistant = stateManager.conversation.value.lastOrNull { it.isAssistant }
                 if (lastAssistant != null && lastAssistant.sentences.isNotEmpty()) {
@@ -237,6 +239,7 @@ class InterruptionManager(
                         Log.i(TAG, "[NOISE] ✅ Resuming interrupted TTS (len=${fullText.length})")
                         tts.queue(fullText)
 
+                        // ✅ Re-enable auto-listen flag
                         onNoiseConfirmed()
                         Log.d(TAG, "[NOISE] Re-enabled auto-listen flag (resuming TTS)")
                     } else {
@@ -246,9 +249,15 @@ class InterruptionManager(
                     Log.d(TAG, "[NOISE] No assistant response found to resume")
                 }
             } else if (isGenerating) {
+                // We're generating a new response → don't resume old one
                 Log.i(TAG, "[NOISE] ⏭️ SKIP RESUME - currently generating new response (phase=${stateManager.phase.value})")
-                // Don't resume - we're generating a new response
-                // The new response will be handled by the normal flow when it arrives
+
+                // ✅ FIX: Still re-enable auto-listen flag even though we're skipping resume!
+                // The noise was just noise, not a real interruption, so the turn should still complete normally
+                if (interruptedDuringEvaluation) {
+                    onNoiseConfirmed()
+                    Log.d(TAG, "[NOISE] Re-enabled auto-listen flag (skipped resume, but turn will complete normally)")
+                }
             } else {
                 Log.d(TAG, "[NOISE] No interruption flag set or not in resumable state")
             }

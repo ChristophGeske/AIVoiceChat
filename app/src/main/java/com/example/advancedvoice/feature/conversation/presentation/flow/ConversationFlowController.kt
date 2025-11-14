@@ -111,7 +111,15 @@ class ConversationFlowController(
         // Check for our special timeout signal first.
         if (text == "::TIMEOUT::") {
             Log.i(TAG, "[STT RESULT] Received TIMEOUT signal. Stopping session now.")
-            stateManager.removeLastUserPlaceholderIfEmpty()
+
+            // ✅ FIX: If we're evaluating, flush buffered response (treat timeout as noise)
+            if (interruption.isEvaluatingBargeIn) {
+                Log.i(TAG, "[TIMEOUT] Evaluation active - treating timeout as noise, flushing buffered response")
+                interruption.handleTimeoutDuringEvaluation()
+            } else {
+                stateManager.removeLastUserPlaceholderIfEmpty()
+            }
+
             scope.launch {
                 getStt()?.stop(false)
                 delay(100L)

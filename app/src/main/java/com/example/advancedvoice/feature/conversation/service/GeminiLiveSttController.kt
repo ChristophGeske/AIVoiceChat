@@ -63,6 +63,9 @@ class GeminiLiveSttController(
     @Volatile private var lastPartialLen = 0
     @Volatile private var lastPartialTimeMs = 0L
 
+    @Volatile private var sessionStartTime = 0L
+    @Volatile private var sessionTimeoutMs = 0L
+
     init {
         connect()
     }
@@ -135,7 +138,6 @@ class GeminiLiveSttController(
                 lastPartialLen = txt.length
                 lastPartialTimeMs = System.currentTimeMillis()
 
-                // ✅ FIX: Cancel session timeout when real words arrive
                 if (txt.isNotBlank()) {
                     sessionTimeoutJob?.cancel()
                     Log.d(TAG, "[Controller] Partials detected - cancelling session timeout (real words)")
@@ -157,14 +159,12 @@ class GeminiLiveSttController(
             transcriber.finalTranscripts.collect { final ->
                 Log.i(TAG, "[Controller] Final transcript (len=${final.length})")
 
-                // ✅ NEW: Decide mode switch based on transcript content
                 if (final.isNotBlank()) {
                     sessionTimeoutJob?.cancel()
                     Log.d(TAG, "[Controller] Real words detected - cancelling session timeout, switching to MONITORING")
                     micSession?.switchMode(MicrophoneSession.Mode.MONITORING)
                 } else {
                     Log.d(TAG, "[Controller] Empty transcript (noise) - staying in TRANSCRIBING")
-                    // Don't switch to MONITORING - resetTurnAfterNoise will handle it
                 }
 
                 _transcripts.emit(final)
@@ -176,11 +176,14 @@ class GeminiLiveSttController(
         if (speechAlreadyInProgress) {
             Log.i(TAG, "[Controller] Skipping session timeout because speech is already in progress.")
         } else {
+            // ✅ NEW: Track session start time
             val listenSeconds = com.example.advancedvoice.core.prefs.Prefs.getListenSeconds(app)
-            val timeoutMs = listenSeconds * 1000L
-            Log.i(TAG, "[Controller] Starting ${listenSeconds}s session timeout (autoListen=$isAutoListen)")
+            sessionTimeoutMs = listenSeconds * 1000L
+            sessionStartTime = System.currentTimeMillis()
+
+            Log.i(TAG, "[Controller] Starting ${listenSeconds}s session timeout at $sessionStartTime")
             sessionTimeoutJob = scope.launch {
-                delay(timeoutMs)
+                delay(sessionTimeoutMs)
                 Log.w(TAG, "[Controller] ⏱️ Session timeout after ${listenSeconds}s - no speech detected")
                 if (_isListening.value && !turnEnded) {
                     endTurn("SessionTimeout")
@@ -459,35 +462,35 @@ class GeminiLiveSttController(
     fun resetTurnAfterNoise() {
         Log.i(TAG, "[Controller] Resetting turn state after VAD noise - continuing to listen")
 
-        // Reset turn state
         turnEnded = false
         speechStartedInCurrentSession = false
         lastPartialLen = 0
         lastPartialTimeMs = 0L
 
-        // Clear transient states
         _isTranscribing.value = false
         _isHearingSpeech.value = false
-
-        // ✅ FIX 1: Restore listening state (was set to false by endTurn)
         _isListening.value = true
-        Log.d(TAG, "[Controller] Restored isListening=true")
 
-        // ✅ FIX 2: Restart session timeout (was cancelled by endTurn)
+        // ✅ FIX: Restart timeout with REMAINING time from original session start
+        val elapsedTime = System.currentTimeMillis() - sessionStartTime
+        val remainingTime = sessionTimeoutMs - elapsedTime
+
         sessionTimeoutJob?.cancel()
-        val listenSeconds = com.example.advancedvoice.core.prefs.Prefs.getListenSeconds(app)
-        val timeoutMs = listenSeconds * 1000L
-        Log.i(TAG, "[Controller] Restarting ${listenSeconds}s session timeout after noise")
-        sessionTimeoutJob = scope.launch {
-            delay(timeoutMs)
-            Log.w(TAG, "[Controller] ⏱️ Session timeout after ${listenSeconds}s - no real words received")
-            if (_isListening.value && !turnEnded) {
-                endTurn("SessionTimeout")
+
+        if (remainingTime > 0) {
+            Log.d(TAG, "[Controller] Restarting session timeout with ${remainingTime}ms remaining")
+            sessionTimeoutJob = scope.launch {
+                delay(remainingTime)
+                Log.w(TAG, "[Controller] ⏱️ Session timeout - total time limit reached")
+                if (_isListening.value && !turnEnded) {
+                    endTurn("SessionTimeout")
+                }
             }
+        } else {
+            Log.w(TAG, "[Controller] Session timeout already exceeded, ending turn immediately")
+            endTurn("SessionTimeout")
         }
 
-        // ✅ FIX 3: Stay in TRANSCRIBING mode
         micSession?.switchMode(MicrophoneSession.Mode.TRANSCRIBING)
-        Log.d(TAG, "[Controller] Remaining in TRANSCRIBING mode")
     }
 }

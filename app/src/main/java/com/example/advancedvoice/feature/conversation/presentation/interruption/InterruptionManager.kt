@@ -232,15 +232,15 @@ class InterruptionManager(
         Log.i(TAG, "[NOISE] 🔇 Noise confirmed → flushing buffered response (if any)")
 
         val held = assistantHoldBuffer
-        val heldSources = assistantSourcesBuffer ?: emptyList()  // ✅ ADD THIS
+        val heldSources = assistantSourcesBuffer ?: emptyList()
 
         if (held != null) {
             assistantHoldBuffer = null
-            assistantSourcesBuffer = null  // ✅ ADD THIS
+            assistantSourcesBuffer = null
 
             Log.i(TAG, "[NOISE] ✅ Flushing buffered response (len=${held.length}, sources=${heldSources.size}) → adding to UI + TTS")  // ✅ UPDATE THIS
 
-            // ✅ ADD THIS - Process sources first
+            //   Process sources first
             if (heldSources.isNotEmpty()) {
                 com.example.advancedvoice.domain.util.GroundingUtils.processAndDisplaySources(heldSources) { html ->
                     stateManager.addSystem(html)
@@ -294,11 +294,6 @@ class InterruptionManager(
 
             interruptedDuringEvaluation = false
         }
-
-        val stt = getStt()
-        if (stt is GeminiLiveSttController) {
-            stt.switchMicMode(com.example.advancedvoice.core.audio.MicrophoneSession.Mode.MONITORING)
-        }
     }
 
     fun flushBufferedAssistantIfAny() {
@@ -306,10 +301,10 @@ class InterruptionManager(
             Log.d(TAG, "[FLUSH] No buffered response")
             return
         }
-        val heldSources = assistantSourcesBuffer ?: emptyList()  // ✅ ADD THIS
+        val heldSources = assistantSourcesBuffer ?: emptyList()
 
         assistantHoldBuffer = null
-        assistantSourcesBuffer = null  // ✅ ADD THIS
+        assistantSourcesBuffer = null
 
         Log.i(TAG, "[FLUSH] ✅ Flushing buffered response (len=${held.length}, sources=${heldSources.size}) → adding to conversation + TTS")
 
@@ -478,5 +473,17 @@ class InterruptionManager(
             stateManager.setHearingSpeech(false)
             stateManager.setTranscribing(false)
         }
+    }
+
+    fun handleTimeoutDuringEvaluation() {
+        if (!isEvaluatingBargeIn) {
+            Log.d(TAG, "[TIMEOUT] Not evaluating, nothing to do")
+            return
+        }
+
+        Log.i(TAG, "[TIMEOUT] 🕒 Session timeout during evaluation - treating as noise, flushing buffered response")
+
+        // Treat timeout as noise confirmation (user didn't say anything meaningful)
+        handleConfirmedNoise()
     }
 }

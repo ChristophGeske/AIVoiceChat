@@ -209,9 +209,6 @@ class GeminiLiveSttController(
                         }
 
                         endTurnJob?.cancel()
-
-                        // ✅ FIX: Cancel timeout when speech starts
-                        // If it's noise, resetTurnAfterNoise() will restart the timeout
                         sessionTimeoutJob?.cancel()
                         Log.d(TAG, "[VAD] Timeout cancelled - speech detected")
 
@@ -219,6 +216,27 @@ class GeminiLiveSttController(
 
                         if (currentMode != MicrophoneSession.Mode.IDLE) {
                             if (!_isHearingSpeech.value) _isHearingSpeech.value = true
+
+                            // ✅ NEW: Switch from MONITORING to TRANSCRIBING when speech detected
+                            if (currentMode == MicrophoneSession.Mode.MONITORING) {
+                                Log.i(TAG, "[VAD] Speech in MONITORING - switching to TRANSCRIBING")
+                                micSession?.switchMode(MicrophoneSession.Mode.TRANSCRIBING)
+                                speechStartedInCurrentSession = true
+                                _isListening.value = true
+
+                                // Start a session timeout for the new transcription
+                                val listenSeconds = com.example.advancedvoice.core.prefs.Prefs.getListenSeconds(app)
+                                val timeoutMs = listenSeconds * 1000L
+                                sessionTimeoutJob?.cancel()
+                                sessionTimeoutJob = scope.launch {
+                                    delay(timeoutMs)
+                                    Log.w(TAG, "[Controller] ⏱️ Session timeout after ${listenSeconds}s in TRANSCRIBING")
+                                    if (!turnEnded) {
+                                        endTurn("SessionTimeout")
+                                    }
+                                }
+                            }
+
                             if (currentMode == MicrophoneSession.Mode.TRANSCRIBING) {
                                 speechStartedInCurrentSession = true
                                 Log.d(TAG, "[VAD] Speech started in current TRANSCRIBING session")
@@ -228,6 +246,7 @@ class GeminiLiveSttController(
                         }
                     }
 
+                    // ✅ ADD THIS: The missing SpeechEnd branch
                     is VadRecorder.VadEvent.SpeechEnd -> {
                         Log.d(TAG, "[VAD] SpeechEnd (mode=$currentMode)")
                         if (_isHearingSpeech.value) _isHearingSpeech.value = false

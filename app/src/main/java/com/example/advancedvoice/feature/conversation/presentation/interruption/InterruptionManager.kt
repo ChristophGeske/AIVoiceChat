@@ -41,7 +41,8 @@ class InterruptionManager(
     @Volatile var isEvaluatingBargeIn = false
         private set
     @Volatile private var assistantHoldBuffer: String? = null
-    @Volatile private var interruptedDuringEvaluation = false  // ✅ NEW
+    @Volatile private var assistantSourcesBuffer: List<Pair<String, String?>>? = null
+    @Volatile private var interruptedDuringEvaluation = false
 
     @Volatile private var lastRestartTime = 0L
     private var interruptAccumulationJob: Job? = null
@@ -125,9 +126,12 @@ class InterruptionManager(
         }
     }
 
-    fun maybeHandleAssistantFinalResponse(text: String): Boolean {
+    fun maybeHandleAssistantFinalResponse(
+        text: String,
+        sources: List<Pair<String, String?>> = emptyList()
+    ): Boolean {
         if (isAccumulatingAfterInterrupt) {
-            Log.i(TAG, "[HOLD] ❌ Already accumulating - discarding late LLM response (len=${text.length})")
+            Log.i(TAG, "[HOLD] ❌ Already accumulating - discarding late LLM response (len=${text.length}, sources=${sources.size})")
             return true
         }
 
@@ -136,7 +140,8 @@ class InterruptionManager(
 
             if (stillRecording) {
                 assistantHoldBuffer = text
-                Log.i(TAG, "[HOLD] 📦 BUFFERING response (len=${text.length}) - mic active, awaiting verdict")
+                assistantSourcesBuffer = sources  // ✅ ADD THIS - Buffer sources too
+                Log.i(TAG, "[HOLD] 📦 BUFFERING response (len=${text.length}, sources=${sources.size}) - mic active, awaiting verdict")
                 Log.d(TAG, "[HOLD]   Listening: ${stateManager.isListening.value}, Transcribing: ${stateManager.isTranscribing.value}")
                 return true
             } else {
@@ -192,7 +197,22 @@ class InterruptionManager(
         interruptedDuringEvaluation = false
 
         Log.i(TAG, "[SPEECH] 🗣️ Real speech confirmed → discarding buffered response, entering accumulation")
+
+        // ✅ FIX: Properly clean up old assistant response
+        val hadBufferedResponse = assistantHoldBuffer != null
         dropBufferedAssistant()
+
+        // ✅ FIX: If there was no buffered response but turn is active,
+        // the response may already be in conversation - remove it
+        if (!hadBufferedResponse && engine.isActive()) {
+            Log.w(TAG, "[SPEECH] No buffered response, but generation active - removing last assistant from conversation")
+            val lastEntry = stateManager.conversation.value.lastOrNull()
+            if (lastEntry?.isAssistant == true) {
+                stateManager.removeLastEntry()
+                Log.d(TAG, "[SPEECH] Removed last assistant entry from UI")
+            }
+        }
+
         engine.abort(true)
 
         isBargeInTurn = false
@@ -211,16 +231,26 @@ class InterruptionManager(
 
         Log.i(TAG, "[NOISE] 🔇 Noise confirmed → flushing buffered response (if any)")
 
-        // Flush any buffered response to conversation + TTS
         val held = assistantHoldBuffer
+        val heldSources = assistantSourcesBuffer ?: emptyList()  // ✅ ADD THIS
+
         if (held != null) {
             assistantHoldBuffer = null
-            Log.i(TAG, "[NOISE] ✅ Flushing buffered response (len=${held.length}) → adding to UI + TTS")
+            assistantSourcesBuffer = null  // ✅ ADD THIS
+
+            Log.i(TAG, "[NOISE] ✅ Flushing buffered response (len=${held.length}, sources=${heldSources.size}) → adding to UI + TTS")  // ✅ UPDATE THIS
+
+            // ✅ ADD THIS - Process sources first
+            if (heldSources.isNotEmpty()) {
+                com.example.advancedvoice.domain.util.GroundingUtils.processAndDisplaySources(heldSources) { html ->
+                    stateManager.addSystem(html)
+                }
+            }
+
             stateManager.addAssistant(listOf(held))
             tts.queue(held)
             interruptedDuringEvaluation = false
 
-            // ✅ Re-enable auto-listen flag
             onNoiseConfirmed()
             Log.d(TAG, "[NOISE] Re-enabled auto-listen flag (turn completing normally)")
         } else {
@@ -276,17 +306,29 @@ class InterruptionManager(
             Log.d(TAG, "[FLUSH] No buffered response")
             return
         }
+        val heldSources = assistantSourcesBuffer ?: emptyList()  // ✅ ADD THIS
+
         assistantHoldBuffer = null
-        Log.i(TAG, "[FLUSH] ✅ Flushing buffered response (len=${held.length}) → adding to conversation + TTS")
+        assistantSourcesBuffer = null  // ✅ ADD THIS
+
+        Log.i(TAG, "[FLUSH] ✅ Flushing buffered response (len=${held.length}, sources=${heldSources.size}) → adding to conversation + TTS")
+
+        if (heldSources.isNotEmpty()) {
+            com.example.advancedvoice.domain.util.GroundingUtils.processAndDisplaySources(heldSources) { html ->
+                stateManager.addSystem(html)
+            }
+        }
+
         stateManager.addAssistant(listOf(held))
         tts.queue(held)
         interruptedDuringEvaluation = false
     }
 
     fun dropBufferedAssistant() {
-        if (assistantHoldBuffer != null) {
-            Log.i(TAG, "[DROP] ❌ Dropping buffered response (len=${assistantHoldBuffer?.length})")
+        if (assistantHoldBuffer != null || assistantSourcesBuffer != null) {  // ✅ UPDATE THIS
+            Log.i(TAG, "[DROP] ❌ Dropping buffered response (len=${assistantHoldBuffer?.length}, sources=${assistantSourcesBuffer?.size})")  // ✅ UPDATE THIS
             assistantHoldBuffer = null
+            assistantSourcesBuffer = null  // ✅ ADD THIS
 
             while (stateManager.conversation.value.lastOrNull()?.speaker == "System") {
                 stateManager.removeLastEntry()
@@ -303,7 +345,6 @@ class InterruptionManager(
         }
     }
 
-    // ... rest of the existing code (startAccumulationWatcher, finalizeAccumulation, etc.) ...
     private fun startAccumulationWatcher() {
         interruptAccumulationJob?.cancel()
         interruptAccumulationJob = scope.launch {
@@ -430,6 +471,7 @@ class InterruptionManager(
         isBargeInTurn = false
         isAccumulatingAfterInterrupt = false
         assistantHoldBuffer = null
+        assistantSourcesBuffer = null
         interruptedDuringEvaluation = false
         scope.launch {
             stateManager.setListening(false)

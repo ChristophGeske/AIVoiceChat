@@ -5,7 +5,7 @@ import com.example.advancedvoice.core.logging.LoggerConfig
 import com.example.advancedvoice.core.text.SentenceSplitter
 import com.example.advancedvoice.core.util.PerfTimer
 import com.example.advancedvoice.domain.engine.SentenceTurnEngine
-import com.example.advancedvoice.domain.util.GroundingUtils // ✅ ADD THIS IMPORT
+import com.example.advancedvoice.domain.util.GroundingUtils
 import com.example.advancedvoice.feature.conversation.presentation.GenerationPhase
 import com.example.advancedvoice.feature.conversation.presentation.interruption.InterruptionManager
 import com.example.advancedvoice.feature.conversation.presentation.state.ConversationStateManager
@@ -31,24 +31,25 @@ object EngineCallbacksFactory {
                 Log.i(TAG, "[ENGINE_CB] onFirstSentence received (len=${text.length})")
                 stateManager.setPhase(GenerationPhase.GENERATING_REMAINDER)
 
-                // ✅ NEW: Process sources and display them
+                // ✅ FIX: Check if we're evaluating FIRST, before processing sources
+                if (getInterruption().isEvaluatingBargeIn) {
+                    Log.w(TAG_ENGINE, "[CALLBACK] ⏸️ Evaluating noise - BUFFERING first sentence (not adding to UI or TTS yet)")
+                    Log.w(TAG, "[ENGINE_CB] First sentence buffered due to active interruption evaluation.")
+
+                    // ✅ FIX: Pass sources to buffering
+                    val shouldBuffer = getInterruption().maybeHandleAssistantFinalResponse(text, sources)
+                    if (shouldBuffer) {
+                        Log.d(TAG_ENGINE, "[CALLBACK] Successfully buffered first sentence + ${sources.size} sources")
+                    }
+                    return@Callbacks
+                }
+
+                // ✅ FIX: Only process sources if NOT buffering
                 if (sources.isNotEmpty()) {
                     Log.d(TAG_ENGINE, "[CALLBACK] Processing ${sources.size} sources")
                     GroundingUtils.processAndDisplaySources(sources) { html ->
                         stateManager.addSystem(html)
                     }
-                }
-
-                // Check if we're evaluating a potential interruption
-                if (getInterruption().isEvaluatingBargeIn) {
-                    Log.w(TAG_ENGINE, "[CALLBACK] ⏸️ Evaluating noise - BUFFERING first sentence (not adding to UI or TTS yet)")
-                    Log.w(TAG, "[ENGINE_CB] First sentence buffered due to active interruption evaluation.")
-
-                    val shouldBuffer = getInterruption().maybeHandleAssistantFinalResponse(text)
-                    if (shouldBuffer) {
-                        Log.d(TAG_ENGINE, "[CALLBACK] Successfully buffered first sentence")
-                    }
-                    return@Callbacks
                 }
 
                 val lastEntry = stateManager.conversation.value.lastOrNull()
@@ -68,17 +69,18 @@ object EngineCallbacksFactory {
                 Log.i(TAG, "[ENGINE_CB] onRemainingSentences received (count=${sentences.size})")
                 stateManager.setPhase(GenerationPhase.IDLE)
 
-                // ✅ NEW: Process sources if any (unlikely in phase 2, but just in case)
+                // ✅ FIX: Check buffering first
+                if (getInterruption().isEvaluatingBargeIn) {
+                    Log.w(TAG_ENGINE, "[CALLBACK] ⏸️ Still evaluating - remaining sentences will be included if noise is confirmed")
+                    return@Callbacks
+                }
+
+                // ✅ FIX: Only process sources if not buffering
                 if (sources.isNotEmpty()) {
                     Log.d(TAG_ENGINE, "[CALLBACK] Processing ${sources.size} additional sources from phase 2")
                     GroundingUtils.processAndDisplaySources(sources) { html ->
                         stateManager.addSystem(html)
                     }
-                }
-
-                if (getInterruption().isEvaluatingBargeIn) {
-                    Log.w(TAG_ENGINE, "[CALLBACK] ⏸️ Still evaluating - remaining sentences will be included if noise is confirmed")
-                    return@Callbacks
                 }
 
                 val idx = stateManager.conversation.value.indexOfLast { it.isAssistant }
@@ -104,23 +106,25 @@ object EngineCallbacksFactory {
                 perfTimerHolder.current?.logSummary("llm_start", "llm_done")
                 Log.i(TAG, "[ENGINE_CB] onFinalResponse received (len=${fullText.length})")
 
-                // ✅ NEW: Process sources and display them
-                if (sources.isNotEmpty()) {
-                    Log.d(TAG_ENGINE, "[CALLBACK] Processing ${sources.size} sources from final response")
-                    GroundingUtils.processAndDisplaySources(sources) { html ->
-                        stateManager.addSystem(html)
-                    }
-                }
-
                 val sentences = SentenceSplitter.splitIntoSentences(fullText)
                 if (sentences.isNotEmpty()) {
                     val text = sentences.joinToString(" ")
-                    val shouldBuffer = getInterruption().maybeHandleAssistantFinalResponse(text)
+
+                    // ✅ FIX: Check buffering FIRST, and pass sources
+                    val shouldBuffer = getInterruption().maybeHandleAssistantFinalResponse(text, sources)
 
                     if (shouldBuffer) {
-                        Log.d(TAG_ENGINE, "[CALLBACK] ⏸️ Response buffered")
+                        Log.d(TAG_ENGINE, "[CALLBACK] ⏸️ Response buffered (text + ${sources.size} sources)")
                         Log.d(TAG, "[ENGINE_CB] ⏸️ Response buffered - NO action")
                     } else {
+                        // ✅ FIX: Only process sources if NOT buffering
+                        if (sources.isNotEmpty()) {
+                            Log.d(TAG_ENGINE, "[CALLBACK] Processing ${sources.size} sources from final response")
+                            GroundingUtils.processAndDisplaySources(sources) { html ->
+                                stateManager.addSystem(html)
+                            }
+                        }
+
                         stateManager.setPhase(GenerationPhase.IDLE)
                         val lastEntry = stateManager.conversation.value.lastOrNull()
                         if (lastEntry == null || !lastEntry.isAssistant || lastEntry.sentences.isEmpty()) {

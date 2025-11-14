@@ -27,12 +27,14 @@ class ConversationFlowController(
 ) {
     private companion object {
         const val TAG = LoggerConfig.TAG_VM
-        const val MAX_AUTO_LISTEN_RETRIES = 2
+        // You can remove MAX_AUTO_LISTEN_RETRIES as we are no longer using it.
+        // const val MAX_AUTO_LISTEN_RETRIES = 2
     }
 
     var perfTimerHolder: PerfTimer? = null
     @Volatile private var isCurrentSessionAutoListen = false
-    @Volatile private var autoListenRetryCount = 0
+    // You can remove autoListenRetryCount as well.
+    // @Volatile private var autoListenRetryCount = 0
 
     fun startListening() {
         Log.i(TAG, "[ViewModel] startListening() called. isGenerating=${engine.isActive()}, isTalking=${stateManager.isSpeaking.value}")
@@ -102,7 +104,28 @@ class ConversationFlowController(
         Log.w(TAG, "[ViewModel] stopAll() complete. System is now idle.")
     }
 
+    // ====================================================================
+    // ✅ 1. THIS IS THE FIRST PART OF THE FIX
+    // ====================================================================
     fun onFinalTranscript(text: String) {
+        // Check for our special timeout signal first.
+        if (text == "::TIMEOUT::") {
+            Log.i(TAG, "[STT RESULT] Received TIMEOUT signal. Stopping session now.")
+            stateManager.removeLastUserPlaceholderIfEmpty()
+            scope.launch {
+                getStt()?.stop(false)
+                delay(100L)
+                stateManager.setListening(false)
+                stateManager.setHearingSpeech(false)
+                stateManager.setTranscribing(false)
+                val stt = getStt()
+                if (stt is GeminiLiveSttController) {
+                    stt.switchMicMode(com.example.advancedvoice.core.audio.MicrophoneSession.Mode.IDLE)
+                }
+            }
+            return
+        }
+
         val input = text.trim()
         Log.i(TAG, "[STT RESULT] Raw transcript received: '$input'")
 
@@ -131,51 +154,25 @@ class ConversationFlowController(
         }
     }
 
+    // ====================================================================
+    // ✅ 2. THIS IS THE SECOND PART OF THE FIX
+    // ====================================================================
     private fun handleEmptyTranscript() {
-        Log.w(TAG, "[ViewModel] onFinalTranscript received empty text.")
+        Log.w(TAG, "[ViewModel] onFinalTranscript received empty text (VAD noise).")
 
         if (interruption.isAccumulatingAfterInterrupt) {
             Log.i(TAG, "[ACCUMULATION] Empty transcript during accumulation - watcher will handle it.")
             return
         }
 
-        Log.i(TAG, "[EMPTY] Removing placeholder (autoListen=$isCurrentSessionAutoListen)")
+        // ✅ FIX: Noise doesn't end the session - reset turn state and keep listening
+        Log.i(TAG, "[EMPTY] VAD noise detected - resetting turn and continuing to listen")
         stateManager.removeLastUserPlaceholderIfEmpty()
 
-        // ✅ NEW: During auto-listen, retry on false positives instead of stopping
-        if (isCurrentSessionAutoListen && autoListenRetryCount < MAX_AUTO_LISTEN_RETRIES) {
-            Log.w(TAG, "[EMPTY] Auto-listen false positive (retry ${autoListenRetryCount + 1}/$MAX_AUTO_LISTEN_RETRIES) - restarting session")
-            autoListenRetryCount++
-
+        val stt = getStt()
+        if (stt is GeminiLiveSttController) {
             scope.launch {
-                // Brief delay to let VAD settle
-                delay(300L)
-
-                // Restart auto-listen session
-                if (!stateManager.isListening.value && stateManager.phase.value == GenerationPhase.IDLE) {
-                    Log.i(TAG, "[EMPTY] Restarting auto-listen session")
-                    startListeningSession(isAutoListen = true)
-                } else {
-                    Log.w(TAG, "[EMPTY] Cannot restart - state changed (listening=${stateManager.isListening.value}, phase=${stateManager.phase.value})")
-                }
-            }
-            return
-        }
-
-        // Max retries reached or manual mode → stop listening
-        if (isCurrentSessionAutoListen) {
-            Log.w(TAG, "[EMPTY] Max auto-listen retries reached, stopping")
-        }
-
-        scope.launch {
-            getStt()?.stop(false)
-            delay(100L)
-            stateManager.setListening(false)
-            stateManager.setHearingSpeech(false)
-            stateManager.setTranscribing(false)
-            val stt = getStt()
-            if (stt is GeminiLiveSttController) {
-                stt.switchMicMode(com.example.advancedvoice.core.audio.MicrophoneSession.Mode.IDLE)
+                stt.resetTurnAfterNoise()
             }
         }
     }
@@ -188,7 +185,7 @@ class ConversationFlowController(
 
     private fun handleNormalTranscript(input: String) {
         Log.i(TAG, "[IMMEDIATE-SEND] Sending transcript (len=${input.length})")
-        autoListenRetryCount = 0  // ✅ Reset retry counter on successful transcript
+        // autoListenRetryCount = 0 // Can be removed
         stateManager.replaceLastUser(input)
         startTurn(input)
     }

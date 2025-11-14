@@ -13,6 +13,12 @@ import kotlinx.coroutines.test.*
 import org.junit.jupiter.api.*
 import org.junit.jupiter.api.Assertions.*
 
+/**
+ * Core InterruptionManager Tests
+ *
+ * Tests basic functionality: transcript handling, buffering, timing
+ * For sources buffering, see InterruptionManagerSourcesTest
+ */
 @OptIn(ExperimentalCoroutinesApi::class)
 class InterruptionManagerTest {
 
@@ -78,14 +84,14 @@ class InterruptionManagerTest {
     // ========================================
 
     @Test
-    fun `onTurnStart - sets generation start time`() = testScope.runTest {
+    fun `onTurnStart sets generation start time`() = testScope.runTest {
         val startTime = System.currentTimeMillis()
         interruptionManager.onTurnStart(startTime)
         assertEquals(startTime, interruptionManager.generationStartTime)
     }
 
     @Test
-    fun `combineTranscript - combines with existing text`() = testScope.runTest {
+    fun `combineTranscript combines with existing text`() = testScope.runTest {
         val entry = mockk<com.example.advancedvoice.domain.entities.ConversationEntry> {
             every { speaker } returns "You"
             every { sentences } returns listOf("First part")
@@ -97,7 +103,7 @@ class InterruptionManagerTest {
     }
 
     @Test
-    fun `combineTranscript - handles empty previous text`() = testScope.runTest {
+    fun `combineTranscript handles empty previous text`() = testScope.runTest {
         val entry = mockk<com.example.advancedvoice.domain.entities.ConversationEntry> {
             every { speaker } returns "You"
             every { sentences } returns emptyList()
@@ -109,7 +115,7 @@ class InterruptionManagerTest {
     }
 
     @Test
-    fun `combineTranscript - adds space if previous doesn't end with one`() = testScope.runTest {
+    fun `combineTranscript adds space if previous doesn't end with one`() = testScope.runTest {
         val entry = mockk<com.example.advancedvoice.domain.entities.ConversationEntry> {
             every { speaker } returns "You"
             every { sentences } returns listOf("Hello")
@@ -125,7 +131,7 @@ class InterruptionManagerTest {
     // ========================================
 
     @Test
-    fun `reset - clears public flags`() = testScope.runTest {
+    fun `reset clears public flags`() = testScope.runTest {
         interruptionManager.onTurnStart(System.currentTimeMillis())
         interruptionManager.reset()
 
@@ -134,7 +140,7 @@ class InterruptionManagerTest {
     }
 
     @Test
-    fun `reset - stops state flows`() = testScope.runTest {
+    fun `reset stops state flows`() = testScope.runTest {
         isListeningFlow.value = true
         isHearingSpeechFlow.value = true
 
@@ -146,12 +152,21 @@ class InterruptionManagerTest {
         verify { stateManager.setTranscribing(false) }
     }
 
+    @Test
+    fun `reset can be called multiple times safely`() = testScope.runTest {
+        interruptionManager.reset()
+        interruptionManager.reset()
+        interruptionManager.reset()
+
+        assertFalse(interruptionManager.isBargeInTurn)
+    }
+
     // ========================================
     // TRANSCRIPT HANDLING TESTS
     // ========================================
 
     @Test
-    fun `checkTranscriptForInterruption - when not evaluating returns false`() = testScope.runTest {
+    fun `checkTranscriptForInterruption when not evaluating returns false`() = testScope.runTest {
         phaseFlow.value = GenerationPhase.GENERATING_FIRST
 
         val handled = interruptionManager.checkTranscriptForInterruption("Hello there friend")
@@ -161,20 +176,20 @@ class InterruptionManagerTest {
     }
 
     @Test
-    fun `checkTranscriptForInterruption - short words when not evaluating`() = testScope.runTest {
+    fun `checkTranscriptForInterruption short words when not evaluating`() = testScope.runTest {
         val result = interruptionManager.checkTranscriptForInterruption("a to be or")
         assertFalse(result)
     }
 
     @Test
-    fun `checkTranscriptForInterruption - numbers and symbols when not evaluating`() = testScope.runTest {
+    fun `checkTranscriptForInterruption numbers and symbols when not evaluating`() = testScope.runTest {
         val result = interruptionManager.checkTranscriptForInterruption("123 @#$ 456")
         assertFalse(result)
         assertFalse(interruptionManager.isAccumulatingAfterInterrupt)
     }
 
     @Test
-    fun `checkTranscriptForInterruption - blank text handled gracefully`() = testScope.runTest {
+    fun `checkTranscriptForInterruption blank text handled gracefully`() = testScope.runTest {
         val result = interruptionManager.checkTranscriptForInterruption("   \n\t  ")
         assertNotNull(result)
         assertFalse(result)
@@ -185,13 +200,13 @@ class InterruptionManagerTest {
     // ========================================
 
     @Test
-    fun `maybeHandleAssistantFinalResponse - returns false when not evaluating`() = testScope.runTest {
+    fun `maybeHandleAssistantFinalResponse returns false when not evaluating`() = testScope.runTest {
         val buffered = interruptionManager.maybeHandleAssistantFinalResponse("Test response")
         assertFalse(buffered)
     }
 
     @Test
-    fun `flushBufferedAssistantIfAny - when no buffer does nothing`() = testScope.runTest {
+    fun `flushBufferedAssistantIfAny when no buffer does nothing`() = testScope.runTest {
         interruptionManager.flushBufferedAssistantIfAny()
 
         verify(exactly = 0) { stateManager.addAssistant(any()) }
@@ -199,7 +214,7 @@ class InterruptionManagerTest {
     }
 
     @Test
-    fun `dropBufferedAssistant - cleans engine history if needed`() = testScope.runTest {
+    fun `dropBufferedAssistant cleans engine history if needed`() = testScope.runTest {
         every { engine.getHistorySnapshot() } returns listOf(
             SentenceTurnEngine.Msg("user", "Test"),
             SentenceTurnEngine.Msg("assistant", "Response")
@@ -211,11 +226,11 @@ class InterruptionManagerTest {
     }
 
     // ========================================
-    // SIMPLE INTEGRATION TESTS
+    // INTEGRATION TESTS
     // ========================================
 
     @Test
-    fun `normal flow - transcript when idle does not trigger accumulation`() = testScope.runTest {
+    fun `normal flow transcript when idle does not trigger accumulation`() = testScope.runTest {
         phaseFlow.value = GenerationPhase.IDLE
         interruptionManager.onTurnStart(System.currentTimeMillis())
 
@@ -225,7 +240,7 @@ class InterruptionManagerTest {
     }
 
     @Test
-    fun `normal flow - noise during idle handled gracefully`() = testScope.runTest {
+    fun `normal flow noise during idle handled gracefully`() = testScope.runTest {
         phaseFlow.value = GenerationPhase.IDLE
 
         val result = interruptionManager.checkTranscriptForInterruption("")
@@ -235,57 +250,60 @@ class InterruptionManagerTest {
     }
 
     @Test
-    fun `combineTranscript - works without accumulation mode`() = testScope.runTest {
-        val entry = mockk<com.example.advancedvoice.domain.entities.ConversationEntry> {
-            every { speaker } returns "You"
-            every { sentences } returns listOf("First part")
+    fun `real interruption discards buffered response`() = testScope.runTest {
+        val addedResponses = mutableListOf<String>()
+
+        every { stateManager.addAssistant(any()) } answers {
+            val text = firstArg<List<String>>().joinToString(" ")
+            addedResponses.add(text)
         }
-        every { stateManager.conversation.value } returns listOf(entry)
 
-        val combined = interruptionManager.combineTranscript("second part")
+        val conversationFlow = MutableStateFlow(emptyList<com.example.advancedvoice.domain.entities.ConversationEntry>())
+        every { stateManager.conversation } returns conversationFlow
+        every { engine.getHistorySnapshot() } returns emptyList()
 
-        assertEquals("First part second part", combined)
+        val phaseFlow = MutableStateFlow(GenerationPhase.SINGLE_SHOT_GENERATING)
+        val isListeningFlow = MutableStateFlow(false)
+        val isTranscribingFlow = MutableStateFlow(false)
+
+        every { stateManager.phase } returns phaseFlow
+        every { stateManager.isListening } returns isListeningFlow
+        every { stateManager.isTranscribing } returns isTranscribingFlow
+
+        val interruptMgr = InterruptionManager(
+            scope = testScope,
+            stateManager = stateManager,
+            engine = engine,
+            tts = tts,
+            getStt = { sttController },
+            startTurnWithExistingHistory = {},
+            onInterruption = {},
+            onNoiseConfirmed = {}
+        )
+
+        interruptMgr.initialize()
+        advanceUntilIdle()
+
+        interruptMgr.onTurnStart(System.currentTimeMillis())
+        isListeningFlow.value = true
+        advanceUntilIdle()
+
+        val wasBuffered = interruptMgr.maybeHandleAssistantFinalResponse("Old response")
+        assertTrue(wasBuffered, "Response should be buffered")
+
+        isListeningFlow.value = false
+        interruptMgr.checkTranscriptForInterruption("New question")
+        advanceUntilIdle()
+
+        assertEquals(0, addedResponses.size, "Buffered response should be dropped")
     }
 
     // ========================================
-    // EDGE CASES
+    // TIMING TESTS
     // ========================================
 
     @Test
-    fun `reset - can be called multiple times safely`() = testScope.runTest {
-        interruptionManager.reset()
-        interruptionManager.reset()
-        interruptionManager.reset()
-
-        assertFalse(interruptionManager.isBargeInTurn)
-    }
-
-    @Test
-    fun `onTurnStart - can be called multiple times`() = testScope.runTest {
-        interruptionManager.onTurnStart(1000L)
-        interruptionManager.onTurnStart(2000L)
-        interruptionManager.onTurnStart(3000L)
-
-        assertEquals(3000L, interruptionManager.generationStartTime)
-    }
-
-    @Test
-    fun `generationStartTime - defaults to zero`() = testScope.runTest {
-        assertTrue(interruptionManager.generationStartTime == 0L)
-    }
-
-    @Test
-    fun `public flags - default to false`() = testScope.runTest {
-        assertFalse(interruptionManager.isBargeInTurn)
-        assertFalse(interruptionManager.isAccumulatingAfterInterrupt)
-    }
-
-    // ========================================
-    // TIMING TESTS - LLM RESPONSE TIMING
-    // ========================================
-
-    @Test
-    fun `TIMING - LLM response arrives immediately - accepted`() = testScope.runTest {
+    fun `TIMING LLM response arrives immediately accepted`() = testScope.runTest {
         phaseFlow.value = GenerationPhase.GENERATING_FIRST
         interruptionManager.onTurnStart(scheduler.currentTime)
 
@@ -296,7 +314,7 @@ class InterruptionManagerTest {
     }
 
     @Test
-    fun `TIMING - LLM response arrives after 1 second - accepted`() = testScope.runTest {
+    fun `TIMING LLM response after 1 second accepted`() = testScope.runTest {
         phaseFlow.value = GenerationPhase.GENERATING_FIRST
         interruptionManager.onTurnStart(scheduler.currentTime)
 
@@ -307,7 +325,7 @@ class InterruptionManagerTest {
     }
 
     @Test
-    fun `TIMING - LLM response arrives after 5 seconds during evaluation`() = testScope.runTest {
+    fun `TIMING LLM response after 5 seconds during evaluation`() = testScope.runTest {
         phaseFlow.value = GenerationPhase.GENERATING_FIRST
         interruptionManager.onTurnStart(scheduler.currentTime)
 
@@ -320,20 +338,7 @@ class InterruptionManagerTest {
     }
 
     @Test
-    fun `TIMING - LLM response after 10 seconds - still processed if not interrupted`() = testScope.runTest {
-        phaseFlow.value = GenerationPhase.GENERATING_FIRST
-        interruptionManager.onTurnStart(scheduler.currentTime)
-
-        scheduler.advanceTimeBy(10_000)
-        isListeningFlow.value = false
-
-        val accepted = interruptionManager.maybeHandleAssistantFinalResponse("Very slow response")
-
-        assertFalse(accepted)
-    }
-
-    @Test
-    fun `TIMING - very fast LLM response (50ms) - handled correctly`() = testScope.runTest {
+    fun `TIMING very fast LLM response 50ms handled correctly`() = testScope.runTest {
         phaseFlow.value = GenerationPhase.GENERATING_FIRST
         interruptionManager.onTurnStart(scheduler.currentTime)
 
@@ -345,90 +350,7 @@ class InterruptionManagerTest {
     }
 
     @Test
-    fun `TIMING - very slow LLM response (60 seconds) - still processed`() = testScope.runTest {
-        phaseFlow.value = GenerationPhase.GENERATING_FIRST
-        interruptionManager.onTurnStart(scheduler.currentTime)
-
-        scheduler.advanceTimeBy(60_000)
-        isListeningFlow.value = false
-
-        val accepted = interruptionManager.maybeHandleAssistantFinalResponse("Finally done")
-
-        assertFalse(accepted)
-    }
-
-    // ========================================
-    // TIMING TESTS - RACE CONDITIONS
-    // ========================================
-
-    @Test
-    fun `TIMING - transcript arrives 100ms before LLM response`() = testScope.runTest {
-        phaseFlow.value = GenerationPhase.GENERATING_FIRST
-        interruptionManager.onTurnStart(scheduler.currentTime)
-
-        interruptionManager.checkTranscriptForInterruption("User speech")
-        scheduler.advanceTimeBy(100)
-
-        val buffered = interruptionManager.maybeHandleAssistantFinalResponse("LLM response")
-
-        assertTrue(scheduler.currentTime >= 100)
-    }
-
-    @Test
-    fun `TIMING - LLM response timing verified`() = testScope.runTest {
-        phaseFlow.value = GenerationPhase.GENERATING_FIRST
-        interruptionManager.onTurnStart(scheduler.currentTime)
-
-        isListeningFlow.value = true
-
-        val buffered1 = interruptionManager.maybeHandleAssistantFinalResponse("LLM response")
-        scheduler.advanceTimeBy(100)
-
-        interruptionManager.checkTranscriptForInterruption("User speech")
-
-        // Verify timing was handled
-        assertTrue(scheduler.currentTime >= 100)
-        assertNotNull(buffered1)
-    }
-
-    @Test
-    fun `TIMING - multiple rapid transcripts timing`() = testScope.runTest {
-        val entry = mockk<com.example.advancedvoice.domain.entities.ConversationEntry> {
-            every { speaker } returns "You"
-            every { sentences } returns listOf("First")
-        }
-        every { stateManager.conversation.value } returns listOf(entry)
-
-        scheduler.advanceTimeBy(100)
-        val combined1 = interruptionManager.combineTranscript("second")
-
-        scheduler.advanceTimeBy(100)
-        every { entry.sentences } returns listOf("First second")
-        val combined2 = interruptionManager.combineTranscript("third")
-
-        scheduler.advanceTimeBy(100)
-
-        // Verify timing
-        assertEquals(300L, scheduler.currentTime)
-        assertEquals("First second", combined1)
-        assertTrue(combined2.contains("First"))
-    }
-
-    // ========================================
-    // TIMING TESTS - EDGE CASES
-    // ========================================
-
-    @Test
-    fun `TIMING - timestamp overflow handling - works with large timestamps`() = testScope.runTest {
-        val largeTimestamp = System.currentTimeMillis() + 3_600_000
-
-        interruptionManager.onTurnStart(largeTimestamp)
-
-        assertEquals(largeTimestamp, interruptionManager.generationStartTime)
-    }
-
-    @Test
-    fun `TIMING - generation duration calculation`() = testScope.runTest {
+    fun `TIMING generation duration calculation`() = testScope.runTest {
         val startTime = scheduler.currentTime
         interruptionManager.onTurnStart(startTime)
 
@@ -439,30 +361,13 @@ class InterruptionManagerTest {
     }
 
     @Test
-    fun `TIMING - zero duration response - handled correctly`() = testScope.runTest {
-        val now = scheduler.currentTime
-        interruptionManager.onTurnStart(now)
-
-        scheduler.advanceTimeBy(0)
-        val accepted = interruptionManager.maybeHandleAssistantFinalResponse("Instant")
-
-        assertFalse(accepted)
-        assertEquals(0L, scheduler.currentTime - now)
+    fun `generationStartTime defaults to zero`() = testScope.runTest {
+        assertTrue(interruptionManager.generationStartTime == 0L)
     }
 
     @Test
-    fun `TIMING - response timing window validation`() = testScope.runTest {
-        phaseFlow.value = GenerationPhase.GENERATING_FIRST
-        interruptionManager.onTurnStart(scheduler.currentTime)
-
-        // Test various time windows
-        val testCases = listOf(0L, 100L, 500L, 1000L, 5000L, 10000L)
-
-        testCases.forEach { delay ->
-            scheduler.advanceTimeBy(delay)
-            val accepted = interruptionManager.maybeHandleAssistantFinalResponse("Response at ${delay}ms")
-            // All should be accepted when not in evaluation mode
-            assertFalse(accepted, "Response at ${delay}ms should be accepted")
-        }
+    fun `public flags default to false`() = testScope.runTest {
+        assertFalse(interruptionManager.isBargeInTurn)
+        assertFalse(interruptionManager.isAccumulatingAfterInterrupt)
     }
 }

@@ -134,6 +134,12 @@ class GeminiLiveSttController(
             partialTranscripts.collect { txt ->
                 lastPartialLen = txt.length
                 lastPartialTimeMs = System.currentTimeMillis()
+
+                // ✅ FIX: Cancel session timeout when real words arrive
+                if (txt.isNotBlank()) {
+                    sessionTimeoutJob?.cancel()
+                    Log.d(TAG, "[Controller] Partials detected - cancelling session timeout (real words)")
+                }
             }
         }
 
@@ -150,6 +156,17 @@ class GeminiLiveSttController(
         finalTranscriptJob = scope.launch {
             transcriber.finalTranscripts.collect { final ->
                 Log.i(TAG, "[Controller] Final transcript (len=${final.length})")
+
+                // ✅ NEW: Decide mode switch based on transcript content
+                if (final.isNotBlank()) {
+                    sessionTimeoutJob?.cancel()
+                    Log.d(TAG, "[Controller] Real words detected - cancelling session timeout, switching to MONITORING")
+                    micSession?.switchMode(MicrophoneSession.Mode.MONITORING)
+                } else {
+                    Log.d(TAG, "[Controller] Empty transcript (noise) - staying in TRANSCRIBING")
+                    // Don't switch to MONITORING - resetTurnAfterNoise will handle it
+                }
+
                 _transcripts.emit(final)
                 _isTranscribing.value = false
             }
@@ -192,7 +209,12 @@ class GeminiLiveSttController(
                         }
 
                         endTurnJob?.cancel()
+
+                        // ✅ FIX: Cancel timeout when speech starts
+                        // If it's noise, resetTurnAfterNoise() will restart the timeout
                         sessionTimeoutJob?.cancel()
+                        Log.d(TAG, "[VAD] Timeout cancelled - speech detected")
+
                         Log.d(TAG, "[VAD] SpeechStart (mode=$currentMode)")
 
                         if (currentMode != MicrophoneSession.Mode.IDLE) {
@@ -253,17 +275,32 @@ class GeminiLiveSttController(
         _isListening.value = false
         _isHearingSpeech.value = false
 
-        if (speechStartedInCurrentSession) {
+        // ✅ FIX: For timeouts, we know there's no speech
+        if (reason == "SessionTimeout" || reason == "SilenceTimeout") {
+            Log.i(TAG, "[VAD] Timeout - no speech, switching to MONITORING")
+            _isTranscribing.value = false
+            scope.launch {
+                _transcripts.emit("::TIMEOUT::")
+            }
+            micSession?.switchMode(MicrophoneSession.Mode.MONITORING)
+        }
+        // ✅ FIX: For conversational pause, request transcript but DON'T switch mode yet
+        else if (speechStartedInCurrentSession) {
+            Log.i(TAG, "[VAD] Speech detected by VAD - requesting transcript")
             _isTranscribing.value = true
             micSession?.endCurrentTranscription()
-            micSession?.switchMode(MicrophoneSession.Mode.MONITORING)
-        } else {
+            // DON'T switch to MONITORING - let the transcript callback decide
+            // If it's real words, the callback will switch to MONITORING
+            // If it's noise, resetTurnAfterNoise will keep it in TRANSCRIBING
+        }
+        // ✅ FIX: No speech at all - emit empty but stay in TRANSCRIBING
+        else {
             Log.i(TAG, "[VAD] No speech detected, emitting empty transcript")
             _isTranscribing.value = false
             scope.launch {
                 _transcripts.emit("")
             }
-            micSession?.switchMode(MicrophoneSession.Mode.MONITORING)
+            // DON'T switch to MONITORING - let resetTurnAfterNoise handle it
         }
 
         speechStartedInCurrentSession = false
@@ -398,5 +435,40 @@ class GeminiLiveSttController(
     fun notifyTtsStopped() {
         lastTtsStopTime = System.currentTimeMillis()
         Log.d(TAG, "[Controller] TTS stopped at ${lastTtsStopTime}, grace period: ${POST_TTS_GRACE_PERIOD_MS}ms")
+    }
+
+    fun resetTurnAfterNoise() {
+        Log.i(TAG, "[Controller] Resetting turn state after VAD noise - continuing to listen")
+
+        // Reset turn state
+        turnEnded = false
+        speechStartedInCurrentSession = false
+        lastPartialLen = 0
+        lastPartialTimeMs = 0L
+
+        // Clear transient states
+        _isTranscribing.value = false
+        _isHearingSpeech.value = false
+
+        // ✅ FIX 1: Restore listening state (was set to false by endTurn)
+        _isListening.value = true
+        Log.d(TAG, "[Controller] Restored isListening=true")
+
+        // ✅ FIX 2: Restart session timeout (was cancelled by endTurn)
+        sessionTimeoutJob?.cancel()
+        val listenSeconds = com.example.advancedvoice.core.prefs.Prefs.getListenSeconds(app)
+        val timeoutMs = listenSeconds * 1000L
+        Log.i(TAG, "[Controller] Restarting ${listenSeconds}s session timeout after noise")
+        sessionTimeoutJob = scope.launch {
+            delay(timeoutMs)
+            Log.w(TAG, "[Controller] ⏱️ Session timeout after ${listenSeconds}s - no real words received")
+            if (_isListening.value && !turnEnded) {
+                endTurn("SessionTimeout")
+            }
+        }
+
+        // ✅ FIX 3: Stay in TRANSCRIBING mode
+        micSession?.switchMode(MicrophoneSession.Mode.TRANSCRIBING)
+        Log.d(TAG, "[Controller] Remaining in TRANSCRIBING mode")
     }
 }

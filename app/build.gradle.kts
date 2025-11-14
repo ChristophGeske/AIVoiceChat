@@ -1,4 +1,5 @@
 import org.gradle.api.tasks.testing.logging.TestExceptionFormat
+import org.gradle.api.tasks.testing.logging.TestLogEvent
 import java.time.Duration
 
 plugins {
@@ -55,13 +56,69 @@ android {
         }
     }
 
-    // ✅ CRITICAL: Enable JUnit 5
+    // ============================================
+    // TEST CONFIGURATION
+    // ============================================
     testOptions {
         unitTests {
             isIncludeAndroidResources = true
             isReturnDefaultValues = true
+
             all {
                 it.useJUnitPlatform()
+
+                // ✅ CONCISE TEST OUTPUT - Only show failures
+                it.testLogging {
+                    // Only show failures and skipped tests
+                    events(
+                        TestLogEvent.FAILED,
+                        TestLogEvent.SKIPPED
+                    )
+
+                    // Exception details - SHORT is more concise than FULL
+                    exceptionFormat = TestExceptionFormat.SHORT
+                    showExceptions = true
+                    showCauses = true
+                    showStackTraces = true
+                    showStandardStreams = false
+
+                    // Don't show individual test details unless they fail
+                    displayGranularity = 2
+                }
+
+                // ✅ Show summary after each test suite
+                it.addTestListener(object : TestListener {
+                    override fun beforeSuite(suite: TestDescriptor) {}
+                    override fun beforeTest(testDescriptor: TestDescriptor) {}
+                    override fun afterTest(testDescriptor: TestDescriptor, result: TestResult) {}
+
+                    override fun afterSuite(suite: TestDescriptor, result: TestResult) {
+                        if (suite.parent == null) { // Root suite only
+                            val output = """
+                                |
+                                |================================================================================
+                                |  TEST SUMMARY
+                                |================================================================================
+                                |  Total:  ${result.testCount}
+                                |  Passed: ${result.successfulTestCount} ✓
+                                |  Failed: ${result.failedTestCount} ${if (result.failedTestCount > 0) "✗" else ""}
+                                |  Skipped: ${result.skippedTestCount}
+                                |  Time:   ${(result.endTime - result.startTime) / 1000}s
+                                |================================================================================
+                                |  Result: ${result.resultType}
+                                |================================================================================
+                                |
+                            """.trimMargin()
+                            println(output)
+                        }
+                    }
+                })
+
+                // Test timeout
+                it.timeout.set(Duration.ofSeconds(10))
+
+                // Parallel execution
+                it.maxParallelForks = Runtime.getRuntime().availableProcessors().div(2).takeIf { it > 0 } ?: 1
             }
         }
     }
@@ -122,10 +179,10 @@ dependencies {
     // Coroutines Test
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:$coroutinesVersion")
 
-    // AssertJ - Better assertions (optional but recommended)
+    // AssertJ - Better assertions
     testImplementation("org.assertj:assertj-core:3.24.2")
 
-    // Turbine - Flow testing made easy (optional but very useful)
+    // Turbine - Flow testing
     testImplementation("app.cash.turbine:turbine:1.0.0")
 
     // Android Test Core (for Robolectric support if needed)
@@ -153,24 +210,51 @@ dependencies {
 }
 
 // ============================================
-// TEST CONFIGURATION
+// CUSTOM TEST TASKS
 // ============================================
-tasks.withType<Test> {
-    timeout.set(Duration.ofSeconds(10))
 
-    testLogging {
-        // ✅ Show all test events in terminal
-        events("passed", "failed", "skipped", "standard_out", "standard_error")
+// Task to run tests with verbose output (shows everything)
+tasks.register("testVerbose") {
+    group = "verification"
+    description = "Run tests with full output"
+    dependsOn("testDebugUnitTest")
 
-        // Show detailed info
-        exceptionFormat = TestExceptionFormat.FULL
-        showExceptions = true
-        showCauses = true
-        showStackTraces = true
-
-        // Show which test is running
-        showStandardStreams = false
+    doFirst {
+        tasks.withType<Test> {
+            testLogging {
+                events(
+                    TestLogEvent.PASSED,
+                    TestLogEvent.FAILED,
+                    TestLogEvent.SKIPPED,
+                    TestLogEvent.STANDARD_OUT,
+                    TestLogEvent.STANDARD_ERROR
+                )
+                exceptionFormat = TestExceptionFormat.FULL
+                showExceptions = true
+                showCauses = true
+                showStackTraces = true
+                showStandardStreams = true
+            }
+        }
     }
+}
 
-    maxParallelForks = Runtime.getRuntime().availableProcessors().div(2).takeIf { it > 0 } ?: 1
+// Task to run tests with minimal output (only failures)
+tasks.register("testQuiet") {
+    group = "verification"
+    description = "Run tests with minimal output (failures only)"
+    dependsOn("testDebugUnitTest")
+
+    doFirst {
+        tasks.withType<Test> {
+            testLogging {
+                events(TestLogEvent.FAILED)
+                exceptionFormat = TestExceptionFormat.SHORT
+                showExceptions = true
+                showCauses = true
+                showStackTraces = false
+                showStandardStreams = false
+            }
+        }
+    }
 }

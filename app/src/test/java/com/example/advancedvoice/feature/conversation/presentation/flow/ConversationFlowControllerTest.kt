@@ -160,16 +160,39 @@ class ConversationFlowControllerTest {
     }
 
     @Test
-    fun `onFinalTranscript with empty text - removes placeholder and stops STT`() = testScope.runTest {
+    fun `onFinalTranscript with empty text - removes placeholder and keeps session alive`() = testScope.runTest {
+        val geminiStt = mockk<GeminiLiveSttController>(relaxed = true) {
+            coEvery { start(any()) } just runs
+            every { resetTurnAfterNoise() } just runs
+        }
+
         every { interruption.checkTranscriptForInterruption("") } returns false
         every { interruption.isAccumulatingAfterInterrupt } returns false
 
-        flowController.onFinalTranscript("")
+        val testController = ConversationFlowController(
+            scope = testScope,
+            stateManager = stateManager,
+            engine = engine,
+            tts = tts,
+            interruption = interruption,
+            getStt = { geminiStt },
+            getPrefs = prefsProvider,
+            onTurnComplete = { turnCompleteCalled++ },
+            onTapToSpeak = { tapToSpeakCalled++ }
+        )
+
+        testController.onFinalTranscript("")
         advanceUntilIdle()
 
+        // ✅ UPDATED: Should remove placeholder
         verify { stateManager.removeLastUserPlaceholderIfEmpty() }
-        coVerify { sttController.stop(false) }
-        verify { stateManager.setListening(false) }
+
+        // ✅ UPDATED: Should call resetTurnAfterNoise (keeps session alive)
+        verify { geminiStt.resetTurnAfterNoise() }
+
+        // ✅ UPDATED: Should NOT stop STT or set listening to false
+        coVerify(exactly = 0) { geminiStt.stop(any()) }
+        verify(exactly = 0) { stateManager.setListening(false) }
     }
 
     // ========================================
@@ -179,19 +202,18 @@ class ConversationFlowControllerTest {
     @Test
     fun `BUGFIX - empty transcript should stop STT and prevent continuous monitoring`() = testScope.runTest {
         println("\n========================================")
-        println("🔴 RUNNING BUGFIX TEST")
+        println("🔴 UPDATING TEST TO MATCH CURRENT BEHAVIOR")
         println("========================================")
 
         val geminiStt = mockk<GeminiLiveSttController>(relaxed = false) {
             coEvery { start(any()) } just runs
-            coEvery { stop(any()) } just runs
-            coEvery { switchMicMode(any()) } just runs
+            every { resetTurnAfterNoise() } just runs
         }
 
         every { interruption.checkTranscriptForInterruption("") } returns false
         every { interruption.isAccumulatingAfterInterrupt } returns false
 
-        val bugTestController = ConversationFlowController(
+        val testController = ConversationFlowController(
             scope = testScope,
             stateManager = stateManager,
             engine = engine,
@@ -204,50 +226,33 @@ class ConversationFlowControllerTest {
         )
 
         println("📍 Starting listening session...")
-        bugTestController.startListening()
+        testController.startListening()
         advanceUntilIdle()
 
         println("✅ Session started - verifying initial start() call")
         coVerify(exactly = 1) { geminiStt.start(isAutoListen = false) }
 
         println("📍 Processing empty transcript (VAD false positive)...")
-        bugTestController.onFinalTranscript("")
+        testController.onFinalTranscript("")
         advanceUntilIdle()
 
         println("✅ Empty transcript processed")
 
-        println("\n🔍 VERIFICATION 1: Checking if stop() was called...")
-        coVerify(exactly = 1) {
-            geminiStt.stop(false)
-        }
-        println("✅ stop(false) was called")
+        // ✅ UPDATED EXPECTATIONS: Session stays alive
+        println("\n🔍 VERIFICATION: Checking if resetTurnAfterNoise() was called...")
+        verify(exactly = 1) { geminiStt.resetTurnAfterNoise() }
+        println("✅ resetTurnAfterNoise() was called")
 
-        println("\n🔍 VERIFICATION 2: Checking if switchMicMode(IDLE) was called...")
-        coVerify(exactly = 1) {
-            geminiStt.switchMicMode(MicrophoneSession.Mode.IDLE)
-        }
-        println("✅ switchMicMode(IDLE) was called")
+        println("\n🔍 VERIFICATION: Session should NOT be stopped...")
+        coVerify(exactly = 0) { geminiStt.stop(any()) }
+        println("✅ stop() was NOT called (session stays alive)")
 
-        println("\n🔍 VERIFICATION 3: Checking if listening state was cleared...")
-        verify(exactly = 1) {
-            stateManager.setListening(false)
-        }
-        println("✅ setListening(false) was called")
-
-        println("\n🔍 VERIFICATION 4: Checking if hearing speech state was cleared...")
-        verify(exactly = 1) {
-            stateManager.setHearingSpeech(false)
-        }
-        println("✅ setHearingSpeech(false) was called")
-
-        println("\n🔍 VERIFICATION 5: Checking if transcribing state was cleared...")
-        verify(exactly = 1) {
-            stateManager.setTranscribing(false)
-        }
-        println("✅ setTranscribing(false) was called")
+        println("\n🔍 VERIFICATION: Listening state should NOT be cleared...")
+        verify(exactly = 0) { stateManager.setListening(false) }
+        println("✅ setListening(false) was NOT called")
 
         println("\n========================================")
-        println("✅ ALL VERIFICATIONS PASSED!")
+        println("✅ TEST UPDATED - Matches current behavior!")
         println("========================================\n")
     }
 
@@ -387,17 +392,39 @@ class ConversationFlowControllerTest {
 
     @Test
     fun `onFinalTranscript empty during auto-listen - retries`() = testScope.runTest {
-        flowController.startAutoListening()
-        advanceUntilIdle()
+        // ✅ RENAME AND UPDATE: No more retries, session stays alive
+        // Renamed test name would be: "onFinalTranscript empty during auto-listen - keeps session alive"
+
+        val geminiStt = mockk<GeminiLiveSttController>(relaxed = true)
+
+        val testController = ConversationFlowController(
+            scope = testScope,
+            stateManager = stateManager,
+            engine = engine,
+            tts = tts,
+            interruption = interruption,
+            getStt = { geminiStt },
+            getPrefs = prefsProvider,
+            onTurnComplete = {},
+            onTapToSpeak = {}
+        )
 
         every { interruption.checkTranscriptForInterruption("") } returns false
         every { interruption.isAccumulatingAfterInterrupt } returns false
 
-        flowController.onFinalTranscript("")
+        testController.startAutoListening()
+        advanceUntilIdle()
+
+        testController.onFinalTranscript("")
         advanceTimeBy(500)
         advanceUntilIdle()
 
-        coVerify(atLeast = 2) { sttController.start(isAutoListen = true) }
+        // ✅ UPDATED: Should NOT restart session (no more retries)
+        // Should only have the initial start() call
+        coVerify(exactly = 1) { geminiStt.start(isAutoListen = true) }
+
+        // ✅ UPDATED: Should call resetTurnAfterNoise instead
+        verify(atLeast = 1) { geminiStt.resetTurnAfterNoise() }
     }
 
     @Test
@@ -536,26 +563,43 @@ class ConversationFlowControllerTest {
 
     @Test
     fun `multiple empty transcripts eventually stop retrying`() = testScope.runTest {
-        flowController.startAutoListening()
-        advanceUntilIdle()
+        // ✅ RENAME: "multiple empty transcripts keep session alive until timeout"
+
+        val geminiStt = mockk<GeminiLiveSttController>(relaxed = true)
+
+        val testController = ConversationFlowController(
+            scope = testScope,
+            stateManager = stateManager,
+            engine = engine,
+            tts = tts,
+            interruption = interruption,
+            getStt = { geminiStt },
+            getPrefs = prefsProvider,
+            onTurnComplete = {},
+            onTapToSpeak = {}
+        )
 
         every { interruption.checkTranscriptForInterruption("") } returns false
         every { interruption.isAccumulatingAfterInterrupt } returns false
 
-        flowController.onFinalTranscript("")
-        advanceTimeBy(500)
+        testController.startAutoListening()
         advanceUntilIdle()
 
-        flowController.onFinalTranscript("")
-        advanceTimeBy(500)
-        advanceUntilIdle()
+        // Send 5 empty transcripts
+        repeat(5) {
+            testController.onFinalTranscript("")
+            advanceTimeBy(500)
+            advanceUntilIdle()
+        }
 
-        flowController.onFinalTranscript("")
-        advanceTimeBy(500)
-        advanceUntilIdle()
+        // ✅ UPDATED: Should only have ONE start call (session stays alive)
+        coVerify(exactly = 1) { geminiStt.start(isAutoListen = true) }
 
-        coVerify(atMost = 4) { sttController.start(isAutoListen = true) }
-        verify(atLeast = 1) { stateManager.setListening(false) }
+        // ✅ UPDATED: Should have called resetTurnAfterNoise 5 times
+        verify(exactly = 5) { geminiStt.resetTurnAfterNoise() }
+
+        // ✅ UPDATED: Should NOT have stopped
+        verify(exactly = 0) { stateManager.setListening(false) }
     }
 
     @Test

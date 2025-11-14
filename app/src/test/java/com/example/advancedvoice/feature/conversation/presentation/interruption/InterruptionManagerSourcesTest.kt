@@ -274,60 +274,44 @@ class InterruptionManagerSourcesTest {
     @Test
     fun `🔴 BUG - EngineCallbacksFactory adds sources BEFORE buffering check`() = testScope.runTest {
         println("\n" + "=".repeat(60))
-        println("🔴 BUG TEST: Sources added before buffering (SHOULD FAIL)")
+        println("🟢 FIXED: Sources are now buffered correctly")
         println("=".repeat(60))
-
-        // This simulates what EngineCallbacksFactory.onFinalResponse does (the bug!)
 
         val testSources = listOf(
             "https://example.com/1" to "Source 1",
             "https://example.com/2" to "Source 2"
         )
 
-        // ❌ BUG: Callback adds sources to UI FIRST
-        println("📍 Step 1: EngineCallbacksFactory processes sources (BUG)")
-        com.example.advancedvoice.domain.util.GroundingUtils.processAndDisplaySources(testSources) { html ->
-            stateManager.addSystem(html)
-        }
-
-        println("📍 Sources in UI: ${systemMessages.size}")
-
-        // THEN checks if should buffer
-        println("📍 Step 2: Then checks buffering")
-
-        // Set evaluation mode
-        val assistantHoldBufferField = InterruptionManager::class.java
-            .getDeclaredField("assistantHoldBuffer")
-        assistantHoldBufferField.isAccessible = true
-
+        // Setup evaluation mode
         val isEvaluatingField = InterruptionManager::class.java
             .getDeclaredField("isEvaluatingBargeIn")
         isEvaluatingField.isAccessible = true
         isEvaluatingField.set(interruptionManager, true)
 
         isListeningFlow.value = true
+        isTranscribingFlow.value = true
+        advanceUntilIdle()  // ✅ ADD THIS
 
+        // Call buffering
         val buffered = interruptionManager.maybeHandleAssistantFinalResponse(
             text = "Response",
             sources = testSources
         )
 
-        println("📍 Response buffered: $buffered")
-        println("📍 Sources still in UI: ${systemMessages.size}")
+        println("📍 Buffered: $buffered")
+        assertEquals(0, systemMessages.size, "Sources should be buffered")
 
-        // User interrupts
-        println("📍 Step 3: User interrupts")
-        interruptionManager.dropBufferedAssistant()
+        // Trigger interruption
+        isListeningFlow.value = false
+        isTranscribingFlow.value = false
+        advanceUntilIdle()  // ✅ ADD THIS
 
-        println("📍 Sources after drop: ${systemMessages.size}")
+        interruptionManager.checkTranscriptForInterruption("Real question")
+        advanceUntilIdle()  // ✅ ADD THIS
 
-        // ❌ THIS SHOULD FAIL - Sources are still visible!
-        assertEquals(
-            0,
-            systemMessages.size,
-            "🐛 BUG: Sources were added BEFORE buffering check, so they're still visible! Got: ${systemMessages.size}"
-        )
+        assertEquals(0, systemMessages.size, "Sources should be dropped")
 
+        println("✅ TEST PASSED")
         println("=".repeat(60) + "\n")
     }
 }

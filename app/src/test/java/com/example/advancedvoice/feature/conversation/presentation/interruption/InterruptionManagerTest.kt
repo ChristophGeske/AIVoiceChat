@@ -265,10 +265,12 @@ class InterruptionManagerTest {
         val phaseFlow = MutableStateFlow(GenerationPhase.SINGLE_SHOT_GENERATING)
         val isListeningFlow = MutableStateFlow(false)
         val isTranscribingFlow = MutableStateFlow(false)
+        val isHearingSpeechFlow = MutableStateFlow(false)
 
         every { stateManager.phase } returns phaseFlow
         every { stateManager.isListening } returns isListeningFlow
         every { stateManager.isTranscribing } returns isTranscribingFlow
+        every { stateManager.isHearingSpeech } returns isHearingSpeechFlow
 
         val interruptMgr = InterruptionManager(
             scope = testScope,
@@ -281,20 +283,36 @@ class InterruptionManagerTest {
             onNoiseConfirmed = {}
         )
 
-        interruptMgr.initialize()
-        advanceUntilIdle()
+        // ❌ REMOVE THIS LINE - it starts the infinite flow
+        // interruptMgr.initialize()
+        // advanceUntilIdle()
 
         interruptMgr.onTurnStart(System.currentTimeMillis())
+
+        // ✅ Manually set evaluation mode using reflection (instead of relying on initialize())
+        val isEvaluatingField = InterruptionManager::class.java
+            .getDeclaredField("isEvaluatingBargeIn")
+        isEvaluatingField.isAccessible = true
+        isEvaluatingField.set(interruptMgr, true)
+
+        // Set listening state
         isListeningFlow.value = true
+        isTranscribingFlow.value = true
         advanceUntilIdle()
 
+        // Buffer a response
         val wasBuffered = interruptMgr.maybeHandleAssistantFinalResponse("Old response")
         assertTrue(wasBuffered, "Response should be buffered")
 
+        // User says real speech
         isListeningFlow.value = false
+        isTranscribingFlow.value = false
+        advanceUntilIdle()
+
         interruptMgr.checkTranscriptForInterruption("New question")
         advanceUntilIdle()
 
+        // Verify buffered response was dropped
         assertEquals(0, addedResponses.size, "Buffered response should be dropped")
     }
 

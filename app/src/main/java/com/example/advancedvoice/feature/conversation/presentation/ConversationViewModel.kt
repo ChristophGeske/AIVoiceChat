@@ -170,20 +170,12 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
 
                 if (!shouldAutoListenAfterTts) {
                     Log.d(TAG_AUTO_LISTEN, "❌ Flag disabled, skipping")
-                    val stt = sttManager.getStt()
-                    if (stt is GeminiLiveSttController) {
-                        stt.switchMicMode(com.example.advancedvoice.core.audio.MicrophoneSession.Mode.IDLE)
-                    }
                     return@collect
                 }
 
                 if (!settingEnabled) {
                     Log.w(TAG_AUTO_LISTEN, "❌ Setting disabled, clearing flag")
                     shouldAutoListenAfterTts = false
-                    val stt = sttManager.getStt()
-                    if (stt is GeminiLiveSttController) {
-                        stt.switchMicMode(com.example.advancedvoice.core.audio.MicrophoneSession.Mode.IDLE)
-                    }
                     return@collect
                 }
 
@@ -219,7 +211,6 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
             }
         }
 
-        // ✅ NEW: Monitor when auto-listen flag gets disabled by isHearingSpeech changes
         viewModelScope.launch {
             stateManager.isHearingSpeech.collect { hearing ->
                 Log.d(TAG_AUTO_LISTEN, "[DEBUG] isHearingSpeech=$hearing, flag=$shouldAutoListenAfterTts, phase=${phase.value}, speaking=${isSpeaking.value}")
@@ -257,12 +248,26 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             flowController.stopAll()
             interruption.reset()
+
+            // ✅ CHANGE: Go to MONITORING instead of IDLE
+            val stt = sttManager.getStt()
+            if (stt is GeminiLiveSttController) {
+                stt.switchMicMode(MicrophoneSession.Mode.MONITORING)  // ← Changed from IDLE
+                Log.i(TAG, "[STOP] Switched to MONITORING mode")
+            }
         }
     }
 
     fun clearConversation() {
         disableAutoListenAfterTts()
         flowController.clearConversation()
+
+        // ✅ CHANGE: Go to MONITORING instead of IDLE
+        val stt = sttManager.getStt()
+        if (stt is GeminiLiveSttController) {
+            stt.switchMicMode(MicrophoneSession.Mode.MONITORING)  // ← Changed from IDLE
+            Log.i(TAG, "[CLEAR] Switched to MONITORING mode")
+        }
     }
 
     fun replayMessage(index: Int) {
@@ -288,16 +293,18 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
                 val stt = sttManager.getStt()
                 if (stt is GeminiLiveSttController) {
                     if (speaking) {
-                        Log.i(TAG, "[TTS] Started speaking - switching mic to IDLE")
-                        stt.switchMicMode(MicrophoneSession.Mode.IDLE)
+                        Log.i(TAG, "[TTS] Started speaking - switching mic to MONITORING")  // ← Changed from IDLE
+                        stt.switchMicMode(MicrophoneSession.Mode.MONITORING)  // ← Changed from IDLE
                     } else {
-                        Log.i(TAG, "[TTS] Stopped speaking - switching mic to MONITORING")
+                        Log.i(TAG, "[TTS] Stopped speaking")
                         stt.notifyTtsStopped()
-                        // Only switch to MONITORING if auto-listen is enabled, otherwise stay IDLE
+
                         if (Prefs.getAutoListen(appCtx) && shouldAutoListenAfterTts) {
-                            stt.switchMicMode(MicrophoneSession.Mode.MONITORING)
+                            Log.i(TAG, "[TTS] Keeping MONITORING (auto-listen enabled)")
+                            // Already in MONITORING, just keep it
                         } else {
-                            stt.switchMicMode(MicrophoneSession.Mode.IDLE)
+                            Log.i(TAG, "[TTS] Staying in MONITORING (no auto-listen)")
+                            // Stay in MONITORING instead of going IDLE
                         }
                     }
                 }

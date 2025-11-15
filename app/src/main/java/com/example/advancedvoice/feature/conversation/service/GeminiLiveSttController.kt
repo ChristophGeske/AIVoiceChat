@@ -422,8 +422,9 @@ class GeminiLiveSttController(
 
         when (mode) {
             MicrophoneSession.Mode.IDLE -> {
-                Log.i(TAG, "[Controller] IDLE mode - stopping mic session")
+                Log.i(TAG, "[Controller] IDLE mode - stopping mic session and disconnecting WebSocket")
 
+                // Stop microphone
                 val sessionToStop = micSession
                 micSession = null
 
@@ -435,6 +436,14 @@ class GeminiLiveSttController(
                     Log.d(TAG, "[Controller] No mic session to stop (already null)")
                 }
 
+                // ✅ NEW: Disconnect WebSocket to stop ping/pong
+                scope.launch {
+                    Log.i(TAG, "[Controller] Disconnecting WebSocket (IDLE mode)")
+                    transcriber.disconnect()
+                    delay(100) // Brief delay before next connection
+                }
+
+                // Clear state
                 _isListening.value = false
                 _isHearingSpeech.value = false
                 _isTranscribing.value = false
@@ -446,9 +455,21 @@ class GeminiLiveSttController(
                 speechStartedInCurrentSession = false
                 lastPartialLen = 0
                 lastPartialTimeMs = 0L
+                sessionStartTime = 0L  // ✅ Reset session timer
+                sessionTimeoutMs = 0L
                 Log.d(TAG, "[Controller] All listening states cleared for IDLE mode")
             }
+
             MicrophoneSession.Mode.MONITORING -> {
+                // ✅ NEW: Reconnect if disconnected
+                if (!client.ready.value) {
+                    Log.i(TAG, "[Controller] Reconnecting WebSocket for MONITORING mode")
+                    scope.launch {
+                        transcriber.connect(apiKey, model)
+                        delay(500) // Wait for connection
+                    }
+                }
+
                 micSession?.switchMode(mode)
                 _isListening.value = false
                 _isHearingSpeech.value = false
@@ -460,8 +481,19 @@ class GeminiLiveSttController(
                 lastPartialTimeMs = 0L
                 Log.d(TAG, "[Controller] Listening states cleared for MONITORING mode")
             }
+
             MicrophoneSession.Mode.TRANSCRIBING -> {
-                micSession?.switchMode(mode)
+                // ✅ NEW: Reconnect if disconnected
+                if (!client.ready.value) {
+                    Log.w(TAG, "[Controller] WebSocket not connected in TRANSCRIBING mode, reconnecting")
+                    scope.launch {
+                        transcriber.connect(apiKey, model)
+                        delay(500)
+                        micSession?.switchMode(mode)
+                    }
+                } else {
+                    micSession?.switchMode(mode)
+                }
                 Log.d(TAG, "[Controller] TRANSCRIBING mode activated")
             }
         }

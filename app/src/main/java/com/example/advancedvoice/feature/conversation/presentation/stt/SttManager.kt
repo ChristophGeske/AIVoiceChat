@@ -9,6 +9,7 @@ import com.example.advancedvoice.data.gemini_live.GeminiLiveTranscriber
 import com.example.advancedvoice.feature.conversation.presentation.state.ConversationStateManager
 import com.example.advancedvoice.feature.conversation.service.GeminiLiveSttController
 import com.example.advancedvoice.feature.conversation.service.SttController
+import com.example.advancedvoice.feature.conversation.service.TtsController  // ✅ ADD THIS IMPORT
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.collectLatest
@@ -18,6 +19,7 @@ class SttManager(
     private val app: Application,
     private val scope: CoroutineScope,
     private val stateManager: ConversationStateManager,
+    private val tts: TtsController,  // ✅ ADD THIS PARAMETER
     private val onFinalTranscript: (String) -> Unit
 ) {
     private companion object { const val TAG = LoggerConfig.TAG_VM }
@@ -59,7 +61,8 @@ class SttManager(
             client = client,
             transcriber = transcriber,
             apiKey = geminiKey,
-            model = liveModel
+            model = liveModel,
+            tts = tts  // ✅ ADD THIS PARAMETER
         )
     }
 

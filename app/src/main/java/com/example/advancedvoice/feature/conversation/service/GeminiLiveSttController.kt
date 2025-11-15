@@ -22,7 +22,8 @@ class GeminiLiveSttController(
     private val client: GeminiLiveClient,
     private val transcriber: GeminiLiveTranscriber,
     private val apiKey: String,
-    private val model: String
+    private val model: String,
+    private val tts: TtsController
 ) : SttController {
 
     companion object {
@@ -140,7 +141,9 @@ class GeminiLiveSttController(
 
                 if (txt.isNotBlank()) {
                     sessionTimeoutJob?.cancel()
-                    Log.d(TAG, "[Controller] Partials detected - cancelling session timeout (real words)")
+                    sessionStartTime = 0L      // ✅ ADD: Disable timeout - user is speaking
+                    sessionTimeoutMs = 0L      // ✅ ADD: Disable timeout - user is speaking
+                    Log.d(TAG, "[Controller] Partials detected - disabling session timeout (user is actively speaking)")
                 }
             }
         }
@@ -161,8 +164,10 @@ class GeminiLiveSttController(
 
                 if (final.isNotBlank()) {
                     sessionTimeoutJob?.cancel()
-                    Log.d(TAG, "[Controller] Real words detected - cancelling session timeout, switching to MONITORING")
-                    micSession?.switchMode(MicrophoneSession.Mode.MONITORING)
+                    sessionStartTime = 0L      // ✅ ADD: Reset for new interruption session
+                    sessionTimeoutMs = 0L      // ✅ ADD: Reset for new interruption session
+                    Log.d(TAG, "[Controller] Real words detected - resetting session timer, switching to MONITORING")
+                    switchMicMode(MicrophoneSession.Mode.MONITORING)
                 } else {
                     Log.d(TAG, "[Controller] Empty transcript (noise) - staying in TRANSCRIBING")
                 }
@@ -198,12 +203,17 @@ class GeminiLiveSttController(
                 val currentMode = micSession?.currentVadMode?.value
                 when (ev) {
                     is VadRecorder.VadEvent.SpeechStart -> {
-                        // ✅ NEW: Check if session timeout has been exceeded (hard cutoff)
+                        // ✅ NEW: Hard reject if TTS is currently playing
+                        if (tts.isSpeaking.value) {
+                            Log.w(TAG, "[VAD] ⛔ Ignoring SpeechStart - TTS is currently playing (echo)")
+                            return@collect
+                        }
+
+                        // ✅ CHECK: If session timeout has been exceeded (hard cutoff)
                         if (sessionStartTime > 0 && sessionTimeoutMs > 0) {
                             val elapsed = System.currentTimeMillis() - sessionStartTime
                             if (elapsed >= sessionTimeoutMs) {
                                 Log.w(TAG, "[VAD] Ignoring SpeechStart - session timeout exceeded (${elapsed}ms / ${sessionTimeoutMs}ms)")
-                                // Force timeout immediately, even if noise is still happening
                                 if (!turnEnded) {
                                     endTurn("SessionTimeout")
                                 }
@@ -237,6 +247,7 @@ class GeminiLiveSttController(
                                 micSession?.switchMode(MicrophoneSession.Mode.TRANSCRIBING)
                                 speechStartedInCurrentSession = true
                                 _isListening.value = true
+                                turnEnded = false  //   Reset turn flag for new turn!
 
                                 // ✅ MODIFIED: Track start time if not already set
                                 if (sessionStartTime == 0L) {
@@ -436,7 +447,7 @@ class GeminiLiveSttController(
                     Log.d(TAG, "[Controller] No mic session to stop (already null)")
                 }
 
-                // ✅ NEW: Disconnect WebSocket to stop ping/pong
+                // Disconnect WebSocket to stop ping/pong
                 scope.launch {
                     Log.i(TAG, "[Controller] Disconnecting WebSocket (IDLE mode)")
                     transcriber.disconnect()
@@ -455,13 +466,13 @@ class GeminiLiveSttController(
                 speechStartedInCurrentSession = false
                 lastPartialLen = 0
                 lastPartialTimeMs = 0L
-                sessionStartTime = 0L  // ✅ Reset session timer
-                sessionTimeoutMs = 0L
+                sessionStartTime = 0L      // ✅ ADDED
+                sessionTimeoutMs = 0L      // ✅ ADDED
                 Log.d(TAG, "[Controller] All listening states cleared for IDLE mode")
             }
 
             MicrophoneSession.Mode.MONITORING -> {
-                // ✅ NEW: Reconnect if disconnected
+                // Reconnect if disconnected
                 if (!client.ready.value) {
                     Log.i(TAG, "[Controller] Reconnecting WebSocket for MONITORING mode")
                     scope.launch {
@@ -479,11 +490,12 @@ class GeminiLiveSttController(
                 speechStartedInCurrentSession = false
                 lastPartialLen = 0
                 lastPartialTimeMs = 0L
-                Log.d(TAG, "[Controller] Listening states cleared for MONITORING mode")
+                // ✅ REMOVED: Don't reset session timer - let it continue from original start time!
+                Log.d(TAG, "[Controller] Listening states cleared for MONITORING mode (session timer preserved)")
             }
 
             MicrophoneSession.Mode.TRANSCRIBING -> {
-                // ✅ NEW: Reconnect if disconnected
+                // Reconnect if disconnected
                 if (!client.ready.value) {
                     Log.w(TAG, "[Controller] WebSocket not connected in TRANSCRIBING mode, reconnecting")
                     scope.launch {
@@ -508,39 +520,4 @@ class GeminiLiveSttController(
         Log.d(TAG, "[Controller] TTS stopped at ${lastTtsStopTime}, grace period: ${POST_TTS_GRACE_PERIOD_MS}ms")
     }
 
-    fun resetTurnAfterNoise() {
-        Log.i(TAG, "[Controller] Resetting turn state after VAD noise - continuing to listen")
-
-        // ✅ CHECK: If session timeout already exceeded, stop immediately and don't restart listening
-        val elapsedTime = System.currentTimeMillis() - sessionStartTime
-        val remainingTime = sessionTimeoutMs - elapsedTime
-
-        if (remainingTime <= 0) {
-            Log.w(TAG, "[Controller] Session timeout already exceeded (${elapsedTime}ms), ending turn immediately")
-            endTurn("SessionTimeout")
-            return  // ✅ CRITICAL: Don't restart listening after timeout
-        }
-
-        turnEnded = false
-        speechStartedInCurrentSession = false
-        lastPartialLen = 0
-        lastPartialTimeMs = 0L
-
-        _isTranscribing.value = false
-        _isHearingSpeech.value = false
-        _isListening.value = true
-
-        sessionTimeoutJob?.cancel()
-
-        Log.d(TAG, "[Controller] Restarting session timeout with ${remainingTime}ms remaining")
-        sessionTimeoutJob = scope.launch {
-            delay(remainingTime)
-            Log.w(TAG, "[Controller] ⏱️ Session timeout - total time limit reached")
-            if (_isListening.value && !turnEnded) {
-                endTurn("SessionTimeout")
-            }
-        }
-
-        micSession?.switchMode(MicrophoneSession.Mode.TRANSCRIBING)
-    }
 }

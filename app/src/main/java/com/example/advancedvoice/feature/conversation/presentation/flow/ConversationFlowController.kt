@@ -173,14 +173,20 @@ class ConversationFlowController(
             return
         }
 
-        // ✅ FIX: Noise doesn't end the session - reset turn state and keep listening
-        Log.i(TAG, "[EMPTY] VAD noise detected - resetting turn and continuing to listen")
+        // ✅ NEW CODE - Just switch to MONITORING and stop
+        Log.i(TAG, "[EMPTY] VAD noise detected - switching to MONITORING (not restarting)")
         stateManager.removeLastUserPlaceholderIfEmpty()
 
         val stt = getStt()
         if (stt is GeminiLiveSttController) {
             scope.launch {
-                stt.resetTurnAfterNoise()
+                // Just switch to MONITORING - don't reset turn or restart transcribing
+                stt.switchMicMode(com.example.advancedvoice.core.audio.MicrophoneSession.Mode.MONITORING)
+
+                // Clear listening flags
+                stateManager.setListening(false)
+                stateManager.setHearingSpeech(false)
+                stateManager.setTranscribing(false)
             }
         }
     }

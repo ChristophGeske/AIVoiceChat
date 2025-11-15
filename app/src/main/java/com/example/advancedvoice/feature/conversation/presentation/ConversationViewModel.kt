@@ -64,6 +64,7 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
             app = app,
             scope = viewModelScope,
             stateManager = stateManager,
+            tts = tts,
             onFinalTranscript = { flowController.onFinalTranscript(it) }
         )
     }
@@ -293,8 +294,8 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
                 val stt = sttManager.getStt()
                 if (stt is GeminiLiveSttController) {
                     if (speaking) {
-                        Log.i(TAG, "[TTS] Started speaking - switching mic to MONITORING")  // ← Changed from IDLE
-                        stt.switchMicMode(MicrophoneSession.Mode.MONITORING)  // ← Changed from IDLE
+                        Log.i(TAG, "[TTS] Started speaking - switching mic to MONITORING")
+                        stt.switchMicMode(MicrophoneSession.Mode.MONITORING)
                     } else {
                         Log.i(TAG, "[TTS] Stopped speaking")
                         stt.notifyTtsStopped()
@@ -303,8 +304,8 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
                             Log.i(TAG, "[TTS] Keeping MONITORING (auto-listen enabled)")
                             // Already in MONITORING, just keep it
                         } else {
-                            Log.i(TAG, "[TTS] Staying in MONITORING (no auto-listen)")
-                            // Stay in MONITORING instead of going IDLE
+                            Log.i(TAG, "[TTS] Switching to IDLE (no auto-listen)")  // ✅ FIXED!
+                            stt.switchMicMode(MicrophoneSession.Mode.IDLE)  // ✅ ADD THIS!
                         }
                     }
                 }

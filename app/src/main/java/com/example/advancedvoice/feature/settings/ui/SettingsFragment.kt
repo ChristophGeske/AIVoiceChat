@@ -64,11 +64,11 @@ class SettingsFragment : Fragment() {
         val allModelButtons = listOf(
             root.findViewById<RadioButton>(R.id.radioGeminiFlash),
             root.findViewById<RadioButton>(R.id.radioGeminiPro),
-            root.findViewById<RadioButton>(R.id.radioGpt5High),
-            root.findViewById<RadioButton>(R.id.radioGpt5Medium),
-            root.findViewById<RadioButton>(R.id.radioGpt5Low),
             root.findViewById<RadioButton>(R.id.radioGpt5MiniHigh),
-            root.findViewById<RadioButton>(R.id.radioGpt5MiniMedium)
+            root.findViewById<RadioButton>(R.id.radioGpt5MiniMedium),
+            root.findViewById<RadioButton>(R.id.radioGpt51Low),
+            root.findViewById<RadioButton>(R.id.radioGpt51Medium),
+            root.findViewById<RadioButton>(R.id.radioGpt51High)
         )
 
         val currentModel = Prefs.getSelectedModel(requireContext()).lowercase()
@@ -77,13 +77,20 @@ class SettingsFragment : Fragment() {
         allModelButtons.forEach { it.isChecked = false }
 
         when {
-            currentModel.startsWith("gemini-2.5-flash") -> root.findViewById<RadioButton>(R.id.radioGeminiFlash).isChecked = true
-            currentModel.startsWith("gemini") -> root.findViewById<RadioButton>(R.id.radioGeminiPro).isChecked = true
-            currentModel == "gpt-5" && currentEffort == "high" -> root.findViewById<RadioButton>(R.id.radioGpt5High).isChecked = true
-            currentModel == "gpt-5" && currentEffort == "medium" -> root.findViewById<RadioButton>(R.id.radioGpt5Medium).isChecked = true
-            currentModel == "gpt-5" -> root.findViewById<RadioButton>(R.id.radioGpt5Low).isChecked = true
-            currentModel == "gpt-5-mini" && currentEffort == "high" -> root.findViewById<RadioButton>(R.id.radioGpt5MiniHigh).isChecked = true
-            currentModel == "gpt-5-mini" -> root.findViewById<RadioButton>(R.id.radioGpt5MiniMedium).isChecked = true
+            currentModel.startsWith("gemini-2.5-flash") || currentModel == "gemini-flash-latest" ->
+                root.findViewById<RadioButton>(R.id.radioGeminiFlash).isChecked = true
+            currentModel.startsWith("gemini") || currentModel == "gemini-pro-latest" ->
+                root.findViewById<RadioButton>(R.id.radioGeminiPro).isChecked = true
+            currentModel == "gpt-5-mini" && currentEffort == "high" ->
+                root.findViewById<RadioButton>(R.id.radioGpt5MiniHigh).isChecked = true
+            currentModel == "gpt-5-mini" ->
+                root.findViewById<RadioButton>(R.id.radioGpt5MiniMedium).isChecked = true
+            currentModel == "gpt-5.1" && currentEffort == "low" ->
+                root.findViewById<RadioButton>(R.id.radioGpt51Low).isChecked = true
+            currentModel == "gpt-5.1" && currentEffort == "medium" ->
+                root.findViewById<RadioButton>(R.id.radioGpt51Medium).isChecked = true
+            currentModel == "gpt-5.1" && currentEffort == "high" ->
+                root.findViewById<RadioButton>(R.id.radioGpt51High).isChecked = true
         }
 
         val modelClickListener = View.OnClickListener { clickedView ->
@@ -92,13 +99,13 @@ class SettingsFragment : Fragment() {
             }
 
             when (clickedView.id) {
-                R.id.radioGeminiFlash -> onModelChosen("gemini-2.5-flash", null)
-                R.id.radioGeminiPro -> onModelChosen("gemini-2.5-pro", null)
-                R.id.radioGpt5High -> onModelChosen("gpt-5", "high")
-                R.id.radioGpt5Medium -> onModelChosen("gpt-5", "medium")
-                R.id.radioGpt5Low -> onModelChosen("gpt-5", "low")
+                R.id.radioGeminiFlash -> onModelChosen("gemini-flash-latest", null)
+                R.id.radioGeminiPro -> onModelChosen("gemini-pro-latest", null)
                 R.id.radioGpt5MiniHigh -> onModelChosen("gpt-5-mini", "high")
                 R.id.radioGpt5MiniMedium -> onModelChosen("gpt-5-mini", "medium")
+                R.id.radioGpt51Low -> onModelChosen("gpt-5.1", "low")
+                R.id.radioGpt51Medium -> onModelChosen("gpt-5.1", "medium")
+                R.id.radioGpt51High -> onModelChosen("gpt-5.1", "high")
             }
         }
 
@@ -221,21 +228,21 @@ class SettingsFragment : Fragment() {
 
         val rbGeminiFlash = root.findViewById<RadioButton>(R.id.radioGeminiFlash)
         val rbGeminiPro = root.findViewById<RadioButton>(R.id.radioGeminiPro)
-        val rbGpt5High = root.findViewById<RadioButton>(R.id.radioGpt5High)
-        val rbGpt5Medium = root.findViewById<RadioButton>(R.id.radioGpt5Medium)
-        val rbGpt5Low = root.findViewById<RadioButton>(R.id.radioGpt5Low)
         val rbGpt5MiniHigh = root.findViewById<RadioButton>(R.id.radioGpt5MiniHigh)
         val rbGpt5MiniMedium = root.findViewById<RadioButton>(R.id.radioGpt5MiniMedium)
+        val rbGpt51Low = root.findViewById<RadioButton>(R.id.radioGpt51Low)
+        val rbGpt51Medium = root.findViewById<RadioButton>(R.id.radioGpt51Medium)
+        val rbGpt51High = root.findViewById<RadioButton>(R.id.radioGpt51High)
 
         rbGeminiFlash.visibility = if (hasGemini) View.VISIBLE else View.GONE
         rbGeminiPro.visibility = if (hasGemini) View.VISIBLE else View.GONE
 
         val gptVis = if (hasOpenAi) View.VISIBLE else View.GONE
-        rbGpt5High.visibility = gptVis
-        rbGpt5Medium.visibility = gptVis
-        rbGpt5Low.visibility = gptVis
         rbGpt5MiniHigh.visibility = gptVis
         rbGpt5MiniMedium.visibility = gptVis
+        rbGpt51Low.visibility = gptVis
+        rbGpt51Medium.visibility = gptVis
+        rbGpt51High.visibility = gptVis
     }
 
     companion object {

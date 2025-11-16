@@ -104,45 +104,28 @@
                         android:textColor="#FFFFFF" />
                 </LinearLayout>
 
-                <!-- GPT‑5 row -->
+                <!-- GPT‑5 Mini Section -->
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="16dp"
+                    android:text="GPT-5 Mini"
+                    android:textColor="#FFFFFF"
+                    android:textStyle="bold"
+                    android:textSize="14sp" />
+
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="2dp"
+                    android:layout_marginBottom="8dp"
+                    android:text="@string/gpt5_mini_desc"
+                    android:textColor="#B0BEC5"
+                    android:textSize="12sp" />
+
                 <LinearLayout
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:layout_marginTop="8dp"
-                    android:orientation="horizontal">
-
-                    <RadioButton
-                        android:id="@+id/radioGpt5High"
-                        android:layout_width="0dp"
-                        android:layout_height="wrap_content"
-                        android:layout_weight="1"
-                        android:text="GPT-5 (High)"
-                        android:textColor="#FFFFFF" />
-
-                    <RadioButton
-                        android:id="@+id/radioGpt5Medium"
-                        android:layout_width="0dp"
-                        android:layout_height="wrap_content"
-                        android:layout_marginStart="12dp"
-                        android:layout_weight="1"
-                        android:text="GPT-5 (Medium)"
-                        android:textColor="#FFFFFF" />
-
-                    <RadioButton
-                        android:id="@+id/radioGpt5Low"
-                        android:layout_width="0dp"
-                        android:layout_height="wrap_content"
-                        android:layout_marginStart="12dp"
-                        android:layout_weight="1"
-                        android:text="GPT-5 (Low)"
-                        android:textColor="#FFFFFF" />
-                </LinearLayout>
-
-                <!-- GPT‑5 Mini row -->
-                <LinearLayout
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="8dp"
                     android:orientation="horizontal">
 
                     <RadioButton
@@ -150,7 +133,7 @@
                         android:layout_width="0dp"
                         android:layout_height="wrap_content"
                         android:layout_weight="1"
-                        android:text="GPT-5 Mini (High)"
+                        android:text="@string/gpt5_mini_high"
                         android:textColor="#FFFFFF" />
 
                     <RadioButton
@@ -159,7 +142,58 @@
                         android:layout_height="wrap_content"
                         android:layout_marginStart="12dp"
                         android:layout_weight="1"
-                        android:text="GPT-5 Mini (Medium)"
+                        android:text="@string/gpt5_mini_medium"
+                        android:textColor="#FFFFFF" />
+                </LinearLayout>
+
+                <!-- GPT‑5.1 Section -->
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="16dp"
+                    android:text="GPT-5.1"
+                    android:textColor="#FFFFFF"
+                    android:textStyle="bold"
+                    android:textSize="14sp" />
+
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="2dp"
+                    android:layout_marginBottom="8dp"
+                    android:text="@string/gpt51_desc"
+                    android:textColor="#B0BEC5"
+                    android:textSize="12sp" />
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="horizontal">
+
+                    <RadioButton
+                        android:id="@+id/radioGpt51Low"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:text="@string/gpt51_low"
+                        android:textColor="#FFFFFF" />
+
+                    <RadioButton
+                        android:id="@+id/radioGpt51Medium"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_marginStart="12dp"
+                        android:layout_weight="1"
+                        android:text="@string/gpt51_medium"
+                        android:textColor="#FFFFFF" />
+
+                    <RadioButton
+                        android:id="@+id/radioGpt51High"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_marginStart="12dp"
+                        android:layout_weight="1"
+                        android:text="@string/gpt51_high"
                         android:textColor="#FFFFFF" />
                 </LinearLayout>
             </LinearLayout>

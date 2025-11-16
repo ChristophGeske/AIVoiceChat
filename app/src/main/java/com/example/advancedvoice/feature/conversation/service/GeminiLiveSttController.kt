@@ -437,7 +437,7 @@ class GeminiLiveSttController(
 
         when (mode) {
             MicrophoneSession.Mode.IDLE -> {
-                Log.i(TAG, "[Controller] IDLE mode - stopping mic session and disconnecting WebSocket")
+                Log.i(TAG, "[Controller] IDLE mode - stopping mic session, KEEPING WebSocket alive")
 
                 // Stop microphone
                 val sessionToStop = micSession
@@ -451,16 +451,8 @@ class GeminiLiveSttController(
                     Log.d(TAG, "[Controller] No mic session to stop (already null)")
                 }
 
-                // ✅ CANCEL any pending disconnect before starting new one
-                disconnectJob?.cancel()
-
-                // Disconnect WebSocket to stop ping/pong
-                disconnectJob = scope.launch {  // ✅ TRACK the job
-                    Log.i(TAG, "[Controller] Disconnecting WebSocket (IDLE mode)")
-                    transcriber.disconnect()
-                    delay(100)
-                    disconnectJob = null  // ✅ Clear when done
-                }
+                // ✅ WebSocket stays connected and ready
+                // NO disconnect call here!
 
                 // Clear state
                 _isListening.value = false
@@ -476,7 +468,7 @@ class GeminiLiveSttController(
                 lastPartialTimeMs = 0L
                 sessionStartTime = 0L
                 sessionTimeoutMs = 0L
-                Log.d(TAG, "[Controller] All listening states cleared for IDLE mode")
+                Log.d(TAG, "[Controller] Microphone stopped, WebSocket remains connected")
             }
 
             MicrophoneSession.Mode.MONITORING -> {

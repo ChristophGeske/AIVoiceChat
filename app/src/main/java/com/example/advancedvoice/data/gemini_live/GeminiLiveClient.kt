@@ -34,10 +34,16 @@ class GeminiLiveClient(
     val errors: SharedFlow<String> get() = _errors
     private val _errors = MutableSharedFlow<String>(extraBufferCapacity = 16)
 
+    private val audioBuffer = mutableListOf<Pair<ByteArray, Int>>()
+    private val maxBufferFrames = 100  // ~2 seconds at 20ms frames
+
     fun connect(apiKey: String, model: String) {
         if (socket != null) {
+            Log.d(TAG, "Already connected, skipping reconnect")
             return
         }
+
+        audioBuffer.clear()  // ✅ Clear buffer on new connection
         Log.i(TAG, "connect -> Creating new WebSocket for model=$model")
 
         val url = "$WS_URL?key=${apiKey.trim()}"
@@ -92,6 +98,18 @@ class GeminiLiveClient(
 
             if (json.has("setupComplete")) {
                 _ready.value = true
+
+                // ✅ Flush buffered audio when ready
+                if (audioBuffer.isNotEmpty()) {
+                    Log.i(TAG, "Flushing ${audioBuffer.size} buffered audio frames")
+                    audioBuffer.forEach { (bytes, sampleRate) ->
+                        socket?.send(GeminiLiveProtocol.audioPcm16LeFrame(
+                            Base64.encodeToString(bytes, Base64.NO_WRAP),
+                            sampleRate
+                        ).toString())
+                    }
+                    audioBuffer.clear()
+                }
             }
             if (json.has("error")) {
                 val e = json.optJSONObject("error")
@@ -106,10 +124,26 @@ class GeminiLiveClient(
     }
 
     fun sendPcm16Le(bytes: ByteArray, sampleRate: Int = 16000): Boolean {
-        // This is fine, audio frame logging is already disabled by LoggerConfig
         return try {
-            socket?.send(GeminiLiveProtocol.audioPcm16LeFrame(Base64.encodeToString(bytes, Base64.NO_WRAP), sampleRate).toString()) ?: false
+            if (_ready.value) {
+                // ✅ Connected: send immediately
+                socket?.send(GeminiLiveProtocol.audioPcm16LeFrame(
+                    Base64.encodeToString(bytes, Base64.NO_WRAP),
+                    sampleRate
+                ).toString()) ?: false
+            } else {
+                // ✅ Not ready: buffer the frame
+                if (audioBuffer.size < maxBufferFrames) {
+                    audioBuffer.add(bytes to sampleRate)
+                    Log.d(TAG, "Buffered audio frame (${audioBuffer.size}/$maxBufferFrames)")
+                    true
+                } else {
+                    Log.w(TAG, "Audio buffer full, dropping frame")
+                    false
+                }
+            }
         } catch (e: Exception) {
+            Log.e(TAG, "Error sending audio: ${e.message}")
             false
         }
     }
@@ -123,6 +157,7 @@ class GeminiLiveClient(
 
     fun close() {
         Log.i(TAG, "WS CLOSE requested by client.")
+        audioBuffer.clear()  // ✅ Clear buffer on disconnect
         try {
             socket?.close(1000, "Client initiated close")
         } catch (_: Exception) {}

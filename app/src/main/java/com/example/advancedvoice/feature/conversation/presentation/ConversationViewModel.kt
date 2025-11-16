@@ -283,7 +283,7 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
         super.onCleared()
         Log.w(TAG, "ViewModel clearing...")
         flowController.cleanup()
-        sttManager.release()
+        sttManager.release()  // ✅ This will disconnect WebSocket
         interruption.reset()
         tts.shutdown()
     }

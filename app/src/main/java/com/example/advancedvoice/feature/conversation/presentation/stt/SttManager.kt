@@ -90,6 +90,11 @@ class SttManager(
     }
 
     fun release() {
-        stt?.release()
+        val stt = getStt()
+        if (stt is GeminiLiveSttController) {
+            scope.launch {
+                stt.release()  // ✅ This disconnects WebSocket
+            }
+        }
     }
 }

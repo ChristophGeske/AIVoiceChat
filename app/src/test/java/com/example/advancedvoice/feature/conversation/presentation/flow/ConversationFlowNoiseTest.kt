@@ -16,12 +16,12 @@ import org.junit.jupiter.api.*
 import org.junit.jupiter.api.Assertions.*
 
 /**
- * Tests for CORRECT VAD Noise Handling Behavior
+ * Tests for VAD Noise Handling Behavior
  *
  * Expected Behavior:
- * - Empty transcripts (VAD false positives) should NOT stop the session
- * - Session continues until timeout or real speech
- * - resetTurnAfterNoise() called to restart turn
+ * - Empty transcripts (VAD false positives/noise) switch to MONITORING
+ * - TIMEOUT signal switches to IDLE and stops session
+ * - Real speech after noise is processed normally
  */
 @OptIn(ExperimentalCoroutinesApi::class)
 class ConversationFlowNoiseTest {
@@ -61,7 +61,6 @@ class ConversationFlowNoiseTest {
             coEvery { start(any()) } just runs
             coEvery { stop(any()) } just runs
             every { switchMicMode(any()) } just runs
-            every { resetTurnAfterNoise() } just runs
         }
 
         val prefsProvider = object : ConversationFlowController.PrefsProvider {
@@ -89,7 +88,7 @@ class ConversationFlowNoiseTest {
     }
 
     @Test
-    fun `empty transcript should NOT stop STT session`() = testScope.runTest {
+    fun `empty transcript should switch to MONITORING mode`() = testScope.runTest {
         every { interruption.checkTranscriptForInterruption("") } returns false
         every { interruption.isAccumulatingAfterInterrupt } returns false
 
@@ -99,11 +98,11 @@ class ConversationFlowNoiseTest {
         flowController.onFinalTranscript("")
         advanceUntilIdle()
 
-        coVerify(exactly = 0) { geminiStt.stop(any()) }
+        verify(exactly = 1) { geminiStt.switchMicMode(MicrophoneSession.Mode.MONITORING) }
     }
 
     @Test
-    fun `empty transcript should call resetTurnAfterNoise`() = testScope.runTest {
+    fun `empty transcript should remove placeholder`() = testScope.runTest {
         every { interruption.checkTranscriptForInterruption("") } returns false
         every { interruption.isAccumulatingAfterInterrupt } returns false
 
@@ -113,11 +112,11 @@ class ConversationFlowNoiseTest {
         flowController.onFinalTranscript("")
         advanceUntilIdle()
 
-        verify(exactly = 1) { geminiStt.resetTurnAfterNoise() }
+        verify(exactly = 1) { stateManager.removeLastUserPlaceholderIfEmpty() }
     }
 
     @Test
-    fun `empty transcript should NOT switch to IDLE mode`() = testScope.runTest {
+    fun `empty transcript should clear listening flags`() = testScope.runTest {
         every { interruption.checkTranscriptForInterruption("") } returns false
         every { interruption.isAccumulatingAfterInterrupt } returns false
 
@@ -127,11 +126,13 @@ class ConversationFlowNoiseTest {
         flowController.onFinalTranscript("")
         advanceUntilIdle()
 
-        coVerify(exactly = 0) { geminiStt.switchMicMode(MicrophoneSession.Mode.IDLE) }
+        verify { stateManager.setListening(false) }
+        verify { stateManager.setHearingSpeech(false) }
+        verify { stateManager.setTranscribing(false) }
     }
 
     @Test
-    fun `multiple empty transcripts keep session active`() = testScope.runTest {
+    fun `multiple empty transcripts each switch to MONITORING`() = testScope.runTest {
         every { interruption.checkTranscriptForInterruption("") } returns false
         every { interruption.isAccumulatingAfterInterrupt } returns false
 
@@ -143,8 +144,8 @@ class ConversationFlowNoiseTest {
             advanceUntilIdle()
         }
 
-        verify(exactly = 3) { geminiStt.resetTurnAfterNoise() }
-        coVerify(exactly = 0) { geminiStt.stop(any()) }
+        verify(atLeast = 3) { geminiStt.switchMicMode(MicrophoneSession.Mode.MONITORING) }
+        verify(exactly = 3) { stateManager.removeLastUserPlaceholderIfEmpty() }
     }
 
     @Test
@@ -166,9 +167,10 @@ class ConversationFlowNoiseTest {
     }
 
     @Test
-    fun `TIMEOUT signal stops session`() = testScope.runTest {
+    fun `TIMEOUT signal stops session and switches to IDLE`() = testScope.runTest {
         every { interruption.checkTranscriptForInterruption(any()) } returns false
         every { interruption.isAccumulatingAfterInterrupt } returns false
+        every { interruption.isEvaluatingBargeIn } returns false
 
         flowController.startListening()
         advanceUntilIdle()
@@ -178,12 +180,13 @@ class ConversationFlowNoiseTest {
 
         verify { stateManager.removeLastUserPlaceholderIfEmpty() }
         coVerify(exactly = 1) { geminiStt.stop(false) }
+        verify(exactly = 1) { geminiStt.switchMicMode(MicrophoneSession.Mode.IDLE) }
     }
 
     @Test
-    fun `noise removes placeholder but continues session`() = testScope.runTest {
+    fun `noise during accumulation is handled by interruption manager`() = testScope.runTest {
         every { interruption.checkTranscriptForInterruption("") } returns false
-        every { interruption.isAccumulatingAfterInterrupt } returns false
+        every { interruption.isAccumulatingAfterInterrupt } returns true
 
         flowController.startListening()
         advanceUntilIdle()
@@ -191,7 +194,21 @@ class ConversationFlowNoiseTest {
         flowController.onFinalTranscript("")
         advanceUntilIdle()
 
-        verify(exactly = 1) { stateManager.removeLastUserPlaceholderIfEmpty() }
-        coVerify(exactly = 0) { geminiStt.stop(any()) }
+        // Should not switch modes during accumulation
+        verify(exactly = 0) { geminiStt.switchMicMode(any()) }
+    }
+
+    @Test
+    fun `timeout during evaluation flushes buffered response`() = testScope.runTest {
+        every { interruption.isEvaluatingBargeIn } returns true
+        every { interruption.isAccumulatingAfterInterrupt } returns false
+
+        flowController.startListening()
+        advanceUntilIdle()
+
+        flowController.onFinalTranscript("::TIMEOUT::")
+        advanceUntilIdle()
+
+        verify(exactly = 1) { interruption.handleTimeoutDuringEvaluation() }
     }
 }

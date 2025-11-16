@@ -55,6 +55,8 @@ class GeminiLiveSttController(
     private var endTurnJob: Job? = null
     private var sessionTimeoutJob: Job? = null
 
+    private var disconnectJob: Job? = null
+
     private var micSession: MicrophoneSession? = null
 
     @Volatile private var turnEnded = false
@@ -103,6 +105,8 @@ class GeminiLiveSttController(
     @RequiresPermission(Manifest.permission.RECORD_AUDIO)
     override suspend fun start(isAutoListen: Boolean) {
         Log.i("STT_CTRL", "start(autoListen=$isAutoListen)")
+        disconnectJob?.cancel()  // ✅ CANCEL pending disconnect!
+
         if (!ensureConnection()) return
 
         if (micSession == null) {
@@ -447,11 +451,15 @@ class GeminiLiveSttController(
                     Log.d(TAG, "[Controller] No mic session to stop (already null)")
                 }
 
+                // ✅ CANCEL any pending disconnect before starting new one
+                disconnectJob?.cancel()
+
                 // Disconnect WebSocket to stop ping/pong
-                scope.launch {
+                disconnectJob = scope.launch {  // ✅ TRACK the job
                     Log.i(TAG, "[Controller] Disconnecting WebSocket (IDLE mode)")
                     transcriber.disconnect()
-                    delay(100) // Brief delay before next connection
+                    delay(100)
+                    disconnectJob = null  // ✅ Clear when done
                 }
 
                 // Clear state
@@ -466,8 +474,8 @@ class GeminiLiveSttController(
                 speechStartedInCurrentSession = false
                 lastPartialLen = 0
                 lastPartialTimeMs = 0L
-                sessionStartTime = 0L      // ✅ ADDED
-                sessionTimeoutMs = 0L      // ✅ ADDED
+                sessionStartTime = 0L
+                sessionTimeoutMs = 0L
                 Log.d(TAG, "[Controller] All listening states cleared for IDLE mode")
             }
 
@@ -518,6 +526,50 @@ class GeminiLiveSttController(
     fun notifyTtsStopped() {
         lastTtsStopTime = System.currentTimeMillis()
         Log.d(TAG, "[Controller] TTS stopped at ${lastTtsStopTime}, grace period: ${POST_TTS_GRACE_PERIOD_MS}ms")
+    }
+
+    fun resetTurnAfterNoise() {
+        Log.i(TAG, "[Controller] Resetting turn state after VAD noise - continuing to listen")
+
+        // Reset turn state
+        turnEnded = false
+        speechStartedInCurrentSession = false
+        lastPartialLen = 0
+        lastPartialTimeMs = 0L
+
+        // Keep listening active, but clear other flags
+        _isTranscribing.value = false
+        _isHearingSpeech.value = false
+        _isListening.value = true  // ✅ CRITICAL: Keep this TRUE!
+
+        // ✅ Restart timeout with REMAINING time from original session start
+        // But only if we have a valid session timeout set (not disabled by partials/real words)
+        if (sessionStartTime > 0 && sessionTimeoutMs > 0) {
+            val elapsedTime = System.currentTimeMillis() - sessionStartTime
+            val remainingTime = sessionTimeoutMs - elapsedTime
+
+            sessionTimeoutJob?.cancel()
+
+            if (remainingTime > 0) {
+                Log.d(TAG, "[Controller] Restarting session timeout with ${remainingTime}ms remaining")
+                sessionTimeoutJob = scope.launch {
+                    delay(remainingTime)
+                    Log.w(TAG, "[Controller] ⏱️ Session timeout - total time limit reached")
+                    if (_isListening.value && !turnEnded) {
+                        endTurn("SessionTimeout")
+                    }
+                }
+            } else {
+                Log.w(TAG, "[Controller] Session timeout already exceeded, ending turn immediately")
+                endTurn("SessionTimeout")
+            }
+        } else {
+            // No active session timeout (disabled by partials or during interruption)
+            Log.d(TAG, "[Controller] No active session timeout to restart (sessionStartTime=$sessionStartTime, sessionTimeoutMs=$sessionTimeoutMs)")
+        }
+
+        // ✅ Stay in TRANSCRIBING mode - ready for next speech
+        micSession?.switchMode(MicrophoneSession.Mode.TRANSCRIBING)
     }
 
 }

@@ -300,12 +300,19 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
                         Log.i(TAG, "[TTS] Stopped speaking")
                         stt.notifyTtsStopped()
 
+                        // ✅ FIX: Don't interfere if actively listening (e.g., after tap interrupt)
+                        if (isListening.value) {
+                            Log.i(TAG, "[TTS] Keeping current mode (user is actively listening)")
+                            return@collect
+                        }
+
+                        // Only switch to MONITORING if auto-listen is enabled, otherwise IDLE
                         if (Prefs.getAutoListen(appCtx) && shouldAutoListenAfterTts) {
-                            Log.i(TAG, "[TTS] Keeping MONITORING (auto-listen enabled)")
-                            // Already in MONITORING, just keep it
+                            Log.i(TAG, "[TTS] Switching to MONITORING (auto-listen enabled)")
+                            stt.switchMicMode(MicrophoneSession.Mode.MONITORING)
                         } else {
-                            Log.i(TAG, "[TTS] Switching to IDLE (no auto-listen)")  // ✅ FIXED!
-                            stt.switchMicMode(MicrophoneSession.Mode.IDLE)  // ✅ ADD THIS!
+                            Log.i(TAG, "[TTS] Switching to IDLE (no auto-listen)")
+                            stt.switchMicMode(MicrophoneSession.Mode.IDLE)
                         }
                     }
                 }

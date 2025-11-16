@@ -104,15 +104,13 @@ class ConversationFlowController(
         Log.w(TAG, "[ViewModel] stopAll() complete. System is now idle.")
     }
 
-    // ====================================================================
-    // ✅ 1. THIS IS THE FIRST PART OF THE FIX
-    // ====================================================================
+
     fun onFinalTranscript(text: String) {
         // Check for our special timeout signal first.
         if (text == "::TIMEOUT::") {
             Log.i(TAG, "[STT RESULT] Received TIMEOUT signal. Stopping session now.")
 
-            // ✅ FIX: If we're evaluating, flush buffered response (treat timeout as noise)
+            // ✅   If we're evaluating, flush buffered response (treat timeout as noise)
             if (interruption.isEvaluatingBargeIn) {
                 Log.i(TAG, "[TIMEOUT] Evaluation active - treating timeout as noise, flushing buffered response")
                 interruption.handleTimeoutDuringEvaluation()
@@ -162,9 +160,7 @@ class ConversationFlowController(
         }
     }
 
-    // ====================================================================
-    // ✅ 2. THIS IS THE SECOND PART OF THE FIX
-    // ====================================================================
+
     private fun handleEmptyTranscript() {
         Log.w(TAG, "[ViewModel] onFinalTranscript received empty text (VAD noise).")
 
@@ -173,20 +169,14 @@ class ConversationFlowController(
             return
         }
 
-        // ✅ NEW CODE - Just switch to MONITORING and stop
-        Log.i(TAG, "[EMPTY] VAD noise detected - switching to MONITORING (not restarting)")
+        // ✅ FIX: Noise doesn't end the session - reset turn state and keep listening
+        Log.i(TAG, "[EMPTY] VAD noise detected - resetting turn and continuing to listen")
         stateManager.removeLastUserPlaceholderIfEmpty()
 
         val stt = getStt()
         if (stt is GeminiLiveSttController) {
             scope.launch {
-                // Just switch to MONITORING - don't reset turn or restart transcribing
-                stt.switchMicMode(com.example.advancedvoice.core.audio.MicrophoneSession.Mode.MONITORING)
-
-                // Clear listening flags
-                stateManager.setListening(false)
-                stateManager.setHearingSpeech(false)
-                stateManager.setTranscribing(false)
+                stt.resetTurnAfterNoise()  // ✅ This calls the new method!
             }
         }
     }

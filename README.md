@@ -3,7 +3,7 @@
 
 ## 💡 What is AIVoiceChat?
 
-When you have tried OpenAI's "Advanced Voice" or Google's "Gemini Live," you might have noticed that the quality of the answers is not as good as the thinking models Gemini 2.5 Pro and GPT-5, which both have higher thinking capabilities than the current voice models.
+When you have tried OpenAI's "Advanced Voice" or Google's "Gemini Live" before you might have noticed that the quality of the answers is not as good as the thinking models Gemini 2.5 Pro and GPT-5.1, which both have higher thinking capabilities than the current voice models.
 
 The reason for that is that when you use the voice option from these companies, they use a different model that is optimized for low-latency streaming rather than using the long “thinking” mode, which gives better answers but can take up to minutes.
 

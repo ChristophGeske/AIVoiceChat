@@ -26,6 +26,8 @@ import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import okhttp3.OkHttpClient
+import com.example.advancedvoice.feature.conversation.service.TranscriptRefinementService
+
 
 class ConversationViewModel(app: Application) : AndroidViewModel(app) {
 
@@ -47,6 +49,13 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
     private val tts = TtsController(app, viewModelScope)
     private val stateManager = ConversationStateManager(scope = viewModelScope, store = store, tts = tts)
     private val perfTimerHolder = EngineCallbacksFactory.PerfTimerHolder()
+    private val refinementService: TranscriptRefinementService by lazy {
+        TranscriptRefinementService(
+            scope = viewModelScope,
+            geminiKeyProvider = { Prefs.getGeminiKey(appCtx) },
+            stateManager = stateManager
+        )
+    }
 
     @Volatile private var shouldAutoListenAfterTts = false
 
@@ -56,7 +65,14 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
         geminiKeyProvider = { Prefs.getGeminiKey(appCtx) },
         openAiKeyProvider = { Prefs.getOpenAiKey(appCtx) },
         systemPromptProvider = { getEffectiveSystemPrompt() },
-        callbacks = EngineCallbacksFactory.create(stateManager, tts, perfTimerHolder) { interruption }
+        callbacks = EngineCallbacksFactory.create(
+            stateManager = stateManager,
+            tts = tts,
+            perfTimerHolder = perfTimerHolder,
+            getInterruption = { interruption },
+            getRefinementService = { refinementService },
+            getAudioForRefinement = { flowController.getLastAudioForRefinement() }
+        )
     )
 
     private val sttManager: SttManager by lazy {

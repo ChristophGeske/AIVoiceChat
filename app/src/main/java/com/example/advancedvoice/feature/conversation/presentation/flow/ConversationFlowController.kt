@@ -13,6 +13,8 @@ import com.example.advancedvoice.feature.conversation.service.TtsController
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import com.example.advancedvoice.feature.conversation.service.TranscriptRefinementService
+
 
 class ConversationFlowController(
     private val scope: CoroutineScope,
@@ -21,6 +23,8 @@ class ConversationFlowController(
     private val tts: TtsController,
     private val interruption: InterruptionManager,
     private val getStt: () -> SttController?,
+    private var lastAudioSegments: List<ByteArray> = emptyList(),
+    private var lastUserEntryIndex: Int = -1,
     private val getPrefs: PrefsProvider,
     private val onTurnComplete: () -> Unit,
     private val onTapToSpeak: () -> Unit
@@ -188,10 +192,30 @@ class ConversationFlowController(
     }
 
     private fun handleNormalTranscript(input: String) {
-        Log.i(TAG, "[IMMEDIATE-SEND] Sending transcript (len=${input.length})")
-        // autoListenRetryCount = 0 // Can be removed
+        Log.i(TAG, "[IMMEDIATE-SEND] Preparing turn with audio")
         stateManager.replaceLastUser(input)
-        startTurn(input)
+
+        // Get audio segments from STT controller
+        val stt = getStt()
+        val audioSegments = when (stt) {
+            is GeminiLiveSttController -> {
+                val segments = stt.getCollectedAudioSegments()
+                stt.clearCollectedAudio()
+                segments
+            }
+            else -> emptyList()
+        }
+
+        lastAudioSegments = audioSegments
+        lastUserEntryIndex = stateManager.getLastUserEntryIndex()
+
+        if (audioSegments.isNotEmpty()) {
+            Log.i(TAG, "[IMMEDIATE-SEND] Starting turn with ${audioSegments.size} audio segments")
+            startTurnWithAudio(audioSegments, input)
+        } else {
+            Log.w(TAG, "[IMMEDIATE-SEND] No audio segments, falling back to text")
+            startTurn(input)
+        }
     }
 
     private fun startTurn(userText: String) {
@@ -212,6 +236,24 @@ class ConversationFlowController(
         engine.startTurn(userText, model)
     }
 
+    private fun startTurnWithAudio(audioSegments: List<ByteArray>, streamingTranscript: String) {
+        stateManager.setHardStop(false)
+
+        stateManager.setPhase(
+            if (getPrefs.getFasterFirst()) GenerationPhase.GENERATING_FIRST
+            else GenerationPhase.SINGLE_SHOT_GENERATING
+        )
+
+        val model = getPrefs.getSelectedModel()
+        Log.i(TAG, "[ViewModel] startTurnWithAudio(model=$model) segments=${audioSegments.size}")
+        perfTimerHolder = PerfTimer(TAG, "llm").also { it.mark("llm_start") }
+
+        interruption.onTurnStart(System.currentTimeMillis())
+
+        onTurnComplete()
+        engine.startTurnWithAudio(audioSegments, streamingTranscript, model)
+    }
+
     fun startTurnWithExistingHistory() {
         stateManager.setHardStop(false)
 
@@ -220,13 +262,35 @@ class ConversationFlowController(
             else GenerationPhase.SINGLE_SHOT_GENERATING
         )
         val model = getPrefs.getSelectedModel()
-        Log.i(TAG, "[ViewModel] startTurnWithExistingHistory(model=$model)")
-        perfTimerHolder = PerfTimer(TAG, "llm").also { it.mark("llm_start") }
 
-        interruption.onTurnStart(System.currentTimeMillis())
+        // Get combined audio from interruption manager
+        val combinedAudio = interruption.getCombinedAudioSegments()
 
-        onTurnComplete()
-        engine.startTurnWithCurrentHistory(model)
+        if (combinedAudio.isNotEmpty()) {
+            Log.i(TAG, "[ViewModel] startTurnWithExistingHistory using ${combinedAudio.size} combined audio segments")
+            perfTimerHolder = PerfTimer(TAG, "llm").also { it.mark("llm_start") }
+            interruption.onTurnStart(System.currentTimeMillis())
+            onTurnComplete()
+
+            val lastUserText = stateManager.conversation.value
+                .lastOrNull { it.speaker == "You" }
+                ?.sentences?.joinToString(" ") ?: ""
+
+            engine.startTurnWithAudio(combinedAudio, lastUserText, model)
+        } else {
+            Log.i(TAG, "[ViewModel] startTurnWithExistingHistory (text-only)")
+            perfTimerHolder = PerfTimer(TAG, "llm").also { it.mark("llm_start") }
+            interruption.onTurnStart(System.currentTimeMillis())
+            onTurnComplete()
+            engine.startTurnWithCurrentHistory(model)
+        }
+    }
+
+    /**
+     * Get the last audio segments for transcript refinement.
+     */
+    fun getLastAudioForRefinement(): Pair<List<ByteArray>, Int> {
+        return lastAudioSegments to lastUserEntryIndex
     }
 
     fun clearConversation() {

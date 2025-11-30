@@ -146,4 +146,15 @@ class ConversationStateManager(
         val speaking: Boolean,
         val phase: GenerationPhase
     )
+
+    fun refineUserTranscript(index: Int, refinedText: String) {
+        Log.i(TAG, "[REFINEMENT] Updating entry $index with refined transcript (len=${refinedText.length})")
+        store.updateUserTranscript(index, refinedText, isRefined = true)
+    }
+
+    fun setUserAudioSegments(index: Int, segments: List<ByteArray>) {
+        store.setUserAudioSegments(index, segments)
+    }
+
+    fun getLastUserEntryIndex(): Int = store.getLastUserEntryIndex()
 }

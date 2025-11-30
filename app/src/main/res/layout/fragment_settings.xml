@@ -319,6 +319,45 @@
                     android:textSize="12sp" />
             </LinearLayout>
 
+            <!-- START: SPEECH RECOGNITION BLOCK -->
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="24dp"
+                android:text="Speech Recognition Engine"
+                android:textAppearance="?attr/textAppearanceTitleMedium"
+                android:textColor="#FFFFFF" />
+
+            <RadioGroup
+                android:id="@+id/sttSystemRadioGroup"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp">
+
+                <RadioButton
+                    android:id="@+id/radioSttStandard"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="@string/stt_standard"
+                    android:textColor="#FFFFFF" />
+
+                <RadioButton
+                    android:id="@+id/radioSttGeminiLive"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="@string/stt_gemini_live"
+                    android:textColor="#FFFFFF" />
+
+                <RadioButton
+                    android:id="@+id/radioSttGeminiBatch"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="@string/stt_gemini_batch"
+                    android:textColor="#FFFFFF" />
+
+            </RadioGroup>
+            <!-- END: SPEECH RECOGNITION BLOCK -->
+
             <!-- TTS Settings Link -->
             <TextView
                 android:layout_width="wrap_content"

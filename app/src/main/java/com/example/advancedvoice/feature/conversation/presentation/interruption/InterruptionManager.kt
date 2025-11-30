@@ -47,6 +47,8 @@ class InterruptionManager(
     @Volatile private var lastRestartTime = 0L
     private var interruptAccumulationJob: Job? = null
 
+    private val accumulatedAudioSegments = mutableListOf<ByteArray>()
+
     fun initialize() {
         Log.i(TAG, "═══════════════════════════════════")
         Log.i(TAG, "InterruptionManager INITIALIZED")
@@ -197,6 +199,16 @@ class InterruptionManager(
         interruptedDuringEvaluation = false
 
         Log.i(TAG, "[SPEECH] 🗣️ Real speech confirmed → discarding buffered response, entering accumulation")
+
+        // NEW: Collect audio from STT controller
+        val stt = getStt()
+        if (stt is GeminiLiveSttController) {
+            val segments = stt.getCollectedAudioSegments()
+            if (segments.isNotEmpty()) {
+                accumulatedAudioSegments.addAll(segments)
+                Log.i(TAG, "[SPEECH] Collected ${segments.size} audio segments for accumulation (total: ${accumulatedAudioSegments.size})")
+            }
+        }
 
         // ✅ FIX: Properly clean up old assistant response
         val hadBufferedResponse = assistantHoldBuffer != null
@@ -433,14 +445,34 @@ class InterruptionManager(
         }
 
         if (accumulatedText.isNotEmpty()) {
-            Log.i(TAG, "[ACCUMULATION] Restarting turn with accumulated text")
+            Log.i(TAG, "[ACCUMULATION] Restarting turn with accumulated text and ${accumulatedAudioSegments.size} audio segments")
             lastRestartTime = now
+
+            // Collect any remaining audio
+            val stt = getStt()
+            if (stt is GeminiLiveSttController) {
+                val finalSegments = stt.getCollectedAudioSegments()
+                if (finalSegments.isNotEmpty()) {
+                    accumulatedAudioSegments.addAll(finalSegments)
+                    stt.clearCollectedAudio()
+                }
+            }
+
             engine.replaceLastUserMessage(accumulatedText)
             startTurnWithExistingHistory()
         } else {
             Log.w(TAG, "[ACCUMULATION] No text accumulated, cleaning up")
             stateManager.removeLastUserPlaceholderIfEmpty()
         }
+    }
+
+    /**
+     * Get all accumulated audio segments for interruption handling.
+     */
+    fun getCombinedAudioSegments(): List<ByteArray> {
+        val segments = accumulatedAudioSegments.toList()
+        Log.d(TAG, "[AUDIO] Returning ${segments.size} combined audio segments")
+        return segments
     }
 
     fun combineTranscript(newTranscript: String): String {
@@ -468,6 +500,7 @@ class InterruptionManager(
         assistantHoldBuffer = null
         assistantSourcesBuffer = null
         interruptedDuringEvaluation = false
+        accumulatedAudioSegments.clear()  //   Clear audio
         scope.launch {
             stateManager.setListening(false)
             stateManager.setHearingSpeech(false)

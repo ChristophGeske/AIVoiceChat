@@ -41,6 +41,11 @@
     <string name="status_thinking">Assistant is thinking...</string>
     <string name="status_ready">Tap to Speak</string>
 
+    <!-- Speech Recognition Engine -->
+    <string name="stt_standard">Standard (On-device)</string>
+    <string name="stt_gemini_live">Gemini Live (Real-time, fastest)</string>
+    <string name="stt_gemini_batch">Gemini Batch (Accurate, ~4s delay)</string>
+
     <!-- Buttons -->
     <string name="new_recording">New recording</string>
     <string name="stop_conversation">Stop</string>

@@ -87,4 +87,28 @@ class ConversationStore {
             publish()
         }
     }
+
+    fun updateUserTranscript(index: Int, newText: String, isRefined: Boolean = false) {
+        val entry = list.getOrNull(index) ?: return
+        if (entry.speaker != "You") return
+
+        list[index] = entry.copy(
+            sentences = listOf(newText),
+            streamingText = null,
+            isRefinedTranscript = isRefined
+        )
+        publish()
+    }
+
+    fun setUserAudioSegments(index: Int, segments: List<ByteArray>) {
+        val entry = list.getOrNull(index) ?: return
+        if (entry.speaker != "You") return
+
+        list[index] = entry.copy(audioSegments = segments)
+        publish()
+    }
+
+    fun getLastUserEntryIndex(): Int {
+        return list.indexOfLast { it.speaker == "You" }
+    }
 }

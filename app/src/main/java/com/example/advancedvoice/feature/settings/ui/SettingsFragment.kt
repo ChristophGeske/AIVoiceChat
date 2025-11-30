@@ -9,12 +9,14 @@ import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
 import android.widget.RadioButton
+import android.widget.RadioGroup
 import android.widget.TextView
 import android.widget.Toast
 import androidx.core.widget.doAfterTextChanged
 import androidx.fragment.app.Fragment
 import com.example.advancedvoice.R
 import com.example.advancedvoice.core.prefs.Prefs
+import com.google.android.material.switchmaterial.SwitchMaterial
 import com.google.android.material.textfield.TextInputEditText
 
 class SettingsFragment : Fragment() {
@@ -24,14 +26,16 @@ class SettingsFragment : Fragment() {
     }
 
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
+        super.onViewCreated(view, savedInstanceState)
         setupApiKeySection(view)
         setupModelRadios(view)
-        setupPromptSection(view)
         setupMaxSentences(view)
         setupListenSeconds(view)
         setupAutoListen(view)
         setupFasterFirst(view)
+        setupSttSystem(view) // Added
         setupTtsSettingsLink(view)
+        setupPromptSection(view)
     }
 
     private fun setupApiKeySection(root: View) {
@@ -118,6 +122,88 @@ class SettingsFragment : Fragment() {
         Toast.makeText(requireContext(), "Model set to $model${effort?.let { " ($it)" } ?: ""}", Toast.LENGTH_SHORT).show()
     }
 
+    private fun setupMaxSentences(root: View) {
+        val input = root.findViewById<TextInputEditText>(R.id.maxSentencesInput)
+        input.setText(Prefs.getMaxSentences(requireContext()).toString(), TextView.BufferType.EDITABLE)
+        input.doAfterTextChanged {
+            it?.toString()?.trim()?.toIntOrNull()?.let { n ->
+                Prefs.setMaxSentences(requireContext(), n)
+            }
+        }
+    }
+
+    private fun setupListenSeconds(root: View) {
+        val input = root.findViewById<TextInputEditText>(R.id.listenSecondsInput)
+        input.setText(Prefs.getListenSeconds(requireContext()).toString(), TextView.BufferType.EDITABLE)
+        input.doAfterTextChanged {
+            it?.toString()?.trim()?.toIntOrNull()?.let { n ->
+                Prefs.setListenSeconds(requireContext(), n)
+            }
+        }
+    }
+
+    private fun setupAutoListen(root: View) {
+        val sw = root.findViewById<SwitchMaterial>(R.id.switchAutoListen)
+        sw.isChecked = Prefs.getAutoListen(requireContext())
+        sw.setOnCheckedChangeListener { _, isChecked ->
+            Prefs.setAutoListen(requireContext(), isChecked)
+            Toast.makeText(
+                requireContext(),
+                if (isChecked) "Auto-listen enabled" else "Auto-listen disabled",
+                Toast.LENGTH_SHORT
+            ).show()
+        }
+    }
+
+    private fun setupFasterFirst(root: View) {
+        val sw = root.findViewById<SwitchMaterial>(R.id.switchFasterFirst)
+        val current = Prefs.getFasterFirst(requireContext())
+        sw.isChecked = current
+        val warning = root.findViewById<TextView>(R.id.systemPromptWarning)
+        warning.visibility = if (current) View.VISIBLE else View.GONE
+        sw.setOnCheckedChangeListener { _, isChecked ->
+            Prefs.setFasterFirst(requireContext(), isChecked)
+            warning.visibility = if (isChecked) View.VISIBLE else View.GONE
+        }
+    }
+
+    private fun setupSttSystem(root: View) {
+        val radioGroup = root.findViewById<RadioGroup>(R.id.sttSystemRadioGroup)
+        val currentSystem = Prefs.getSttSystem(requireContext())
+
+        when (currentSystem) {
+            Prefs.STT_SYSTEM_STANDARD -> radioGroup.check(R.id.radioSttStandard)
+            Prefs.STT_SYSTEM_GEMINI_LIVE -> radioGroup.check(R.id.radioSttGeminiLive)
+            Prefs.STT_SYSTEM_GEMINI_BATCH -> radioGroup.check(R.id.radioSttGeminiBatch)
+        }
+
+        radioGroup.setOnCheckedChangeListener { _, checkedId ->
+            val newSystem = when (checkedId) {
+                R.id.radioSttStandard -> Prefs.STT_SYSTEM_STANDARD
+                R.id.radioSttGeminiLive -> Prefs.STT_SYSTEM_GEMINI_LIVE
+                R.id.radioSttGeminiBatch -> Prefs.STT_SYSTEM_GEMINI_BATCH
+                else -> Prefs.STT_SYSTEM_GEMINI_LIVE // Default fallback
+            }
+            Prefs.setSttSystem(requireContext(), newSystem)
+            Toast.makeText(requireContext(), "STT System set to: $newSystem", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private fun setupTtsSettingsLink(root: View) {
+        val link = root.findViewById<TextView>(R.id.ttsSettingsLink)
+        link.setOnClickListener {
+            try {
+                startActivity(Intent("com.android.settings.TTS_SETTINGS").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+            } catch (_: Exception) {
+                try {
+                    startActivity(Intent(Settings.ACTION_LOCALE_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+                } catch (_: Exception) {
+                    startActivity(Intent(Settings.ACTION_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+                }
+            }
+        }
+    }
+
     private fun setupPromptSection(root: View) {
         val systemPrompt = root.findViewById<TextInputEditText>(R.id.systemPromptInput)
         val resetSystem = root.findViewById<View>(R.id.resetSystemPromptButton)
@@ -160,66 +246,6 @@ class SettingsFragment : Fragment() {
             add("IMPORTANT: Your response MUST be AT MOST $maxSent sentences long, unless the user explicitly asks for a different length.")
             if (faster) add("Begin with a complete first sentence promptly, then continue.")
         }.joinToString(" ")
-    }
-
-    private fun setupMaxSentences(root: View) {
-        val input = root.findViewById<TextInputEditText>(R.id.maxSentencesInput)
-        input.setText(Prefs.getMaxSentences(requireContext()).toString(), TextView.BufferType.EDITABLE)
-        input.doAfterTextChanged {
-            it?.toString()?.trim()?.toIntOrNull()?.let { n ->
-                Prefs.setMaxSentences(requireContext(), n)
-            }
-        }
-    }
-
-    private fun setupListenSeconds(root: View) {
-        val input = root.findViewById<TextInputEditText>(R.id.listenSecondsInput)
-        input.setText(Prefs.getListenSeconds(requireContext()).toString(), TextView.BufferType.EDITABLE)
-        input.doAfterTextChanged {
-            it?.toString()?.trim()?.toIntOrNull()?.let { n ->
-                Prefs.setListenSeconds(requireContext(), n)
-            }
-        }
-    }
-
-    private fun setupAutoListen(root: View) {
-        val sw = root.findViewById<com.google.android.material.switchmaterial.SwitchMaterial>(R.id.switchAutoListen)
-        sw.isChecked = Prefs.getAutoListen(requireContext())
-        sw.setOnCheckedChangeListener { _, isChecked ->
-            Prefs.setAutoListen(requireContext(), isChecked)
-            Toast.makeText(
-                requireContext(),
-                if (isChecked) "Auto-listen enabled" else "Auto-listen disabled",
-                Toast.LENGTH_SHORT
-            ).show()
-        }
-    }
-
-    private fun setupFasterFirst(root: View) {
-        val sw = root.findViewById<com.google.android.material.switchmaterial.SwitchMaterial>(R.id.switchFasterFirst)
-        val current = Prefs.getFasterFirst(requireContext())
-        sw.isChecked = current
-        val warning = root.findViewById<TextView>(R.id.systemPromptWarning)
-        warning.visibility = if (current) View.VISIBLE else View.GONE
-        sw.setOnCheckedChangeListener { _, isChecked ->
-            Prefs.setFasterFirst(requireContext(), isChecked)
-            warning.visibility = if (isChecked) View.VISIBLE else View.GONE
-        }
-    }
-
-    private fun setupTtsSettingsLink(root: View) {
-        val link = root.findViewById<TextView>(R.id.ttsSettingsLink)
-        link.setOnClickListener {
-            try {
-                startActivity(Intent("com.android.settings.TTS_SETTINGS").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
-            } catch (_: Exception) {
-                try {
-                    startActivity(Intent(Settings.ACTION_LOCALE_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
-                } catch (_: Exception) {
-                    startActivity(Intent(Settings.ACTION_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
-                }
-            }
-        }
     }
 
     private fun updateModelOptionsVisibility(root: View) {

@@ -207,6 +207,8 @@ dependencies {
 
     // Coroutines Test for instrumented tests
     androidTestImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:$coroutinesVersion")
+
+    implementation("com.google.ai.client.generativeai:generativeai:0.9.0")
 }
 
 // ============================================

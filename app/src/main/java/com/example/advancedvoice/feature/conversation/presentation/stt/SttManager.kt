@@ -7,9 +7,10 @@ import com.example.advancedvoice.core.prefs.Prefs
 import com.example.advancedvoice.data.gemini_live.GeminiLiveClient
 import com.example.advancedvoice.data.gemini_live.GeminiLiveTranscriber
 import com.example.advancedvoice.feature.conversation.presentation.state.ConversationStateManager
+import com.example.advancedvoice.feature.conversation.service.GeminiBatchSttController
 import com.example.advancedvoice.feature.conversation.service.GeminiLiveSttController
 import com.example.advancedvoice.feature.conversation.service.SttController
-import com.example.advancedvoice.feature.conversation.service.TtsController  // ✅ ADD THIS IMPORT
+import com.example.advancedvoice.feature.conversation.service.TtsController
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.collectLatest
@@ -19,42 +20,55 @@ class SttManager(
     private val app: Application,
     private val scope: CoroutineScope,
     private val stateManager: ConversationStateManager,
-    private val tts: TtsController,  // ✅ ADD THIS PARAMETER
+    private val tts: TtsController,
     private val onFinalTranscript: (String) -> Unit
 ) {
     private companion object { const val TAG = LoggerConfig.TAG_VM }
 
     private var stt: SttController? = null
     private var collectorJobs = mutableListOf<Job>()
+    private var currentSttSystem: String? = null
 
     fun getStt(): SttController? = stt
 
     fun setupFromPreferences() {
+        val newSttSystem = Prefs.getSttSystem(app)
         val geminiKey = Prefs.getGeminiKey(app)
 
-        if (geminiKey.isBlank()) {
+        // If the system hasn't changed and an STT controller already exists, do nothing.
+        if (newSttSystem == currentSttSystem && stt != null) {
+            Log.d(TAG, "[STT Manager] STT system '$newSttSystem' already configured.")
+            return
+        }
+
+        // Release the old controller if it exists
+        stt?.release()
+        stt = null
+        currentSttSystem = newSttSystem
+
+        if (geminiKey.isBlank() && (newSttSystem == Prefs.STT_SYSTEM_GEMINI_LIVE || newSttSystem == Prefs.STT_SYSTEM_GEMINI_BATCH)) {
             Log.w(TAG, "[STT Manager] No Gemini API key - STT will not be available")
-            stt?.release()
-            stt = null
             return
         }
 
-        if (stt != null) {
-            Log.d(TAG, "[STT Manager] GeminiLive STT already configured")
-            return
+        Log.i(TAG, "[STT Manager] Configuring STT system: $newSttSystem")
+
+        stt = when (newSttSystem) {
+            Prefs.STT_SYSTEM_GEMINI_LIVE -> createGeminiLiveStt(geminiKey)
+            Prefs.STT_SYSTEM_GEMINI_BATCH -> createGeminiBatchStt(geminiKey)
+            else -> {
+                Log.w(TAG, "[STT Manager] 'Standard' STT not implemented yet.")
+                null
+            }
         }
 
-        Log.i(TAG, "[STT Manager] Configuring GeminiLive STT")
-        stt = createGeminiLiveStt(geminiKey)
         rewireCollectors()
     }
 
     private fun createGeminiLiveStt(geminiKey: String): GeminiLiveSttController {
         val liveModel = "models/gemini-2.5-flash-native-audio-preview-09-2025"
-
         val client = GeminiLiveClient(scope = scope)
         val transcriber = GeminiLiveTranscriber(scope = scope, client = client)
-
         return GeminiLiveSttController(
             scope = scope,
             app = app,
@@ -62,7 +76,15 @@ class SttManager(
             transcriber = transcriber,
             apiKey = geminiKey,
             model = liveModel,
-            tts = tts  // ✅ ADD THIS PARAMETER
+            tts = tts
+        )
+    }
+
+    private fun createGeminiBatchStt(geminiKey: String): GeminiBatchSttController {
+        return GeminiBatchSttController(
+            scope = scope,
+            app = app,
+            apiKey = geminiKey
         )
     }
 
@@ -81,6 +103,15 @@ class SttManager(
                     stateManager.updateLastUserStreamingText(partialText)
                 }
             })
+        } else {
+            // For batch, clear streaming text when transcribing starts
+            collectorJobs.add(scope.launch {
+                current.isTranscribing.collectLatest { isTranscribing ->
+                    if (isTranscribing) {
+                        stateManager.updateLastUserStreamingText("Transcribing...")
+                    }
+                }
+            })
         }
 
         collectorJobs.add(scope.launch { current.errors.collectLatest { stateManager.addError(it) } })
@@ -90,11 +121,8 @@ class SttManager(
     }
 
     fun release() {
-        val stt = getStt()
-        if (stt is GeminiLiveSttController) {
-            scope.launch {
-                stt.release()  // ✅ This disconnects WebSocket
-            }
-        }
+        stt?.release()
+        stt = null
+        currentSttSystem = null
     }
 }

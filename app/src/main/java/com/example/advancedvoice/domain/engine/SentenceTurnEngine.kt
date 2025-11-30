@@ -27,6 +27,12 @@ class SentenceTurnEngine(
 
     data class Msg(val role: String, val text: String)
 
+    // Represents audio input for current turn
+    data class AudioInput(
+        val segments: List<ByteArray>,
+        val streamingTranscript: String  // What Gemini Live transcribed (for display)
+    )
+
     data class Callbacks(
         val onStreamDelta: (String) -> Unit,
         val onStreamSentence: (String) -> Unit,
@@ -39,6 +45,8 @@ class SentenceTurnEngine(
     )
 
     private val history = ArrayList<Msg>()
+    private var currentAudioInput: AudioInput? = null  //  Audio for current turn
+
     private var maxSentencesPerTurn = 4
     private var fasterFirst: Boolean = false
     private var currentStrategy: IGenerationStrategy? = null
@@ -147,6 +155,62 @@ class SentenceTurnEngine(
             maxSentences = maxSentencesPerTurn,
             callbacks = wrapCallbacks()
         )
+    }
+
+    /**
+     * Start a turn with audio input instead of text.
+     * The audio will be sent directly to the LLM.
+     *
+     * @param audioSegments WAV audio bytes for the current turn
+     * @param streamingTranscript What Gemini Live transcribed (for UI display)
+     * @param modelName Model to use
+     */
+    fun startTurnWithAudio(
+        audioSegments: List<ByteArray>,
+        streamingTranscript: String,
+        modelName: String
+    ) {
+        if (audioSegments.isEmpty()) {
+            Log.w(TAG, "startTurnWithAudio called with no audio")
+            return
+        }
+
+        if (active) {
+            Log.w(TAG, "startTurnWithAudio called while already active - aborting previous turn")
+            abort(silent = true)
+        }
+
+        active = true
+        currentAudioInput = AudioInput(audioSegments, streamingTranscript)
+
+        // Add streaming transcript to history for display purposes
+        // (will be refined later)
+        addUser(streamingTranscript)
+
+        Log.i(TAG, "=== TURN START (AUDIO) === model=$modelName segments=${audioSegments.size} transcript='${streamingTranscript.take(50)}...'")
+
+        currentStrategy = createStrategy()
+        currentStrategy?.executeWithAudio(
+            scope = uiScope,
+            history = ArrayList(history.dropLast(1)),  // History without current turn (sent as audio)
+            audioInput = currentAudioInput!!,
+            modelName = modelName,
+            systemPrompt = systemPromptProvider(),
+            maxSentences = maxSentencesPerTurn,
+            callbacks = wrapCallbacks()
+        )
+    }
+
+    /**
+     * Get the current audio input (for refinement).
+     */
+    fun getCurrentAudioInput(): AudioInput? = currentAudioInput
+
+    /**
+     * Clear the current audio input.
+     */
+    fun clearCurrentAudioInput() {
+        currentAudioInput = null
     }
 
     fun clearHistory() {

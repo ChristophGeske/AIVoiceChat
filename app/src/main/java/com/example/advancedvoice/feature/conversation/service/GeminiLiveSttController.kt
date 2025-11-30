@@ -59,6 +59,8 @@ class GeminiLiveSttController(
 
     private var micSession: MicrophoneSession? = null
 
+    private val collectedAudioSegments = mutableListOf<ByteArray>()
+
     @Volatile private var turnEnded = false
     @Volatile private var speechStartedInCurrentSession = false
     @Volatile private var lastTtsStopTime = 0L
@@ -304,6 +306,9 @@ class GeminiLiveSttController(
                                 Log.w(TAG, "[VAD] Ignoring orphaned SpeechEnd (no SpeechStart and no ASR partials)")
                                 return@collect
                             }
+
+                            //  Complete the audio segment when speech ends
+                            completeCurrentAudioSegment()
 
                             endTurnJob?.cancel()
                             endTurnJob = scope.launch {
@@ -563,5 +568,41 @@ class GeminiLiveSttController(
         // ✅ Stay in TRANSCRIBING mode - ready for next speech
         micSession?.switchMode(MicrophoneSession.Mode.TRANSCRIBING)
     }
+
+    /**
+     * Complete the current audio segment and store it.
+     * Called when speech ends.
+     */
+    fun completeCurrentAudioSegment(): ByteArray? {
+        val segment = micSession?.completeAudioSegment()
+        if (segment != null) {
+            collectedAudioSegments.add(segment)
+            Log.i(TAG, "Audio segment completed (${segment.size} bytes), total segments: ${collectedAudioSegments.size}")
+        }
+        return segment
+    }
+
+    /**
+     * Get all collected audio segments for LLM processing.
+     */
+    fun getCollectedAudioSegments(): List<ByteArray> {
+        val segments = collectedAudioSegments.toList()
+        Log.d(TAG, "Returning ${segments.size} audio segments")
+        return segments
+    }
+
+    /**
+     * Clear all collected audio segments.
+     */
+    fun clearCollectedAudio() {
+        collectedAudioSegments.clear()
+        micSession?.clearLlmAudioBuffer()
+        Log.d(TAG, "Collected audio cleared")
+    }
+
+    /**
+     * Get current audio as WAV without completing the segment.
+     */
+    fun getCurrentAudioAsWav(): ByteArray? = micSession?.getAllAudioAsWav()
 
 }

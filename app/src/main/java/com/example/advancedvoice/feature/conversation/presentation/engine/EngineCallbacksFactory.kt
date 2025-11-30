@@ -10,6 +10,7 @@ import com.example.advancedvoice.feature.conversation.presentation.GenerationPha
 import com.example.advancedvoice.feature.conversation.presentation.interruption.InterruptionManager
 import com.example.advancedvoice.feature.conversation.presentation.state.ConversationStateManager
 import com.example.advancedvoice.feature.conversation.service.TtsController
+import com.example.advancedvoice.feature.conversation.service.TranscriptRefinementService
 
 object EngineCallbacksFactory {
     private const val TAG = LoggerConfig.TAG_VM
@@ -19,7 +20,9 @@ object EngineCallbacksFactory {
         stateManager: ConversationStateManager,
         tts: TtsController,
         perfTimerHolder: PerfTimerHolder,
-        getInterruption: () -> InterruptionManager
+        getInterruption: () -> InterruptionManager,
+        getRefinementService: () -> TranscriptRefinementService? = { null },  // NEW
+        getAudioForRefinement: () -> Pair<List<ByteArray>, Int> = { emptyList<ByteArray>() to -1 }  // NEW
     ): SentenceTurnEngine.Callbacks {
         return SentenceTurnEngine.Callbacks(
             onStreamDelta = {},
@@ -58,6 +61,18 @@ object EngineCallbacksFactory {
                     stateManager.addAssistant(listOf(text))
                     tts.queue(text)
                     Log.d(TAG, "[ENGINE_CB] Added and queued first sentence.")
+
+                    // NEW: Trigger transcript refinement in background
+                    val refinementService = getRefinementService()
+                    if (refinementService != null) {
+                        val (audioSegments, userIndex) = getAudioForRefinement()
+                        if (audioSegments.isNotEmpty() && userIndex >= 0) {
+                            val streamingTranscript = stateManager.conversation.value
+                                .getOrNull(userIndex)?.sentences?.joinToString(" ") ?: ""
+                            Log.i(TAG, "[ENGINE_CB] Starting background transcript refinement")
+                            refinementService.startRefinement(audioSegments, userIndex, streamingTranscript)
+                        }
+                    }
                 } else {
                     Log.w(TAG_ENGINE, "[CALLBACK] ⚠️ Duplicate first sentence, skipping")
                     Log.w(TAG, "[ENGINE_CB] First sentence already exists, skipping duplicate")

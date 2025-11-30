@@ -11,6 +11,7 @@ import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 import java.util.concurrent.ConcurrentLinkedQueue
+import com.example.advancedvoice.core.audio.AudioSegmentBuffer
 
 class MicrophoneSession(
     private val scope: CoroutineScope,
@@ -36,6 +37,8 @@ class MicrophoneSession(
     private var eventsJob: Job? = null
 
     private val audioBuffer = ConcurrentLinkedQueue<ByteArray>()
+
+    private val llmAudioBuffer = AudioSegmentBuffer()
 
     enum class Mode { TRANSCRIBING, MONITORING, IDLE }
 
@@ -73,8 +76,14 @@ class MicrophoneSession(
         audioJob = scope.launch {
             vad?.audio?.collect { frame ->
                 when (currentMode) {
-                    Mode.TRANSCRIBING -> client.sendPcm16Le(frame)
-                    Mode.MONITORING -> bufferAudio(frame)
+                    Mode.TRANSCRIBING -> {
+                        client.sendPcm16Le(frame)
+                        llmAudioBuffer.addFrame(frame)  // NEW: Also buffer for LLM
+                    }
+                    Mode.MONITORING -> {
+                        bufferAudio(frame)
+                        llmAudioBuffer.addFrame(frame)  // NEW: Also buffer for LLM
+                    }
                     Mode.IDLE -> { /* discard */ }
                 }
             }
@@ -183,6 +192,39 @@ class MicrophoneSession(
         }
     }
 
+    /**
+     * Complete the current audio segment and return it as WAV bytes.
+     * Used when speech ends to get audio for LLM.
+     */
+    fun completeAudioSegment(): ByteArray? {
+        val wav = llmAudioBuffer.completeCurrentSegment()
+        Log.i(TAG, "Completed audio segment: ${wav?.size ?: 0} bytes")
+        return wav
+    }
+
+    /**
+     * Get all collected audio segments.
+     */
+    fun getAudioSegments(): List<ByteArray> = llmAudioBuffer.getCompletedSegments()
+
+    /**
+     * Get all audio (completed + current) as single WAV.
+     */
+    fun getAllAudioAsWav(): ByteArray? = llmAudioBuffer.getAllAudioAsWav()
+
+    /**
+     * Clear the LLM audio buffer.
+     */
+    fun clearLlmAudioBuffer() {
+        llmAudioBuffer.clear()
+        Log.d(TAG, "LLM audio buffer cleared")
+    }
+
+    /**
+     * Check if there's audio for LLM.
+     */
+    fun hasLlmAudio(): Boolean = llmAudioBuffer.hasAudio()
+
     suspend fun stop() {
         Log.i(TAG, "Stopping microphone session")
         cleanup()
@@ -194,6 +236,7 @@ class MicrophoneSession(
         try { vad?.stop() } catch (_: Throwable) {}
         vad = null
         audioBuffer.clear()
+        llmAudioBuffer.clear()  // Clear LLM buffer
         currentMode = Mode.IDLE
         _currentVadMode.value = Mode.IDLE
         _isActive.value = false

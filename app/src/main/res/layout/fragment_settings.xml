@@ -26,7 +26,18 @@
             android:padding="14dp"
             android:paddingBottom="100dp">
 
-            <!-- API keys -->
+            <!-- ════════════════════════════════════════════════════════════ -->
+            <!-- API KEYS SECTION -->
+            <!-- ════════════════════════════════════════════════════════════ -->
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginBottom="8dp"
+                android:text="🔑 API Keys"
+                android:textColor="#FFFFFF"
+                android:textSize="16sp"
+                android:textStyle="bold" />
+
             <LinearLayout
                 android:id="@+id/apiKeysGroup"
                 android:layout_width="match_parent"
@@ -72,7 +83,33 @@
                 </com.google.android.material.textfield.TextInputLayout>
             </LinearLayout>
 
-            <!-- Models -->
+            <!-- Divider -->
+            <View
+                android:layout_width="match_parent"
+                android:layout_height="1dp"
+                android:layout_marginVertical="8dp"
+                android:background="#2A2D32" />
+
+            <!-- ════════════════════════════════════════════════════════════ -->
+            <!-- MODEL SELECTION SECTION -->
+            <!-- ════════════════════════════════════════════════════════════ -->
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginBottom="8dp"
+                android:text="🤖 AI Model"
+                android:textColor="#FFFFFF"
+                android:textSize="16sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginBottom="12dp"
+                android:text="Select the model that will understand your voice and generate responses."
+                android:textColor="#B0BEC5"
+                android:textSize="12sp" />
+
             <LinearLayout
                 android:id="@+id/modelsContainer"
                 android:layout_width="match_parent"
@@ -104,15 +141,15 @@
                         android:textColor="#FFFFFF" />
                 </LinearLayout>
 
-                <!-- GPT‑5 Mini Section -->
+                <!-- GPT-5 Mini Section -->
                 <TextView
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:layout_marginTop="16dp"
                     android:text="GPT-5 Mini"
                     android:textColor="#FFFFFF"
-                    android:textStyle="bold"
-                    android:textSize="14sp" />
+                    android:textSize="14sp"
+                    android:textStyle="bold" />
 
                 <TextView
                     android:layout_width="match_parent"
@@ -146,15 +183,15 @@
                         android:textColor="#FFFFFF" />
                 </LinearLayout>
 
-                <!-- GPT‑5.1 Section -->
+                <!-- GPT-5.1 Section -->
                 <TextView
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:layout_marginTop="16dp"
                     android:text="GPT-5.1"
                     android:textColor="#FFFFFF"
-                    android:textStyle="bold"
-                    android:textSize="14sp" />
+                    android:textSize="14sp"
+                    android:textStyle="bold" />
 
                 <TextView
                     android:layout_width="match_parent"
@@ -198,6 +235,25 @@
                 </LinearLayout>
             </LinearLayout>
 
+            <!-- Divider -->
+            <View
+                android:layout_width="match_parent"
+                android:layout_height="1dp"
+                android:layout_marginVertical="8dp"
+                android:background="#2A2D32" />
+
+            <!-- ════════════════════════════════════════════════════════════ -->
+            <!-- RESPONSE SETTINGS SECTION -->
+            <!-- ════════════════════════════════════════════════════════════ -->
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginBottom="8dp"
+                android:text="💬 Response Settings"
+                android:textColor="#FFFFFF"
+                android:textSize="16sp"
+                android:textStyle="bold" />
+
             <!-- Max sentences -->
             <LinearLayout
                 android:id="@+id/maxSentencesGroup"
@@ -228,78 +284,13 @@
                 </com.google.android.material.textfield.TextInputLayout>
             </LinearLayout>
 
-            <!-- Listening time -->
-            <LinearLayout
-                android:id="@+id/listenSecondsGroup"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginBottom="8dp"
-                android:orientation="vertical">
-
-                <TextView
-                    android:id="@+id/listenSecondsLabel"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:text="Listening time (seconds)"
-                    android:textColor="#FFFFFF" />
-
-                <com.google.android.material.textfield.TextInputLayout
-                    style="@style/Widget.MaterialComponents.TextInputLayout.OutlinedBox"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:hint="e.g., 3, 10, 30">
-
-                    <com.google.android.material.textfield.TextInputEditText
-                        android:id="@+id/listenSecondsInput"
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:inputType="number"
-                        android:maxLength="3" />
-                </com.google.android.material.textfield.TextInputLayout>
-
-                <TextView
-                    android:id="@+id/listenSecondsDesc"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="4dp"
-                    android:text="Controls: (1) How long to listen after pressing 'Tap to Speak', and (2) Delay before auto-listening after assistant finishes speaking (if auto-listen is enabled)."
-                    android:textColor="#B0BEC5"
-                    android:textSize="12sp" />
-            </LinearLayout>
-
-            <!-- AUTO-LISTEN TOGGLE -->
-            <LinearLayout
-                android:id="@+id/autoListenGroup"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="12dp"
-                android:layout_marginBottom="12dp"
-                android:orientation="vertical">
-
-                <com.google.android.material.switchmaterial.SwitchMaterial
-                    android:id="@+id/switchAutoListen"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:text="Auto-listen after response"
-                    android:textColor="#FFFFFF" />
-
-                <TextView
-                    android:id="@+id/autoListenDesc"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="4dp"
-                    android:text="Automatically start listening again after the assistant finishes speaking. The delay is controlled by 'Listening time' setting above."
-                    android:textColor="#B0BEC5"
-                    android:textSize="12sp" />
-            </LinearLayout>
-
             <!-- Faster First -->
             <LinearLayout
                 android:id="@+id/fasterFirstGroup"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:layout_marginTop="12dp"
                 android:layout_marginBottom="12dp"
+                android:layout_marginTop="12dp"
                 android:orientation="vertical">
 
                 <com.google.android.material.switchmaterial.SwitchMaterial
@@ -319,53 +310,134 @@
                     android:textSize="12sp" />
             </LinearLayout>
 
-            <!-- START: SPEECH RECOGNITION BLOCK -->
-            <TextView
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="24dp"
-                android:text="Speech Recognition Engine"
-                android:textAppearance="?attr/textAppearanceTitleMedium"
-                android:textColor="#FFFFFF" />
+            <!-- Divider -->
+            <View
+                android:layout_width="match_parent"
+                android:layout_height="1dp"
+                android:layout_marginVertical="8dp"
+                android:background="#2A2D32" />
 
-            <RadioGroup
-                android:id="@+id/sttSystemRadioGroup"
+            <!-- ════════════════════════════════════════════════════════════ -->
+            <!-- LISTENING SETTINGS SECTION -->
+            <!-- ════════════════════════════════════════════════════════════ -->
+            <TextView
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:layout_marginTop="8dp">
+                android:layout_marginBottom="8dp"
+                android:text="🎤 Listening Settings"
+                android:textColor="#FFFFFF"
+                android:textSize="16sp"
+                android:textStyle="bold" />
 
-                <RadioButton
-                    android:id="@+id/radioSttStandard"
-                    android:layout_width="match_parent"
+            <!-- Listening time -->
+            <LinearLayout
+                android:id="@+id/listenSecondsGroup"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginBottom="8dp"
+                android:orientation="vertical">
+
+                <TextView
+                    android:id="@+id/listenSecondsLabel"
+                    android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
-                    android:text="@string/stt_standard"
+                    android:text="Listening time (seconds)"
                     android:textColor="#FFFFFF" />
 
-                <RadioButton
-                    android:id="@+id/radioSttGeminiLive"
+                <com.google.android.material.textfield.TextInputLayout
+                    style="@style/Widget.MaterialComponents.TextInputLayout.OutlinedBox"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:text="@string/stt_gemini_live"
-                    android:textColor="#FFFFFF" />
+                    android:hint="e.g., 5, 10, 30">
 
-                <RadioButton
-                    android:id="@+id/radioSttGeminiBatch"
+                    <com.google.android.material.textfield.TextInputEditText
+                        android:id="@+id/listenSecondsInput"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:inputType="number"
+                        android:maxLength="3" />
+                </com.google.android.material.textfield.TextInputLayout>
+
+                <TextView
+                    android:id="@+id/listenSecondsDesc"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:text="@string/stt_gemini_batch"
+                    android:layout_marginTop="4dp"
+                    android:text="How long to wait for speech before timing out."
+                    android:textColor="#B0BEC5"
+                    android:textSize="12sp" />
+            </LinearLayout>
+
+            <!-- AUTO-LISTEN TOGGLE -->
+            <LinearLayout
+                android:id="@+id/autoListenGroup"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginBottom="12dp"
+                android:layout_marginTop="12dp"
+                android:orientation="vertical">
+
+                <com.google.android.material.switchmaterial.SwitchMaterial
+                    android:id="@+id/switchAutoListen"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="Auto-listen after response"
                     android:textColor="#FFFFFF" />
 
-            </RadioGroup>
-            <!-- END: SPEECH RECOGNITION BLOCK -->
+                <TextView
+                    android:id="@+id/autoListenDesc"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="4dp"
+                    android:text="Automatically start listening again after the assistant finishes speaking."
+                    android:textColor="#B0BEC5"
+                    android:textSize="12sp" />
+            </LinearLayout>
 
-            <!-- TTS Settings Link -->
+            <!-- Audio Processing Info -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:background="#252830"
+                android:orientation="vertical"
+                android:padding="12dp">
+
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="ℹ️ Audio Processing"
+                    android:textColor="#64B5F6"
+                    android:textSize="13sp"
+                    android:textStyle="bold" />
+
+                <TextView
+                    android:id="@+id/audioProcessingInfo"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="4dp"
+                    android:text="Your voice is sent directly to the AI model. Real-time transcription shows exactly what you said, including filler words for 100% accuracy."
+                    android:textColor="#B0BEC5"
+                    android:textSize="12sp" />
+            </LinearLayout>
+
+            <!-- Divider -->
+            <View
+                android:layout_width="match_parent"
+                android:layout_height="1dp"
+                android:layout_marginVertical="16dp"
+                android:background="#2A2D32" />
+
+            <!-- ════════════════════════════════════════════════════════════ -->
+            <!-- TTS SETTINGS -->
+            <!-- ════════════════════════════════════════════════════════════ -->
             <TextView
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:layout_marginTop="24dp"
-                android:text="Text-to-Speech Settings"
-                android:textAppearance="?attr/textAppearanceTitleMedium"
-                android:textColor="#FFFFFF" />
+                android:text="🔊 Text-to-Speech Settings"
+                android:textColor="#FFFFFF"
+                android:textSize="16sp"
+                android:textStyle="bold" />
 
             <TextView
                 android:id="@+id/ttsSettingsLink"
@@ -373,38 +445,63 @@
                 android:layout_height="wrap_content"
                 android:layout_marginStart="4dp"
                 android:layout_marginTop="4dp"
+                android:background="?attr/selectableItemBackground"
                 android:padding="8dp"
-                android:text="Open TTS Settings"
+                android:text="Open TTS Settings →"
                 android:textColor="#64B5F6"
                 android:textSize="14sp" />
 
-            <!-- System Prompt -->
+            <!-- Divider -->
+            <View
+                android:layout_width="match_parent"
+                android:layout_height="1dp"
+                android:layout_marginVertical="16dp"
+                android:background="#2A2D32" />
+
+            <!-- ════════════════════════════════════════════════════════════ -->
+            <!-- PROMPT SETTINGS SECTION -->
+            <!-- ════════════════════════════════════════════════════════════ -->
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginBottom="4dp"
+                android:text="📝 System Prompts"
+                android:textColor="#FFFFFF"
+                android:textSize="16sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginBottom="12dp"
+                android:text="Control how the AI behaves and responds."
+                android:textColor="#B0BEC5"
+                android:textSize="12sp" />
+
             <LinearLayout
                 android:id="@+id/systemPromptGroup"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:layout_marginTop="12dp"
                 android:orientation="vertical">
 
+                <!-- Base System Prompt (EDITABLE) -->
                 <TextView
                     android:id="@+id/systemPromptTitle"
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
-                    android:text="Base System Prompt"
-                    android:textAppearance="?attr/textAppearanceTitleMedium"
-                    android:textColor="#FFFFFF" />
+                    android:text="✏️ Base System Prompt"
+                    android:textColor="#4CAF50"
+                    android:textSize="14sp"
+                    android:textStyle="bold" />
 
                 <TextView
-                    android:id="@+id/systemPromptWarning"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:layout_marginTop="4dp"
                     android:layout_marginBottom="8dp"
-                    android:text="⚠️ This prompt is used as context in both phases when 'Faster First Response' is enabled."
-                    android:textColor="#FFA726"
-                    android:textSize="12sp"
-                    android:visibility="gone"
-                    tools:visibility="visible" />
+                    android:layout_marginTop="2dp"
+                    android:text="Edit this to change the AI's personality and behavior."
+                    android:textColor="#B0BEC5"
+                    android:textSize="11sp" />
 
                 <com.google.android.material.textfield.TextInputLayout
                     style="@style/Widget.MaterialComponents.TextInputLayout.OutlinedBox"
@@ -430,32 +527,33 @@
                     android:layout_gravity="end"
                     android:text="@string/reset_prompt" />
 
-                <!-- Prompt Extensions -->
+                <!-- Custom Extensions (EDITABLE) -->
                 <TextView
                     android:id="@+id/promptExtensionsTitle"
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
                     android:layout_marginTop="16dp"
-                    android:text="System Prompt Extensions"
-                    android:textAppearance="?attr/textAppearanceTitleMedium"
-                    android:textColor="#FFFFFF" />
+                    android:text="✏️ Custom Extensions (Optional)"
+                    android:textColor="#4CAF50"
+                    android:textSize="14sp"
+                    android:textStyle="bold" />
 
                 <TextView
                     android:id="@+id/promptExtensionsDesc"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:layout_marginTop="4dp"
                     android:layout_marginBottom="8dp"
-                    android:text="These instructions are automatically appended to your base prompt. You can customize them here."
+                    android:layout_marginTop="2dp"
+                    android:text="Add your own custom instructions here."
                     android:textColor="#B0BEC5"
-                    android:textSize="12sp" />
+                    android:textSize="11sp" />
 
                 <com.google.android.material.textfield.TextInputLayout
                     android:id="@+id/promptExtensionsLayout"
                     style="@style/Widget.MaterialComponents.TextInputLayout.OutlinedBox"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:hint="Auto-generated instructions">
+                    android:hint="Your custom instructions">
 
                     <com.google.android.material.textfield.TextInputEditText
                         android:id="@+id/promptExtensionsInput"
@@ -463,8 +561,8 @@
                         android:layout_height="wrap_content"
                         android:gravity="top"
                         android:inputType="textMultiLine"
-                        android:minLines="3"
-                        android:maxLines="8" />
+                        android:maxLines="5"
+                        android:minLines="2" />
                 </com.google.android.material.textfield.TextInputLayout>
 
                 <com.google.android.material.button.MaterialButton
@@ -473,8 +571,127 @@
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
                     android:layout_gravity="end"
-                    android:text="Reset Extensions" />
+                    android:text="Clear" />
+
+                <!-- Faster First Warning -->
+                <TextView
+                    android:id="@+id/systemPromptWarning"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="12dp"
+                    android:background="#33FF9800"
+                    android:padding="10dp"
+                    android:text="⚠️ 'Faster First Sentence' uses a two-phase strategy. Phase 1 generates first sentence quickly, Phase 2 generates the rest."
+                    android:textColor="#FFB74D"
+                    android:textSize="12sp"
+                    android:visibility="gone"
+                    tools:visibility="visible" />
+
+                <!-- ════════════════════════════════════════════════════════════ -->
+                <!-- RESPONSE INSTRUCTIONS (EDITABLE - SYNCED WITH SETTINGS) -->
+                <!-- ════════════════════════════════════════════════════════════ -->
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="20dp"
+                    android:text="🔧 Response Instructions"
+                    android:textColor="#4CAF50"
+                    android:textSize="14sp"
+                    android:textStyle="bold" />
+
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginBottom="8dp"
+                    android:layout_marginTop="2dp"
+                    android:text="Edit these directly OR use the settings above. Changes sync both ways automatically."
+                    android:textColor="#B0BEC5"
+                    android:textSize="11sp" />
+
+                <com.google.android.material.textfield.TextInputLayout
+                    android:id="@+id/dynamicInstructionsLayout"
+                    style="@style/Widget.MaterialComponents.TextInputLayout.OutlinedBox"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:hint="Response instructions (editable)">
+
+                    <com.google.android.material.textfield.TextInputEditText
+                        android:id="@+id/dynamicInstructionsInput"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:fontFamily="monospace"
+                        android:gravity="top"
+                        android:inputType="textMultiLine"
+                        android:maxLines="10"
+                        android:minLines="4"
+                        android:textSize="12sp" />
+                </com.google.android.material.textfield.TextInputLayout>
+
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="4dp"
+                    android:background="#1A3320"
+                    android:padding="8dp"
+                    android:text="💡 Tip: Change the number in 'AT MOST X sentences' to update the Max Sentences setting, or change the setting to update this text."
+                    android:textColor="#81C784"
+                    android:textSize="11sp" />
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/resetDynamicInstructionsButton"
+                    style="@style/Widget.MaterialComponents.Button.TextButton"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_gravity="end"
+                    android:text="Reset to Default" />
+
+                <!-- ════════════════════════════════════════════════════════════ -->
+                <!-- FULL PROMPT PREVIEW (READ-ONLY) -->
+                <!-- ════════════════════════════════════════════════════════════ -->
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="20dp"
+                    android:text="👁️ Preview: What AI Will Receive"
+                    android:textColor="#64B5F6"
+                    android:textSize="14sp"
+                    android:textStyle="bold" />
+
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginBottom="8dp"
+                    android:layout_marginTop="2dp"
+                    android:text="Read-only preview showing: Base Prompt + Extensions + Response Instructions combined."
+                    android:textColor="#B0BEC5"
+                    android:textSize="11sp" />
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:background="#1A1A1A"
+                    android:orientation="vertical"
+                    android:padding="12dp">
+
+                    <TextView
+                        android:id="@+id/fullPromptPreview"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:ellipsize="end"
+                        android:fontFamily="monospace"
+                        android:lineSpacingMultiplier="1.2"
+                        android:maxLines="20"
+                        android:textColor="#A5D6A7"
+                        android:textSize="11sp"
+                        tools:text="You are a helpful assistant...\n\n[Custom Extensions]\n\nRESPONSE REQUIREMENTS:\n• Response MUST be AT MOST 4 sentences..." />
+                </LinearLayout>
+
             </LinearLayout>
+
+            <!-- Bottom Padding -->
+            <View
+                android:layout_width="match_parent"
+                android:layout_height="80dp" />
 
         </LinearLayout>
     </com.google.android.material.card.MaterialCardView>

@@ -1,9 +1,9 @@
 package com.example.advancedvoice.domain.engine
 
 import android.util.Log
-import com.example.advancedvoice.domain.strategy.FastFirstSentenceStrategy
-import com.example.advancedvoice.domain.strategy.IGenerationStrategy
-import com.example.advancedvoice.domain.strategy.RegularGenerationStrategy
+import com.example.advancedvoice.domain.engine.strategy.FastFirstSentenceStrategy
+import com.example.advancedvoice.domain.engine.strategy.IGenerationStrategy
+import com.example.advancedvoice.domain.engine.strategy.RegularGenerationStrategy
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
 import okhttp3.OkHttpClient

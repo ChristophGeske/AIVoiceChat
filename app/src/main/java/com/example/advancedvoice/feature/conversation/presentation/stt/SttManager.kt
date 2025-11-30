@@ -7,7 +7,6 @@ import com.example.advancedvoice.core.prefs.Prefs
 import com.example.advancedvoice.data.gemini_live.GeminiLiveClient
 import com.example.advancedvoice.data.gemini_live.GeminiLiveTranscriber
 import com.example.advancedvoice.feature.conversation.presentation.state.ConversationStateManager
-import com.example.advancedvoice.feature.conversation.service.GeminiBatchSttController
 import com.example.advancedvoice.feature.conversation.service.GeminiLiveSttController
 import com.example.advancedvoice.feature.conversation.service.SttController
 import com.example.advancedvoice.feature.conversation.service.TtsController
@@ -32,35 +31,26 @@ class SttManager(
     fun getStt(): SttController? = stt
 
     fun setupFromPreferences() {
-        val newSttSystem = Prefs.getSttSystem(app)
         val geminiKey = Prefs.getGeminiKey(app)
 
-        // If the system hasn't changed and an STT controller already exists, do nothing.
-        if (newSttSystem == currentSttSystem && stt != null) {
-            Log.d(TAG, "[STT Manager] STT system '$newSttSystem' already configured.")
+        // If already configured, do nothing
+        if (stt != null) {
+            Log.d(TAG, "[STT Manager] STT already configured.")
             return
         }
 
-        // Release the old controller if it exists
-        stt?.release()
-        stt = null
-        currentSttSystem = newSttSystem
-
-        if (geminiKey.isBlank() && (newSttSystem == Prefs.STT_SYSTEM_GEMINI_LIVE || newSttSystem == Prefs.STT_SYSTEM_GEMINI_BATCH)) {
+        if (geminiKey.isBlank()) {
             Log.w(TAG, "[STT Manager] No Gemini API key - STT will not be available")
             return
         }
 
-        Log.i(TAG, "[STT Manager] Configuring STT system: $newSttSystem")
+        Log.i(TAG, "[STT Manager] Configuring Gemini Live STT (for real-time display + audio capture)")
 
-        stt = when (newSttSystem) {
-            Prefs.STT_SYSTEM_GEMINI_LIVE -> createGeminiLiveStt(geminiKey)
-            Prefs.STT_SYSTEM_GEMINI_BATCH -> createGeminiBatchStt(geminiKey)
-            else -> {
-                Log.w(TAG, "[STT Manager] 'Standard' STT not implemented yet.")
-                null
-            }
-        }
+        // Always use Gemini Live for:
+        // 1. Real-time transcription display (user feedback)
+        // 2. Audio capture for direct LLM input
+        stt = createGeminiLiveStt(geminiKey)
+        currentSttSystem = Prefs.STT_SYSTEM_GEMINI_LIVE
 
         rewireCollectors()
     }
@@ -77,14 +67,6 @@ class SttManager(
             apiKey = geminiKey,
             model = liveModel,
             tts = tts
-        )
-    }
-
-    private fun createGeminiBatchStt(geminiKey: String): GeminiBatchSttController {
-        return GeminiBatchSttController(
-            scope = scope,
-            app = app,
-            apiKey = geminiKey
         )
     }
 

@@ -1,10 +1,11 @@
-package com.example.advancedvoice.domain.strategy
+package com.example.advancedvoice.domain.engine.strategy
 
 import android.util.Log
 import com.example.advancedvoice.core.logging.LoggerConfig
 import com.example.advancedvoice.core.prefs.Prefs
 import com.example.advancedvoice.core.text.SentenceSplitter
 import com.example.advancedvoice.data.common.ChatMessage
+import com.example.advancedvoice.data.gemini.GeminiAudioService
 import com.example.advancedvoice.data.gemini.GeminiService
 import com.example.advancedvoice.data.openai.OpenAiService
 import com.example.advancedvoice.domain.engine.SentenceTurnEngine
@@ -12,10 +13,14 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import okhttp3.OkHttpClient
-import com.example.advancedvoice.data.gemini.GeminiAudioService
 
-
-
+/**
+ * Two-phase generation strategy:
+ * Phase 1: Get first sentence quickly (for immediate TTS)
+ * Phase 2: Get remaining sentences
+ *
+ * Supports both text and audio input.
+ */
 class FastFirstSentenceStrategy(
     private val http: OkHttpClient,
     private val geminiKeyProvider: () -> String,
@@ -28,7 +33,14 @@ class FastFirstSentenceStrategy(
 
     @Volatile private var active = false
 
+    // Lazy-initialized services
+    private val geminiService by lazy { GeminiService(geminiKeyProvider, http) }
     private val geminiAudioService by lazy { GeminiAudioService(geminiKeyProvider, http) }
+    private val openAiService by lazy { OpenAiService(openAiKeyProvider, http) }
+
+    // ================================================================================
+    // PUBLIC INTERFACE
+    // ================================================================================
 
     override fun execute(
         scope: CoroutineScope,
@@ -42,7 +54,7 @@ class FastFirstSentenceStrategy(
         val isGemini = modelName.contains("gemini", ignoreCase = true)
 
         Log.i(TAG, "═══════════════════════════════════")
-        Log.i(TAG, "[FAST-FIRST] Starting generation")
+        Log.i(TAG, "[FAST-FIRST] Starting text generation")
         Log.i(TAG, "  Model: $modelName (${if (isGemini) "Gemini" else "OpenAI"})")
         Log.i(TAG, "  Max Sentences: $maxSentences")
         Log.i(TAG, "  History size: ${history.size}")
@@ -57,18 +69,11 @@ class FastFirstSentenceStrategy(
                 } else {
                     executeOpenAiTwoPhase(mappedHistory, modelName, systemPrompt, maxSentences, callbacks)
                 }
-
             } catch (t: Throwable) {
-                Log.e(TAG, "[ERROR] ❌ Exception during generation", t)
-                Log.e(TAG, "[ERROR] Message: ${t.message}")
-                Log.e(TAG, "[ERROR] Stack trace:", t)
-                if (active) {
-                    callbacks.onError(t.message ?: "Generation failed")
-                    callbacks.onTurnFinish()
-                }
+                handleError(t, callbacks)
             } finally {
                 active = false
-                Log.d(TAG, "[CLEANUP] Strategy completed, active=false")
+                Log.d(TAG, "[CLEANUP] Strategy completed")
             }
         }
     }
@@ -87,13 +92,16 @@ class FastFirstSentenceStrategy(
 
         if (!isGemini) {
             Log.w(TAG, "Audio input only supported for Gemini models, falling back to text")
-            execute(scope, history + SentenceTurnEngine.Msg("user", audioInput.streamingTranscript),
-                modelName, systemPrompt, maxSentences, callbacks)
+            execute(
+                scope,
+                history + SentenceTurnEngine.Msg("user", audioInput.streamingTranscript),
+                modelName, systemPrompt, maxSentences, callbacks
+            )
             return
         }
 
         Log.i(TAG, "═══════════════════════════════════")
-        Log.i(TAG, "[FAST-FIRST-AUDIO] Starting generation with audio input")
+        Log.i(TAG, "[FAST-FIRST-AUDIO] Starting audio generation")
         Log.i(TAG, "  Model: $modelName")
         Log.i(TAG, "  Audio segments: ${audioInput.segments.size}")
         Log.i(TAG, "  Streaming transcript: '${audioInput.streamingTranscript.take(50)}...'")
@@ -108,39 +116,46 @@ class FastFirstSentenceStrategy(
                     systemPrompt, maxSentences, callbacks
                 )
             } catch (t: Throwable) {
-                Log.e(TAG, "[ERROR] ❌ Exception during audio generation", t)
-                if (active) {
-                    callbacks.onError(t.message ?: "Generation failed")
-                    callbacks.onTurnFinish()
-                }
+                handleError(t, callbacks)
             } finally {
                 active = false
+                Log.d(TAG, "[CLEANUP] Audio strategy completed")
             }
         }
     }
 
+    override fun abort() {
+        Log.w(TAG, "[ABORT] Abort requested")
+        active = false
+    }
+
+    // ================================================================================
+    // GEMINI AUDIO IMPLEMENTATION
+    // ================================================================================
+
     private suspend fun executeGeminiTwoPhaseWithAudio(
-        mappedHistory: List<ChatMessage>,
+        textHistory: List<ChatMessage>,
         audioSegments: List<ByteArray>,
         modelName: String,
         systemPrompt: String,
         maxSentences: Int,
         callbacks: SentenceTurnEngine.Callbacks
     ) {
-        // --- PHASE 1: Get the first sentence from audio ---
         Log.i(TAG, "[PHASE-1-AUDIO] 🚀 Requesting first sentence from audio...")
-        val phase1SystemPrompt = "$systemPrompt\n\nIMPORTANT: Your entire response must be only a single, complete sentence."
+
+        //   Pass maxSentences to prompt builder
+        val phase1Prompt = buildAudioPhase1Prompt(systemPrompt, maxSentences)
 
         val (firstSentence, phase1Sources) = geminiAudioService.generateFromAudio(
-            systemPrompt = phase1SystemPrompt,
-            textHistory = mappedHistory,
+            systemPrompt = phase1Prompt,
+            textHistory = textHistory,
             audioSegments = audioSegments,
             modelName = modelName,
             temperature = 0.7,
             enableGoogleSearch = true
         )
 
-        Log.i(TAG, "[PHASE-1-AUDIO] ✅ Response received (len=${firstSentence.length})")
+        Log.i(TAG, "[PHASE-1-AUDIO] ✅ Response: '${firstSentence.take(80)}...'")
 
         if (!active) {
             Log.w(TAG, "[PHASE-1-AUDIO] ❌ ABORTED")
@@ -148,8 +163,7 @@ class FastFirstSentenceStrategy(
         }
 
         if (firstSentence.isBlank()) {
-            Log.e(TAG, "[PHASE-1-AUDIO] ❌ EMPTY RESPONSE")
-            callbacks.onError("LLM returned empty response")
+            callbacks.onError("LLM returned empty response from audio")
             callbacks.onTurnFinish()
             return
         }
@@ -161,21 +175,24 @@ class FastFirstSentenceStrategy(
             return
         }
 
-        // --- PHASE 2: Generate the rest (text-based continuation) ---
-        Log.i(TAG, "[PHASE-2-AUDIO] 🚀 Requesting remaining sentences...")
-        val gem = GeminiService(geminiKeyProvider, http)
-        val phase2History = mappedHistory + ChatMessage("user", "[Audio message - see above]") + ChatMessage("assistant", firstSentence)
-        val remainingCount = maxSentences - 1
-        val plural = if (remainingCount > 1) "sentences" else "sentence"
-        val phase2SystemPrompt = "$systemPrompt\n\nContinue your previous thought. You have already said: \"$firstSentence\". Now, provide the rest of your response in AT MOST $remainingCount more $plural."
+        // --- PHASE 2: Remaining sentences (text-based continuation) ---
+        Log.i(TAG, "[PHASE-2-AUDIO] 🚀 Requesting remaining ${maxSentences - 1} sentences...")
 
-        val (remainderText, phase2Sources) = gem.generateTextWithSources(
-            systemPrompt = phase2SystemPrompt,
+        val phase2History = textHistory +
+                ChatMessage("user", "[User spoke via audio]") +
+                ChatMessage("assistant", firstSentence)
+
+        val phase2Prompt = buildPhase2Prompt(systemPrompt, firstSentence, maxSentences - 1, isFromAudio = true)
+
+        val (remainderText, phase2Sources) = geminiService.generateTextWithSources(
+            systemPrompt = phase2Prompt,
             history = phase2History,
             modelName = modelName,
             temperature = 0.7,
             enableGoogleSearch = true
         )
+
+        Log.i(TAG, "[PHASE-2-AUDIO] ✅ Response: ${remainderText.length} chars")
 
         if (!active) {
             Log.w(TAG, "[PHASE-2-AUDIO] ❌ ABORTED")
@@ -183,185 +200,218 @@ class FastFirstSentenceStrategy(
         }
 
         if (remainderText.isNotBlank()) {
-            val remainingSentences = SentenceSplitter.splitIntoSentences(remainderText)
-            callbacks.onRemainingSentences(remainingSentences, phase2Sources)
+            val sentences = SentenceSplitter.splitIntoSentences(remainderText)
+            callbacks.onRemainingSentences(sentences, phase2Sources)
         }
 
+        Log.i(TAG, "[COMPLETE-AUDIO] ✅ Generation finished")
         callbacks.onTurnFinish()
     }
 
+    // ================================================================================
+    // GEMINI TEXT IMPLEMENTATION
+    // ================================================================================
+
     private suspend fun executeGeminiTwoPhase(
-        mappedHistory: List<ChatMessage>,
+        history: List<ChatMessage>,
         modelName: String,
         systemPrompt: String,
         maxSentences: Int,
         callbacks: SentenceTurnEngine.Callbacks
     ) {
-        val gem = GeminiService(geminiKeyProvider, http)
+        // --- PHASE 1: First sentence ---
+        Log.i(TAG, "[PHASE-1] 🚀 Requesting first sentence...")
 
-        // --- PHASE 1: Get the first sentence ---
-        Log.i(TAG, "[PHASE-1] 🚀 Requesting first sentence from Gemini...")
-        val phase1SystemPrompt = "$systemPrompt\n\nIMPORTANT: Your entire response must be only a single, complete sentence."
+        val phase1Prompt = buildTextPhase1Prompt(systemPrompt)
 
-        val (firstSentence, phase1Sources) = gem.generateTextWithSources(
-            systemPrompt = phase1SystemPrompt,
-            history = mappedHistory,
+        val (firstSentence, phase1Sources) = geminiService.generateTextWithSources(
+            systemPrompt = phase1Prompt,
+            history = history,
             modelName = modelName,
             temperature = 0.7,
             enableGoogleSearch = true
         )
 
-        Log.i(TAG, "[PHASE-1] ✅ Response received (len=${firstSentence.length}): '${firstSentence.take(100)}...'")
-        Log.d(TAG, "[PHASE-1] Sources: ${phase1Sources.size} items")
+        Log.i(TAG, "[PHASE-1] ✅ Response: '${firstSentence.take(80)}...'")
 
         if (!active) {
-            Log.w(TAG, "[PHASE-1] ❌ ABORTED (active=false) - discarding result")
+            Log.w(TAG, "[PHASE-1] ❌ ABORTED")
             return
         }
 
         if (firstSentence.isBlank()) {
-            Log.e(TAG, "[PHASE-1] ❌ EMPTY RESPONSE from Gemini!")
             callbacks.onError("LLM returned empty response")
             callbacks.onTurnFinish()
             return
         }
 
-        Log.i(TAG, "[PHASE-1] ✅ Calling onFirstSentence callback")
         callbacks.onFirstSentence(firstSentence, phase1Sources)
 
         if (maxSentences <= 1) {
-            Log.i(TAG, "[PHASE-1] Max sentences is 1, finishing")
             callbacks.onTurnFinish()
             return
         }
 
-        // --- PHASE 2: Generate the rest ---
+        // --- PHASE 2: Remaining sentences ---
         Log.i(TAG, "[PHASE-2] 🚀 Requesting remaining ${maxSentences - 1} sentences...")
-        val phase2History = mappedHistory + ChatMessage("assistant", firstSentence)
-        val remainingCount = maxSentences - 1
-        val plural = if (remainingCount > 1) "sentences" else "sentence"
-        val phase2SystemPrompt = "$systemPrompt\n\nContinue your previous thought. You have already said: \"$firstSentence\". Now, provide the rest of your response in AT MOST $remainingCount more $plural."
 
-        val (remainderText, phase2Sources) = gem.generateTextWithSources(
-            systemPrompt = phase2SystemPrompt,
+        val phase2History = history + ChatMessage("assistant", firstSentence)
+        val phase2Prompt = buildPhase2Prompt(systemPrompt, firstSentence, maxSentences - 1, isFromAudio = false)
+
+        val (remainderText, phase2Sources) = geminiService.generateTextWithSources(
+            systemPrompt = phase2Prompt,
             history = phase2History,
             modelName = modelName,
             temperature = 0.7,
             enableGoogleSearch = true
         )
 
-        Log.i(TAG, "[PHASE-2] ✅ Response received (len=${remainderText.length})")
+        Log.i(TAG, "[PHASE-2] ✅ Response: ${remainderText.length} chars")
 
         if (!active) {
-            Log.w(TAG, "[PHASE-2] ❌ ABORTED (active=false) - discarding result")
+            Log.w(TAG, "[PHASE-2] ❌ ABORTED")
             return
         }
 
         if (remainderText.isNotBlank()) {
-            val remainingSentences = SentenceSplitter.splitIntoSentences(remainderText)
-            Log.i(TAG, "[PHASE-2] ✅ Calling onRemainingSentences (count=${remainingSentences.size})")
-            callbacks.onRemainingSentences(remainingSentences, phase2Sources)
-        } else {
-            Log.w(TAG, "[PHASE-2] ⚠️ Empty remainder, only first sentence available")
+            val sentences = SentenceSplitter.splitIntoSentences(remainderText)
+            callbacks.onRemainingSentences(sentences, phase2Sources)
         }
 
-        Log.i(TAG, "[COMPLETE] ✅ Generation finished successfully")
+        Log.i(TAG, "[COMPLETE] ✅ Generation finished")
         callbacks.onTurnFinish()
     }
 
+    // ================================================================================
+    // OPENAI TEXT IMPLEMENTATION
+    // ================================================================================
+
     private suspend fun executeOpenAiTwoPhase(
-        mappedHistory: List<ChatMessage>,
+        history: List<ChatMessage>,
         modelName: String,
         systemPrompt: String,
         maxSentences: Int,
         callbacks: SentenceTurnEngine.Callbacks
     ) {
-        val openai = OpenAiService(openAiKeyProvider, http)
-
-        // Get the saved effort level for this model
         val savedEffort = try {
-            Prefs.getGpt5Effort(null!!) // We'll fix this - need context
-        } catch (e: Exception) {
+            @Suppress("DEPRECATION")
+            Prefs.getGpt5Effort(null!!)
+        } catch (_: Exception) {
             "medium"
         }
 
-        // --- PHASE 1: Get the first sentence with LOW effort (fast) ---
-        Log.i(TAG, "[PHASE-1] 🚀 Requesting first sentence from OpenAI (low effort)...")
-        val phase1SystemPrompt = "$systemPrompt\n\nIMPORTANT: Your entire response must be only a single, complete sentence."
+        // --- PHASE 1: First sentence (fast) ---
+        Log.i(TAG, "[PHASE-1-OPENAI] 🚀 Requesting first sentence (low effort)...")
 
-        val phase1Result = openai.generateResponses(
-            systemPrompt = phase1SystemPrompt,
-            history = mappedHistory,
+        val phase1Prompt = buildTextPhase1Prompt(systemPrompt)
+
+        val phase1Result = openAiService.generateResponses(
+            systemPrompt = phase1Prompt,
+            history = history,
             model = modelName,
-            effort = "low",  // ✅ Fast first sentence
+            effort = "low",
             verbosity = "low",
             enableWebSearch = true
         )
 
-        Log.i(TAG, "[PHASE-1] ✅ Response received (len=${phase1Result.text.length}): '${phase1Result.text.take(100)}...'")
-        Log.d(TAG, "[PHASE-1] Sources: ${phase1Result.sources.size} items")
+        Log.i(TAG, "[PHASE-1-OPENAI] ✅ Response: '${phase1Result.text.take(80)}...'")
 
         if (!active) {
-            Log.w(TAG, "[PHASE-1] ❌ ABORTED (active=false) - discarding result")
+            Log.w(TAG, "[PHASE-1-OPENAI] ❌ ABORTED")
             return
         }
 
         if (phase1Result.text.isBlank()) {
-            Log.e(TAG, "[PHASE-1] ❌ EMPTY RESPONSE from OpenAI!")
             callbacks.onError("LLM returned empty response")
             callbacks.onTurnFinish()
             return
         }
 
-        Log.i(TAG, "[PHASE-1] ✅ Calling onFirstSentence callback")
         callbacks.onFirstSentence(phase1Result.text, phase1Result.sources)
 
         if (maxSentences <= 1) {
-            Log.i(TAG, "[PHASE-1] Max sentences is 1, finishing")
             callbacks.onTurnFinish()
             return
         }
 
-        // --- PHASE 2: Generate the rest with user's chosen effort level ---
-        Log.i(TAG, "[PHASE-2] 🚀 Requesting remaining ${maxSentences - 1} sentences (effort=$savedEffort)...")
-        val phase2History = mappedHistory + ChatMessage("assistant", phase1Result.text)
-        val remainingCount = maxSentences - 1
-        val plural = if (remainingCount > 1) "sentences" else "sentence"
-        val phase2SystemPrompt = "$systemPrompt\n\nContinue your previous thought. You have already said: \"${phase1Result.text}\". Now, provide the rest of your response in AT MOST $remainingCount more $plural."
+        // --- PHASE 2: Remaining sentences ---
+        Log.i(TAG, "[PHASE-2-OPENAI] 🚀 Requesting remaining sentences (effort=$savedEffort)...")
 
-        val phase2Result = openai.generateResponses(
-            systemPrompt = phase2SystemPrompt,
+        val phase2History = history + ChatMessage("assistant", phase1Result.text)
+        val phase2Prompt = buildPhase2Prompt(systemPrompt, phase1Result.text, maxSentences - 1, isFromAudio = false)
+
+        val phase2Result = openAiService.generateResponses(
+            systemPrompt = phase2Prompt,
             history = phase2History,
             model = modelName,
-            effort = savedEffort,  // ✅ Use user's chosen effort level
+            effort = savedEffort,
             verbosity = "medium",
             enableWebSearch = true
         )
 
-        Log.i(TAG, "[PHASE-2] ✅ Response received (len=${phase2Result.text.length})")
+        Log.i(TAG, "[PHASE-2-OPENAI] ✅ Response: ${phase2Result.text.length} chars")
 
         if (!active) {
-            Log.w(TAG, "[PHASE-2] ❌ ABORTED (active=false) - discarding result")
+            Log.w(TAG, "[PHASE-2-OPENAI] ❌ ABORTED")
             return
         }
 
         if (phase2Result.text.isNotBlank()) {
-            val remainingSentences = SentenceSplitter.splitIntoSentences(phase2Result.text)
-            Log.i(TAG, "[PHASE-2] ✅ Calling onRemainingSentences (count=${remainingSentences.size})")
-            callbacks.onRemainingSentences(remainingSentences, phase2Result.sources)
-        } else {
-            Log.w(TAG, "[PHASE-2] ⚠️ Empty remainder, only first sentence available")
+            val sentences = SentenceSplitter.splitIntoSentences(phase2Result.text)
+            callbacks.onRemainingSentences(sentences, phase2Result.sources)
         }
 
-        Log.i(TAG, "[COMPLETE] ✅ Generation finished successfully")
+        Log.i(TAG, "[COMPLETE-OPENAI] ✅ Generation finished")
         callbacks.onTurnFinish()
     }
 
-    override fun abort() {
-        Log.w(TAG, "[ABORT] ❌ Abort requested, setting active=false")
-        active = false
+    // ================================================================================
+    // HELPER METHODS
+    // ================================================================================
+
+    private fun buildAudioPhase1Prompt(basePrompt: String, maxSentences: Int): String = """
+        $basePrompt
+        
+        AUDIO INPUT INSTRUCTIONS:
+        - The user's message is provided as audio. Listen carefully and understand what they are saying.
+        - Respond naturally to what the user said in the audio.
+        - If the audio is unclear, do your best to understand the intent.
+        
+        RESPONSE FORMAT:
+        - Your entire response must be only a single, complete sentence.
+        - You will provide up to ${maxSentences - 1} more sentences in the next step.
+    """.trimIndent()
+
+    private fun buildTextPhase1Prompt(basePrompt: String): String =
+        "$basePrompt\n\nIMPORTANT: Your entire response must be only a single, complete sentence."
+
+    private fun buildPhase2Prompt(
+        basePrompt: String,
+        firstSentence: String,
+        remainingCount: Int,
+        isFromAudio: Boolean
+    ): String {
+        val plural = if (remainingCount > 1) "sentences" else "sentence"
+        val audioNote = if (isFromAudio) "\nThe user's original message was audio input. Continue responding to what they said." else ""
+
+        return """
+            $basePrompt
+            
+            You have already said: "$firstSentence"
+            
+            STRICT LIMIT: Provide EXACTLY $remainingCount more $plural to complete your response.
+            Do NOT exceed this limit under any circumstances.$audioNote
+        """.trimIndent()
     }
 
     private fun mapHistory(history: List<SentenceTurnEngine.Msg>): List<ChatMessage> =
         history.map { ChatMessage(it.role, it.text) }
+
+    private fun handleError(t: Throwable, callbacks: SentenceTurnEngine.Callbacks) {
+        Log.e(TAG, "[ERROR] ❌ Exception during generation", t)
+        if (active) {
+            callbacks.onError(t.message ?: "Generation failed")
+            callbacks.onTurnFinish()
+        }
+    }
 }

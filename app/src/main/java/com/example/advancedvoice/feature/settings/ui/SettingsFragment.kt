@@ -9,7 +9,6 @@ import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
 import android.widget.RadioButton
-import android.widget.RadioGroup
 import android.widget.TextView
 import android.widget.Toast
 import androidx.core.widget.doAfterTextChanged
@@ -21,21 +20,250 @@ import com.google.android.material.textfield.TextInputEditText
 
 class SettingsFragment : Fragment() {
 
+    // Views that need to sync bidirectionally
+    private var maxSentencesInput: TextInputEditText? = null
+    private var dynamicInstructionsInput: TextInputEditText? = null
+    private var fullPromptPreviewText: TextView? = null
+    private var fasterFirstSwitch: SwitchMaterial? = null
+
+    // Flag to prevent infinite update loops
+    private var isUpdatingFromCode = false
+
     override fun onCreateView(inflater: LayoutInflater, container: ViewGroup?, savedInstanceState: Bundle?): View {
         return inflater.inflate(R.layout.fragment_settings, container, false)
     }
 
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)
+
+        // Cache the views that need bidirectional sync
+        maxSentencesInput = view.findViewById(R.id.maxSentencesInput)
+        dynamicInstructionsInput = view.findViewById(R.id.dynamicInstructionsInput)
+        fullPromptPreviewText = view.findViewById(R.id.fullPromptPreview)
+        fasterFirstSwitch = view.findViewById(R.id.switchFasterFirst)
+
         setupApiKeySection(view)
         setupModelRadios(view)
         setupMaxSentences(view)
         setupListenSeconds(view)
         setupAutoListen(view)
         setupFasterFirst(view)
-        setupSttSystem(view) // Added
         setupTtsSettingsLink(view)
         setupPromptSection(view)
+        setupDynamicInstructions(view)
+
+        // Initial population of all previews
+        updateDynamicInstructionsFromSettings()
+        updateFullPromptPreview()
+    }
+
+    // ════════════════════════════════════════════════════════════════════
+    // BIDIRECTIONAL SYNC LOGIC
+    // ════════════════════════════════════════════════════════════════════
+
+    /**
+     * Build the dynamic instructions text from current settings.
+     */
+    private fun buildDynamicInstructionsText(): String {
+        val maxSentences = Prefs.getMaxSentences(requireContext())
+        val fasterFirst = Prefs.getFasterFirst(requireContext())
+
+        return buildString {
+            append("RESPONSE REQUIREMENTS:\n")
+            append("• Your response MUST be AT MOST $maxSentences sentences long.\n")
+            append("• Return plain text only, no markdown or formatting.\n")
+            if (fasterFirst) {
+                append("• Start with a complete, informative first sentence immediately.\n")
+            }
+            append("• The user speaks via audio. Listen carefully and respond naturally.")
+        }
+    }
+
+    /**
+     * Update the dynamic instructions input field from settings (one-way: settings → text).
+     */
+    private fun updateDynamicInstructionsFromSettings() {
+        if (isUpdatingFromCode) return
+        isUpdatingFromCode = true
+
+        val text = buildDynamicInstructionsText()
+        dynamicInstructionsInput?.setText(text)
+
+        // Also save to prefs so it persists
+        Prefs.setDynamicInstructions(requireContext(), text)
+
+        isUpdatingFromCode = false
+        updateFullPromptPreview()
+    }
+
+    /**
+     * Parse the dynamic instructions text and extract settings from it.
+     * Returns the max sentences number if found, null otherwise.
+     */
+    private fun parseMaxSentencesFromText(text: String): Int? {
+        // Look for patterns like "AT MOST 4 sentences" or "MOST 5 sentences"
+        val patterns = listOf(
+            Regex("""AT MOST (\d+) sentence""", RegexOption.IGNORE_CASE),
+            Regex("""MOST (\d+) sentence""", RegexOption.IGNORE_CASE),
+            Regex("""maximum (\d+) sentence""", RegexOption.IGNORE_CASE),
+            Regex("""max (\d+) sentence""", RegexOption.IGNORE_CASE),
+            Regex("""up to (\d+) sentence""", RegexOption.IGNORE_CASE),
+            Regex("""(\d+) sentences? (?:long|max)""", RegexOption.IGNORE_CASE)
+        )
+
+        for (pattern in patterns) {
+            val match = pattern.find(text)
+            if (match != null) {
+                val number = match.groupValues[1].toIntOrNull()
+                if (number != null && number in 1..10) {
+                    return number
+                }
+            }
+        }
+        return null
+    }
+
+    /**
+     * Check if "first sentence" instruction is present (for faster first toggle).
+     */
+    private fun parseFasterFirstFromText(text: String): Boolean {
+        val patterns = listOf(
+            "first sentence immediately",
+            "start with a complete",
+            "begin with a complete first",
+            "first sentence promptly"
+        )
+        val lowerText = text.lowercase()
+        return patterns.any { lowerText.contains(it) }
+    }
+
+    /**
+     * When user edits the dynamic instructions text, extract and sync settings.
+     */
+    private fun onDynamicInstructionsChanged(newText: String) {
+        if (isUpdatingFromCode) return
+
+        // Save the custom text to prefs
+        Prefs.setDynamicInstructions(requireContext(), newText)
+
+        // Try to extract max sentences
+        val extractedMax = parseMaxSentencesFromText(newText)
+        if (extractedMax != null) {
+            val currentMax = Prefs.getMaxSentences(requireContext())
+            if (extractedMax != currentMax) {
+                isUpdatingFromCode = true
+                Prefs.setMaxSentences(requireContext(), extractedMax)
+                maxSentencesInput?.setText(extractedMax.toString())
+                isUpdatingFromCode = false
+            }
+        }
+
+        // Try to extract faster first
+        val extractedFasterFirst = parseFasterFirstFromText(newText)
+        val currentFasterFirst = Prefs.getFasterFirst(requireContext())
+        if (extractedFasterFirst != currentFasterFirst) {
+            isUpdatingFromCode = true
+            Prefs.setFasterFirst(requireContext(), extractedFasterFirst)
+            fasterFirstSwitch?.isChecked = extractedFasterFirst
+
+            // Update warning visibility
+            view?.findViewById<TextView>(R.id.systemPromptWarning)?.visibility =
+                if (extractedFasterFirst) View.VISIBLE else View.GONE
+
+            isUpdatingFromCode = false
+        }
+
+        updateFullPromptPreview()
+    }
+
+    /**
+     * Update the full prompt preview (read-only, shows combined result).
+     */
+    private fun updateFullPromptPreview() {
+        val basePrompt = Prefs.getSystemPrompt(requireContext(), DEFAULT_SYSTEM_PROMPT.trimIndent())
+        val extensions = Prefs.getSystemPromptExtensions(requireContext())
+        val dynamicInstructions = Prefs.getDynamicInstructions(requireContext())
+            .ifBlank { buildDynamicInstructionsText() }
+
+        val fullPrompt = buildString {
+            append("── BASE PROMPT ──\n")
+            append(basePrompt)
+
+            if (extensions.isNotBlank()) {
+                append("\n\n── CUSTOM EXTENSIONS ──\n")
+                append(extensions)
+            }
+
+            append("\n\n── RESPONSE INSTRUCTIONS ──\n")
+            append(dynamicInstructions)
+        }
+
+        fullPromptPreviewText?.text = fullPrompt
+    }
+
+    // ════════════════════════════════════════════════════════════════════
+    // SETUP METHODS
+    // ════════════════════════════════════════════════════════════════════
+
+    private fun setupDynamicInstructions(root: View) {
+        val input = root.findViewById<TextInputEditText>(R.id.dynamicInstructionsInput)
+        val resetBtn = root.findViewById<View>(R.id.resetDynamicInstructionsButton)
+
+        // Load saved or generate default
+        val saved = Prefs.getDynamicInstructions(requireContext())
+        if (saved.isNotBlank()) {
+            input?.setText(saved)
+        } else {
+            input?.setText(buildDynamicInstructionsText())
+        }
+
+        // Listen for changes
+        input?.doAfterTextChanged { editable ->
+            onDynamicInstructionsChanged(editable?.toString().orEmpty())
+        }
+
+        // Reset button
+        resetBtn?.setOnClickListener {
+            isUpdatingFromCode = true
+            val defaultText = buildDynamicInstructionsText()
+            input?.setText(defaultText)
+            Prefs.setDynamicInstructions(requireContext(), defaultText)
+            isUpdatingFromCode = false
+            updateFullPromptPreview()
+            Toast.makeText(requireContext(), "Instructions reset to default", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private fun setupMaxSentences(root: View) {
+        val input = root.findViewById<TextInputEditText>(R.id.maxSentencesInput)
+        input.setText(Prefs.getMaxSentences(requireContext()).toString(), TextView.BufferType.EDITABLE)
+
+        input.doAfterTextChanged {
+            if (isUpdatingFromCode) return@doAfterTextChanged
+
+            it?.toString()?.trim()?.toIntOrNull()?.let { n ->
+                val clamped = n.coerceIn(1, 10)
+                Prefs.setMaxSentences(requireContext(), clamped)
+                updateDynamicInstructionsFromSettings()
+            }
+        }
+    }
+
+    private fun setupFasterFirst(root: View) {
+        val sw = root.findViewById<SwitchMaterial>(R.id.switchFasterFirst)
+        val warning = root.findViewById<TextView>(R.id.systemPromptWarning)
+
+        val current = Prefs.getFasterFirst(requireContext())
+        sw.isChecked = current
+        warning.visibility = if (current) View.VISIBLE else View.GONE
+
+        sw.setOnCheckedChangeListener { _, isChecked ->
+            if (isUpdatingFromCode) return@setOnCheckedChangeListener
+
+            Prefs.setFasterFirst(requireContext(), isChecked)
+            warning.visibility = if (isChecked) View.VISIBLE else View.GONE
+            updateDynamicInstructionsFromSettings()
+        }
     }
 
     private fun setupApiKeySection(root: View) {
@@ -46,7 +274,10 @@ class SettingsFragment : Fragment() {
         geminiInput.setText(Prefs.getGeminiKey(requireContext()), TextView.BufferType.EDITABLE)
         openaiInput.setText(Prefs.getOpenAiKey(requireContext()), TextView.BufferType.EDITABLE)
 
-        help.text = Html.fromHtml("<a href=\"https://aistudio.google.com/api-keys\">Get free Gemini API Key here</a>", Html.FROM_HTML_MODE_COMPACT)
+        help.text = Html.fromHtml(
+            "<a href=\"https://aistudio.google.com/api-keys\">Get free Gemini API Key here</a>",
+            Html.FROM_HTML_MODE_COMPACT
+        )
         help.movementMethod = LinkMovementMethod.getInstance()
         help.visibility = if (Prefs.getGeminiKey(requireContext()).isBlank()) View.VISIBLE else View.GONE
 
@@ -56,23 +287,29 @@ class SettingsFragment : Fragment() {
             help.visibility = if (v.isBlank()) View.VISIBLE else View.GONE
             updateModelOptionsVisibility(root)
         }
+
         openaiInput.doAfterTextChanged {
             val v = it?.toString()?.trim().orEmpty()
             Prefs.setOpenAiKey(requireContext(), v)
             updateModelOptionsVisibility(root)
         }
+
         updateModelOptionsVisibility(root)
     }
 
     private fun setupModelRadios(root: View) {
+        val radioGeminiFlash = root.findViewById<RadioButton>(R.id.radioGeminiFlash)
+        val radioGeminiPro = root.findViewById<RadioButton>(R.id.radioGeminiPro)
+        val radioGpt5MiniHigh = root.findViewById<RadioButton>(R.id.radioGpt5MiniHigh)
+        val radioGpt5MiniMedium = root.findViewById<RadioButton>(R.id.radioGpt5MiniMedium)
+        val radioGpt51Low = root.findViewById<RadioButton>(R.id.radioGpt51Low)
+        val radioGpt51Medium = root.findViewById<RadioButton>(R.id.radioGpt51Medium)
+        val radioGpt51High = root.findViewById<RadioButton>(R.id.radioGpt51High)
+
         val allModelButtons = listOf(
-            root.findViewById<RadioButton>(R.id.radioGeminiFlash),
-            root.findViewById<RadioButton>(R.id.radioGeminiPro),
-            root.findViewById<RadioButton>(R.id.radioGpt5MiniHigh),
-            root.findViewById<RadioButton>(R.id.radioGpt5MiniMedium),
-            root.findViewById<RadioButton>(R.id.radioGpt51Low),
-            root.findViewById<RadioButton>(R.id.radioGpt51Medium),
-            root.findViewById<RadioButton>(R.id.radioGpt51High)
+            radioGeminiFlash, radioGeminiPro,
+            radioGpt5MiniHigh, radioGpt5MiniMedium,
+            radioGpt51Low, radioGpt51Medium, radioGpt51High
         )
 
         val currentModel = Prefs.getSelectedModel(requireContext()).lowercase()
@@ -82,19 +319,19 @@ class SettingsFragment : Fragment() {
 
         when {
             currentModel.startsWith("gemini-2.5-flash") || currentModel == "gemini-flash-latest" ->
-                root.findViewById<RadioButton>(R.id.radioGeminiFlash).isChecked = true
+                radioGeminiFlash.isChecked = true
             currentModel.startsWith("gemini") || currentModel == "gemini-pro-latest" ->
-                root.findViewById<RadioButton>(R.id.radioGeminiPro).isChecked = true
+                radioGeminiPro.isChecked = true
             currentModel == "gpt-5-mini" && currentEffort == "high" ->
-                root.findViewById<RadioButton>(R.id.radioGpt5MiniHigh).isChecked = true
+                radioGpt5MiniHigh.isChecked = true
             currentModel == "gpt-5-mini" ->
-                root.findViewById<RadioButton>(R.id.radioGpt5MiniMedium).isChecked = true
+                radioGpt5MiniMedium.isChecked = true
             currentModel == "gpt-5.1" && currentEffort == "low" ->
-                root.findViewById<RadioButton>(R.id.radioGpt51Low).isChecked = true
+                radioGpt51Low.isChecked = true
             currentModel == "gpt-5.1" && currentEffort == "medium" ->
-                root.findViewById<RadioButton>(R.id.radioGpt51Medium).isChecked = true
+                radioGpt51Medium.isChecked = true
             currentModel == "gpt-5.1" && currentEffort == "high" ->
-                root.findViewById<RadioButton>(R.id.radioGpt51High).isChecked = true
+                radioGpt51High.isChecked = true
         }
 
         val modelClickListener = View.OnClickListener { clickedView ->
@@ -119,17 +356,28 @@ class SettingsFragment : Fragment() {
     private fun onModelChosen(model: String, effort: String?) {
         Prefs.setSelectedModel(requireContext(), model)
         if (effort != null) Prefs.setGpt5Effort(requireContext(), effort)
-        Toast.makeText(requireContext(), "Model set to $model${effort?.let { " ($it)" } ?: ""}", Toast.LENGTH_SHORT).show()
+        Toast.makeText(
+            requireContext(),
+            "Model set to $model${effort?.let { " ($it)" } ?: ""}",
+            Toast.LENGTH_SHORT
+        ).show()
     }
 
-    private fun setupMaxSentences(root: View) {
-        val input = root.findViewById<TextInputEditText>(R.id.maxSentencesInput)
-        input.setText(Prefs.getMaxSentences(requireContext()).toString(), TextView.BufferType.EDITABLE)
-        input.doAfterTextChanged {
-            it?.toString()?.trim()?.toIntOrNull()?.let { n ->
-                Prefs.setMaxSentences(requireContext(), n)
-            }
-        }
+    private fun updateModelOptionsVisibility(root: View) {
+        val hasGemini = Prefs.getGeminiKey(requireContext()).isNotBlank()
+        val hasOpenAi = Prefs.getOpenAiKey(requireContext()).isNotBlank()
+
+        root.findViewById<RadioButton>(R.id.radioGeminiFlash)?.visibility =
+            if (hasGemini) View.VISIBLE else View.GONE
+        root.findViewById<RadioButton>(R.id.radioGeminiPro)?.visibility =
+            if (hasGemini) View.VISIBLE else View.GONE
+
+        val gptVis = if (hasOpenAi) View.VISIBLE else View.GONE
+        root.findViewById<RadioButton>(R.id.radioGpt5MiniHigh)?.visibility = gptVis
+        root.findViewById<RadioButton>(R.id.radioGpt5MiniMedium)?.visibility = gptVis
+        root.findViewById<RadioButton>(R.id.radioGpt51Low)?.visibility = gptVis
+        root.findViewById<RadioButton>(R.id.radioGpt51Medium)?.visibility = gptVis
+        root.findViewById<RadioButton>(R.id.radioGpt51High)?.visibility = gptVis
     }
 
     private fun setupListenSeconds(root: View) {
@@ -155,40 +403,6 @@ class SettingsFragment : Fragment() {
         }
     }
 
-    private fun setupFasterFirst(root: View) {
-        val sw = root.findViewById<SwitchMaterial>(R.id.switchFasterFirst)
-        val current = Prefs.getFasterFirst(requireContext())
-        sw.isChecked = current
-        val warning = root.findViewById<TextView>(R.id.systemPromptWarning)
-        warning.visibility = if (current) View.VISIBLE else View.GONE
-        sw.setOnCheckedChangeListener { _, isChecked ->
-            Prefs.setFasterFirst(requireContext(), isChecked)
-            warning.visibility = if (isChecked) View.VISIBLE else View.GONE
-        }
-    }
-
-    private fun setupSttSystem(root: View) {
-        val radioGroup = root.findViewById<RadioGroup>(R.id.sttSystemRadioGroup)
-        val currentSystem = Prefs.getSttSystem(requireContext())
-
-        when (currentSystem) {
-            Prefs.STT_SYSTEM_STANDARD -> radioGroup.check(R.id.radioSttStandard)
-            Prefs.STT_SYSTEM_GEMINI_LIVE -> radioGroup.check(R.id.radioSttGeminiLive)
-            Prefs.STT_SYSTEM_GEMINI_BATCH -> radioGroup.check(R.id.radioSttGeminiBatch)
-        }
-
-        radioGroup.setOnCheckedChangeListener { _, checkedId ->
-            val newSystem = when (checkedId) {
-                R.id.radioSttStandard -> Prefs.STT_SYSTEM_STANDARD
-                R.id.radioSttGeminiLive -> Prefs.STT_SYSTEM_GEMINI_LIVE
-                R.id.radioSttGeminiBatch -> Prefs.STT_SYSTEM_GEMINI_BATCH
-                else -> Prefs.STT_SYSTEM_GEMINI_LIVE // Default fallback
-            }
-            Prefs.setSttSystem(requireContext(), newSystem)
-            Toast.makeText(requireContext(), "STT System set to: $newSystem", Toast.LENGTH_SHORT).show()
-        }
-    }
-
     private fun setupTtsSettingsLink(root: View) {
         val link = root.findViewById<TextView>(R.id.ttsSettingsLink)
         link.setOnClickListener {
@@ -205,70 +419,44 @@ class SettingsFragment : Fragment() {
     }
 
     private fun setupPromptSection(root: View) {
-        val systemPrompt = root.findViewById<TextInputEditText>(R.id.systemPromptInput)
-        val resetSystem = root.findViewById<View>(R.id.resetSystemPromptButton)
-        val extInput = root.findViewById<TextInputEditText>(R.id.promptExtensionsInput)
-        val resetExt = root.findViewById<View>(R.id.resetPromptExtensionsButton)
-        val warning = root.findViewById<TextView>(R.id.systemPromptWarning)
-        val fasterFirst = Prefs.getFasterFirst(requireContext())
-        warning.visibility = if (fasterFirst) View.VISIBLE else View.GONE
+        val systemPromptInput = root.findViewById<TextInputEditText>(R.id.systemPromptInput)
+        val resetSystemBtn = root.findViewById<View>(R.id.resetSystemPromptButton)
+        val extensionsInput = root.findViewById<TextInputEditText>(R.id.promptExtensionsInput)
+        val resetExtBtn = root.findViewById<View>(R.id.resetPromptExtensionsButton)
 
         val defaultSystem = DEFAULT_SYSTEM_PROMPT.trimIndent()
 
-        systemPrompt.setText(Prefs.getSystemPrompt(requireContext(), defaultSystem), TextView.BufferType.EDITABLE)
-        systemPrompt.doAfterTextChanged {
+        // Setup base system prompt
+        systemPromptInput.setText(
+            Prefs.getSystemPrompt(requireContext(), defaultSystem),
+            TextView.BufferType.EDITABLE
+        )
+        systemPromptInput.doAfterTextChanged {
             Prefs.setSystemPrompt(requireContext(), it?.toString().orEmpty())
+            updateFullPromptPreview()
         }
-        resetSystem.setOnClickListener {
-            systemPrompt.setText(defaultSystem, TextView.BufferType.EDITABLE)
+
+        resetSystemBtn.setOnClickListener {
+            systemPromptInput.setText(defaultSystem, TextView.BufferType.EDITABLE)
             Prefs.setSystemPrompt(requireContext(), defaultSystem)
+            updateFullPromptPreview()
             Toast.makeText(requireContext(), "System prompt reset", Toast.LENGTH_SHORT).show()
         }
 
-        val defaultExt = buildDefaultPromptExtensions()
+        // Setup custom extensions
         val currentExt = Prefs.getSystemPromptExtensions(requireContext())
-        extInput.setText(currentExt, TextView.BufferType.EDITABLE)
-        extInput.doAfterTextChanged {
+        extensionsInput.setText(currentExt, TextView.BufferType.EDITABLE)
+        extensionsInput.doAfterTextChanged {
             Prefs.setSystemPromptExtensions(requireContext(), it?.toString().orEmpty())
+            updateFullPromptPreview()
         }
-        resetExt.setOnClickListener {
-            extInput.setText(defaultExt, TextView.BufferType.EDITABLE)
-            Prefs.setSystemPromptExtensions(requireContext(), defaultExt)
-            Toast.makeText(requireContext(), "Extensions reset", Toast.LENGTH_SHORT).show()
+
+        resetExtBtn.setOnClickListener {
+            extensionsInput.setText("", TextView.BufferType.EDITABLE)
+            Prefs.setSystemPromptExtensions(requireContext(), "")
+            updateFullPromptPreview()
+            Toast.makeText(requireContext(), "Extensions cleared", Toast.LENGTH_SHORT).show()
         }
-    }
-
-    private fun buildDefaultPromptExtensions(): String {
-        val maxSent = Prefs.getMaxSentences(requireContext())
-        val faster = Prefs.getFasterFirst(requireContext())
-        return buildList {
-            add("Return plain text only.")
-            add("IMPORTANT: Your response MUST be AT MOST $maxSent sentences long, unless the user explicitly asks for a different length.")
-            if (faster) add("Begin with a complete first sentence promptly, then continue.")
-        }.joinToString(" ")
-    }
-
-    private fun updateModelOptionsVisibility(root: View) {
-        val hasGemini = Prefs.getGeminiKey(requireContext()).isNotBlank()
-        val hasOpenAi = Prefs.getOpenAiKey(requireContext()).isNotBlank()
-
-        val rbGeminiFlash = root.findViewById<RadioButton>(R.id.radioGeminiFlash)
-        val rbGeminiPro = root.findViewById<RadioButton>(R.id.radioGeminiPro)
-        val rbGpt5MiniHigh = root.findViewById<RadioButton>(R.id.radioGpt5MiniHigh)
-        val rbGpt5MiniMedium = root.findViewById<RadioButton>(R.id.radioGpt5MiniMedium)
-        val rbGpt51Low = root.findViewById<RadioButton>(R.id.radioGpt51Low)
-        val rbGpt51Medium = root.findViewById<RadioButton>(R.id.radioGpt51Medium)
-        val rbGpt51High = root.findViewById<RadioButton>(R.id.radioGpt51High)
-
-        rbGeminiFlash.visibility = if (hasGemini) View.VISIBLE else View.GONE
-        rbGeminiPro.visibility = if (hasGemini) View.VISIBLE else View.GONE
-
-        val gptVis = if (hasOpenAi) View.VISIBLE else View.GONE
-        rbGpt5MiniHigh.visibility = gptVis
-        rbGpt5MiniMedium.visibility = gptVis
-        rbGpt51Low.visibility = gptVis
-        rbGpt51Medium.visibility = gptVis
-        rbGpt51High.visibility = gptVis
     }
 
     companion object {

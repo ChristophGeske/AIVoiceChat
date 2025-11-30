@@ -1,4 +1,4 @@
-package com.example.advancedvoice.domain.strategy
+package com.example.advancedvoice.domain.engine.strategy
 
 import com.example.advancedvoice.domain.engine.SentenceTurnEngine
 import kotlinx.coroutines.CoroutineScope

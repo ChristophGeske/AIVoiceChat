@@ -244,10 +244,39 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
 
     private fun getEffectiveSystemPrompt(): String {
         val base = Prefs.getSystemPrompt(appCtx, DEFAULT_SYSTEM_PROMPT)
-        val extensions = Prefs.getSystemPromptExtensions(appCtx)
-        Log.d(TAG, "[SYSTEM-PROMPT] Base: ${base.length} chars, Extensions: ${extensions.length} chars")
-        return if (extensions.isBlank()) base else "$base\n\n$extensions"
+        val userExtensions = Prefs.getSystemPromptExtensions(appCtx)
+        val dynamicInstructions = Prefs.getDynamicInstructions(appCtx)
+            .ifBlank { buildDynamicInstructions() }  // Fallback if not set
+
+        val fullPrompt = buildString {
+            append(base)
+            if (userExtensions.isNotBlank()) {
+                append("\n\n")
+                append(userExtensions)
+            }
+            append("\n\n")
+            append(dynamicInstructions)
+        }
+
+        Log.d(TAG, "[SYSTEM-PROMPT] Base: ${base.length}, Extensions: ${userExtensions.length}, Dynamic: ${dynamicInstructions.length}")
+        return fullPrompt
     }
+
+    private fun buildDynamicInstructions(): String {
+        val maxSentences = Prefs.getMaxSentences(appCtx)
+        val fasterFirst = Prefs.getFasterFirst(appCtx)
+
+        return buildString {
+            append("RESPONSE REQUIREMENTS:\n")
+            append("• Your response MUST be AT MOST $maxSentences sentences long.\n")
+            append("• Return plain text only, no markdown or formatting.\n")
+            if (fasterFirst) {
+                append("• Start with a complete, informative first sentence immediately.\n")
+            }
+            append("• The user speaks via audio. Listen carefully and respond naturally.")
+        }
+    }
+
 
     fun setupSttSystemFromPreferences() {
         Log.i(TAG, "[CONFIG] Setting up STT from preferences")
@@ -266,7 +295,7 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
             flowController.stopAll()
             interruption.reset()
 
-            // ✅ CHANGE: Go to MONITORING instead of IDLE
+            //  Go to MONITORING instead of IDLE
             val stt = sttManager.getStt()
             if (stt is GeminiLiveSttController) {
                 stt.switchMicMode(MicrophoneSession.Mode.MONITORING)  // ← Changed from IDLE
@@ -279,7 +308,7 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
         disableAutoListenAfterTts()
         flowController.clearConversation()
 
-        // ✅ CHANGE: Go to MONITORING instead of IDLE
+        //  Go to MONITORING instead of IDLE
         val stt = sttManager.getStt()
         if (stt is GeminiLiveSttController) {
             stt.switchMicMode(MicrophoneSession.Mode.MONITORING)  // ← Changed from IDLE
@@ -299,7 +328,7 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
         super.onCleared()
         Log.w(TAG, "ViewModel clearing...")
         flowController.cleanup()
-        sttManager.release()  // ✅ This will disconnect WebSocket
+        sttManager.release()  //  This will disconnect WebSocket
         interruption.reset()
         tts.shutdown()
     }
@@ -316,7 +345,7 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
                         Log.i(TAG, "[TTS] Stopped speaking")
                         stt.notifyTtsStopped()
 
-                        // ✅ FIX: Don't interfere if actively listening (e.g., after tap interrupt)
+                        //  Don't interfere if actively listening (e.g., after tap interrupt)
                         if (isListening.value) {
                             Log.i(TAG, "[TTS] Keeping current mode (user is actively listening)")
                             return@collect

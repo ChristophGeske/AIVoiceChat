@@ -90,8 +90,9 @@ class GeminiAudioService(
 
         // Add instruction text for the audio
         currentTurnParts.put(JSONObject().apply {
-            put("text", "Listen to the audio above and respond to what the user is saying.")
+            put("text", "Listen carefully to the audio above. The user is speaking to you. Understand what they are saying and respond appropriately according to your system instructions.")
         })
+
 
         contents.put(JSONObject().apply {
             put("role", "user")

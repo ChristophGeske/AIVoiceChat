@@ -5,9 +5,9 @@ import android.content.SharedPreferences
 
 object Prefs {
 
-    const val STT_SYSTEM_STANDARD = "standard"
+
     const val STT_SYSTEM_GEMINI_LIVE = "gemini_live"
-    const val STT_SYSTEM_GEMINI_BATCH = "gemini_batch"
+
 
     private fun sp(context: Context): SharedPreferences =
         context.applicationContext.getSharedPreferences(PrefsKeys.FILE, Context.MODE_PRIVATE)
@@ -38,9 +38,7 @@ object Prefs {
     fun setGpt5Effort(context: Context, value: String) =
         sp(context).edit().putString(PrefsKeys.GPT5_EFFORT, value).apply()
 
-    // STT SYSTEM
-    fun getSttSystem(context: Context): String =
-        sp(context).getString(PrefsKeys.STT_SYSTEM, STT_SYSTEM_GEMINI_LIVE) ?: STT_SYSTEM_GEMINI_LIVE
+
 
     fun setSttSystem(context: Context, system: String) =
         sp(context).edit().putString(PrefsKeys.STT_SYSTEM, system).apply()
@@ -82,4 +80,12 @@ object Prefs {
 
     fun setSystemPromptExtensions(context: Context, value: String) =
         sp(context).edit().putString(PrefsKeys.SYSTEM_PROMPT_EXT, value).apply()
+
+    // DYNAMIC INSTRUCTIONS (user-editable, synced with settings)
+    fun getDynamicInstructions(context: Context): String =
+        sp(context).getString(PrefsKeys.DYNAMIC_INSTRUCTIONS, "") ?: ""
+
+    fun setDynamicInstructions(context: Context, value: String) =
+        sp(context).edit().putString(PrefsKeys.DYNAMIC_INSTRUCTIONS, value).apply()
+
 }

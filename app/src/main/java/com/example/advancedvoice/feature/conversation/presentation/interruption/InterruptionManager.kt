@@ -200,28 +200,26 @@ class InterruptionManager(
 
         Log.i(TAG, "[SPEECH] 🗣️ Real speech confirmed → discarding buffered response, entering accumulation")
 
-        // NEW: Collect audio from STT controller
+        // Collect audio from STT controller BEFORE clearing
         val stt = getStt()
         if (stt is GeminiLiveSttController) {
             val segments = stt.getCollectedAudioSegments()
             if (segments.isNotEmpty()) {
+                accumulatedAudioSegments.clear()  // Clear any previous audio
                 accumulatedAudioSegments.addAll(segments)
-                Log.i(TAG, "[SPEECH] Collected ${segments.size} audio segments for accumulation (total: ${accumulatedAudioSegments.size})")
+                Log.i(TAG, "[SPEECH] Collected ${segments.size} audio segments for accumulation")
             }
+            // DON'T clear the STT audio yet - we might need more
         }
 
-        // ✅ FIX: Properly clean up old assistant response
         val hadBufferedResponse = assistantHoldBuffer != null
         dropBufferedAssistant()
 
-        // ✅ FIX: If there was no buffered response but turn is active,
-        // the response may already be in conversation - remove it
         if (!hadBufferedResponse && engine.isActive()) {
-            Log.w(TAG, "[SPEECH] No buffered response, but generation active - removing last assistant from conversation")
+            Log.w(TAG, "[SPEECH] No buffered response, but generation active - removing last assistant")
             val lastEntry = stateManager.conversation.value.lastOrNull()
             if (lastEntry?.isAssistant == true) {
                 stateManager.removeLastEntry()
-                Log.d(TAG, "[SPEECH] Removed last assistant entry from UI")
             }
         }
 
@@ -243,6 +241,13 @@ class InterruptionManager(
 
         Log.i(TAG, "[NOISE] 🔇 Noise confirmed → flushing buffered response (if any)")
 
+        // Clear any audio that was collected during noise detection
+        accumulatedAudioSegments.clear()
+        val stt = getStt()
+        if (stt is GeminiLiveSttController) {
+            stt.clearCollectedAudio()
+        }
+
         val held = assistantHoldBuffer
         val heldSources = assistantSourcesBuffer ?: emptyList()
 
@@ -250,9 +255,8 @@ class InterruptionManager(
             assistantHoldBuffer = null
             assistantSourcesBuffer = null
 
-            Log.i(TAG, "[NOISE] ✅ Flushing buffered response (len=${held.length}, sources=${heldSources.size}) → adding to UI + TTS")  // ✅ UPDATE THIS
+            Log.i(TAG, "[NOISE] ✅ Flushing buffered response (len=${held.length}, sources=${heldSources.size})")
 
-            //   Process sources first
             if (heldSources.isNotEmpty()) {
                 com.example.advancedvoice.domain.util.GroundingUtils.processAndDisplaySources(heldSources) { html ->
                     stateManager.addSystem(html)
@@ -268,40 +272,24 @@ class InterruptionManager(
         } else {
             Log.d(TAG, "[NOISE] No buffered response to flush")
 
-            // Check if we're generating (don't resume if so)
             val isGenerating = stateManager.phase.value != GenerationPhase.IDLE
 
             if (interruptedDuringEvaluation && !isGenerating) {
-                // We interrupted playback, and we're not generating a new response → resume
-                Log.d(TAG, "[NOISE] Attempting to resume interrupted TTS (not generating)")
+                Log.d(TAG, "[NOISE] Attempting to resume interrupted TTS")
                 val lastAssistant = stateManager.conversation.value.lastOrNull { it.isAssistant }
                 if (lastAssistant != null && lastAssistant.sentences.isNotEmpty()) {
                     if (!tts.isSpeaking.value) {
                         val fullText = lastAssistant.sentences.joinToString(" ")
                         Log.i(TAG, "[NOISE] ✅ Resuming interrupted TTS (len=${fullText.length})")
                         tts.queue(fullText)
-
-                        // ✅ Re-enable auto-listen flag
                         onNoiseConfirmed()
-                        Log.d(TAG, "[NOISE] Re-enabled auto-listen flag (resuming TTS)")
-                    } else {
-                        Log.d(TAG, "[NOISE] TTS already speaking, not resuming")
                     }
-                } else {
-                    Log.d(TAG, "[NOISE] No assistant response found to resume")
                 }
             } else if (isGenerating) {
-                // We're generating a new response → don't resume old one
-                Log.i(TAG, "[NOISE] ⏭️ SKIP RESUME - currently generating new response (phase=${stateManager.phase.value})")
-
-                // ✅ FIX: Still re-enable auto-listen flag even though we're skipping resume!
-                // The noise was just noise, not a real interruption, so the turn should still complete normally
+                Log.i(TAG, "[NOISE] ⏭️ SKIP RESUME - currently generating (phase=${stateManager.phase.value})")
                 if (interruptedDuringEvaluation) {
                     onNoiseConfirmed()
-                    Log.d(TAG, "[NOISE] Re-enabled auto-listen flag (skipped resume, but turn will complete normally)")
                 }
-            } else {
-                Log.d(TAG, "[NOISE] No interruption flag set or not in resumable state")
             }
 
             interruptedDuringEvaluation = false

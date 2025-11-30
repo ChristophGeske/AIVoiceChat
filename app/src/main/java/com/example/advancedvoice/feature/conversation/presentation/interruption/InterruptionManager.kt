@@ -22,7 +22,8 @@ class InterruptionManager(
     private val getStt: () -> SttController?,
     private val startTurnWithExistingHistory: () -> Unit,
     private val onInterruption: () -> Unit,
-    private val onNoiseConfirmed: () -> Unit  // ✅ NEW: Re-enable auto-listen when noise is confirmed
+    private val onNoiseConfirmed: () -> Unit,
+    private val getLastTurnAudio: () -> List<ByteArray>
 ) {
     private companion object {
         const val TAG = LoggerConfig.TAG_INTERRUPT
@@ -47,6 +48,7 @@ class InterruptionManager(
     @Volatile private var lastRestartTime = 0L
     private var interruptAccumulationJob: Job? = null
 
+    // Buffer to hold audio from the interrupted turn + new speech
     private val accumulatedAudioSegments = mutableListOf<ByteArray>()
 
     fun initialize() {
@@ -77,8 +79,6 @@ class InterruptionManager(
                     Log.d(TAG, "[MONITOR] 🎤 Speech detected: gen=$generating, tts=$speaking, phase=${stateManager.phase.value}, eval=$isEvaluatingBargeIn, interrupted=$interruptedDuringEvaluation, genTime=${genDuration}ms")
                 }
 
-                // ✅ CORRECT: Always evaluate during generation (never immediate abort)
-                // Only difference: during TTS we also stop playback
                 if ((generating || speaking) && hearingSpeech && !isAccumulatingAfterInterrupt) {
                     if (isEvaluatingBargeIn) {
                         Log.w(TAG, "[MONITOR] ⚠️ New speech while still evaluating - resetting evaluation")
@@ -89,38 +89,30 @@ class InterruptionManager(
                         val isTtsPlaying = speaking
 
                         if (isTtsPlaying) {
-                            Log.i(TAG, "[MONITOR] 🔊 Noise during TTS playback → stopping TTS, evaluating (LLM continues if still generating)")
+                            Log.i(TAG, "[MONITOR] 🔊 Noise during TTS playback → stopping TTS, evaluating")
                         } else {
-                            Log.i(TAG, "[MONITOR] 🔊 Noise during silent generation → evaluating (LLM continues)")
+                            Log.i(TAG, "[MONITOR] 🔊 Noise during silent generation → evaluating")
                         }
-
-                        Log.d(TAG, "[MONITOR]   Phase: ${stateManager.phase.value}, TTS: $speaking, GenTime: ${System.currentTimeMillis() - generationStartTime}ms")
 
                         isEvaluatingBargeIn = true
                         interruptedDuringEvaluation = true
 
-                        // Stop TTS if playing (but DON'T abort LLM)
                         tts.stop()
                         onInterruption()
 
-                        // Start transcribing to evaluate
                         val stt = getStt()
                         if (stt is GeminiLiveSttController) {
                             scope.launch {
                                 try {
                                     if (!stateManager.isListening.value && !stateManager.isTranscribing.value) {
-                                        Log.d(TAG, "[MONITOR] Starting STT for evaluation")
                                         stt.start(isAutoListen = false)
                                     } else {
-                                        Log.d(TAG, "[MONITOR] Switching to TRANSCRIBING mode")
                                         stt.switchMicMode(com.example.advancedvoice.core.audio.MicrophoneSession.Mode.TRANSCRIBING)
                                     }
                                 } catch (e: Exception) {
                                     Log.e(TAG, "[MONITOR] ❌ Error starting transcription: ${e.message}")
                                 }
                             }
-                        } else {
-                            Log.w(TAG, "[MONITOR] STT not available for evaluation")
                         }
                     }
                 }
@@ -133,7 +125,7 @@ class InterruptionManager(
         sources: List<Pair<String, String?>> = emptyList()
     ): Boolean {
         if (isAccumulatingAfterInterrupt) {
-            Log.i(TAG, "[HOLD] ❌ Already accumulating - discarding late LLM response (len=${text.length}, sources=${sources.size})")
+            Log.i(TAG, "[HOLD] ❌ Already accumulating - discarding late LLM response")
             return true
         }
 
@@ -142,12 +134,11 @@ class InterruptionManager(
 
             if (stillRecording) {
                 assistantHoldBuffer = text
-                assistantSourcesBuffer = sources  // ✅ ADD THIS - Buffer sources too
-                Log.i(TAG, "[HOLD] 📦 BUFFERING response (len=${text.length}, sources=${sources.size}) - mic active, awaiting verdict")
-                Log.d(TAG, "[HOLD]   Listening: ${stateManager.isListening.value}, Transcribing: ${stateManager.isTranscribing.value}")
+                assistantSourcesBuffer = sources
+                Log.i(TAG, "[HOLD] 📦 BUFFERING response (len=${text.length}, sources=${sources.size})")
                 return true
             } else {
-                Log.i(TAG, "[HOLD] ✅ Mic inactive when response arrived - likely brief noise, allowing through")
+                Log.i(TAG, "[HOLD] ✅ Mic inactive - allowing through")
                 isEvaluatingBargeIn = false
                 interruptedDuringEvaluation = false
                 return false
@@ -161,27 +152,22 @@ class InterruptionManager(
         val trimmed = transcript.trim()
 
         if (!isEvaluatingBargeIn) {
-            Log.d(TAG, "[VERDICT] Not evaluating, normal flow")
             return false
         }
 
         val hasWord = WORD_REGEX.containsMatchIn(trimmed)
-        Log.i(TAG, "[VERDICT] 📋 Evaluating transcript: len=${trimmed.length}, hasWord=$hasWord, buffered=${assistantHoldBuffer != null}")
+        Log.i(TAG, "[VERDICT] 📋 Evaluating transcript: len=${trimmed.length}, hasWord=$hasWord")
 
         if (hasWord && assistantHoldBuffer == null && isGenerating(stateManager.phase.value)) {
             Log.w(TAG, "[VERDICT] ⚠️ RACE CONDITION: transcript before LLM response, waiting 500ms...")
             scope.launch {
                 delay(500)
-                val stillGenerating = isGenerating(stateManager.phase.value)
-                val nowHasBuffer = assistantHoldBuffer != null
-                Log.d(TAG, "[VERDICT] After wait: generating=$stillGenerating, buffered=$nowHasBuffer")
                 handleConfirmedSpeechInterruption(trimmed)
             }
             return true
         }
 
         isEvaluatingBargeIn = false
-        val hadBufferedResponse = assistantHoldBuffer != null
 
         if (hasWord) {
             Log.i(TAG, "[VERDICT] ✅ REAL SPEECH CONFIRMED")
@@ -200,23 +186,35 @@ class InterruptionManager(
 
         Log.i(TAG, "[SPEECH] 🗣️ Real speech confirmed → discarding buffered response, entering accumulation")
 
-        // Collect audio from STT controller BEFORE clearing
+        accumulatedAudioSegments.clear()
+
+        // ✅ FIX: ALWAYS rescue previous audio.
+        // Removed the 'if (engine.isActive())' check.
+        // Even if the engine finished generation, if we are here, it means the user
+        // interrupted the TTS or responded immediately, so we want to append.
+        val previousAudio = getLastTurnAudio()
+        if (previousAudio.isNotEmpty()) {
+            accumulatedAudioSegments.addAll(previousAudio)
+            Log.i(TAG, "[SPEECH] Rescued ${previousAudio.size} segments from previous turn")
+        } else {
+            Log.w(TAG, "[SPEECH] No previous audio to rescue!")
+        }
+
+        // 2. ADD NEW AUDIO FROM CURRENT SPEECH
         val stt = getStt()
         if (stt is GeminiLiveSttController) {
             val segments = stt.getCollectedAudioSegments()
             if (segments.isNotEmpty()) {
-                accumulatedAudioSegments.clear()  // Clear any previous audio
                 accumulatedAudioSegments.addAll(segments)
-                Log.i(TAG, "[SPEECH] Collected ${segments.size} audio segments for accumulation")
+                Log.i(TAG, "[SPEECH] Added ${segments.size} new segments from interruption")
             }
-            // DON'T clear the STT audio yet - we might need more
         }
 
         val hadBufferedResponse = assistantHoldBuffer != null
         dropBufferedAssistant()
 
         if (!hadBufferedResponse && engine.isActive()) {
-            Log.w(TAG, "[SPEECH] No buffered response, but generation active - removing last assistant")
+            Log.w(TAG, "[SPEECH] No buffered response, removing last assistant")
             val lastEntry = stateManager.conversation.value.lastOrNull()
             if (lastEntry?.isAssistant == true) {
                 stateManager.removeLastEntry()
@@ -239,14 +237,14 @@ class InterruptionManager(
     private fun handleConfirmedNoise() {
         isEvaluatingBargeIn = false
 
-        Log.i(TAG, "[NOISE] 🔇 Noise confirmed → flushing buffered response (if any)")
-
-        // Clear any audio that was collected during noise detection
+        // Clear audio collected during noise detection (it was just noise)
         accumulatedAudioSegments.clear()
         val stt = getStt()
         if (stt is GeminiLiveSttController) {
             stt.clearCollectedAudio()
         }
+
+        Log.i(TAG, "[NOISE] 🔇 Noise confirmed → flushing buffered response (if any)")
 
         val held = assistantHoldBuffer
         val heldSources = assistantSourcesBuffer ?: emptyList()
@@ -255,7 +253,7 @@ class InterruptionManager(
             assistantHoldBuffer = null
             assistantSourcesBuffer = null
 
-            Log.i(TAG, "[NOISE] ✅ Flushing buffered response (len=${held.length}, sources=${heldSources.size})")
+            Log.i(TAG, "[NOISE] ✅ Flushing buffered response")
 
             if (heldSources.isNotEmpty()) {
                 com.example.advancedvoice.domain.util.GroundingUtils.processAndDisplaySources(heldSources) { html ->
@@ -268,7 +266,6 @@ class InterruptionManager(
             interruptedDuringEvaluation = false
 
             onNoiseConfirmed()
-            Log.d(TAG, "[NOISE] Re-enabled auto-listen flag (turn completing normally)")
         } else {
             Log.d(TAG, "[NOISE] No buffered response to flush")
 
@@ -280,13 +277,11 @@ class InterruptionManager(
                 if (lastAssistant != null && lastAssistant.sentences.isNotEmpty()) {
                     if (!tts.isSpeaking.value) {
                         val fullText = lastAssistant.sentences.joinToString(" ")
-                        Log.i(TAG, "[NOISE] ✅ Resuming interrupted TTS (len=${fullText.length})")
                         tts.queue(fullText)
                         onNoiseConfirmed()
                     }
                 }
             } else if (isGenerating) {
-                Log.i(TAG, "[NOISE] ⏭️ SKIP RESUME - currently generating (phase=${stateManager.phase.value})")
                 if (interruptedDuringEvaluation) {
                     onNoiseConfirmed()
                 }
@@ -297,16 +292,11 @@ class InterruptionManager(
     }
 
     fun flushBufferedAssistantIfAny() {
-        val held = assistantHoldBuffer ?: run {
-            Log.d(TAG, "[FLUSH] No buffered response")
-            return
-        }
+        val held = assistantHoldBuffer ?: return
         val heldSources = assistantSourcesBuffer ?: emptyList()
 
         assistantHoldBuffer = null
         assistantSourcesBuffer = null
-
-        Log.i(TAG, "[FLUSH] ✅ Flushing buffered response (len=${held.length}, sources=${heldSources.size}) → adding to conversation + TTS")
 
         if (heldSources.isNotEmpty()) {
             com.example.advancedvoice.domain.util.GroundingUtils.processAndDisplaySources(heldSources) { html ->
@@ -320,10 +310,10 @@ class InterruptionManager(
     }
 
     fun dropBufferedAssistant() {
-        if (assistantHoldBuffer != null || assistantSourcesBuffer != null) {  // ✅ UPDATE THIS
-            Log.i(TAG, "[DROP] ❌ Dropping buffered response (len=${assistantHoldBuffer?.length}, sources=${assistantSourcesBuffer?.size})")  // ✅ UPDATE THIS
+        if (assistantHoldBuffer != null || assistantSourcesBuffer != null) {
+            Log.i(TAG, "[DROP] ❌ Dropping buffered response")
             assistantHoldBuffer = null
-            assistantSourcesBuffer = null  // ✅ ADD THIS
+            assistantSourcesBuffer = null
 
             while (stateManager.conversation.value.lastOrNull()?.speaker == "System") {
                 stateManager.removeLastEntry()
@@ -333,17 +323,14 @@ class InterruptionManager(
             if (historySnapshot.lastOrNull()?.role == "assistant") {
                 engine.clearHistory()
                 engine.seedHistory(historySnapshot.dropLast(1))
-                Log.d(TAG, "[DROP] Removed assistant from engine history")
             }
-        } else {
-            Log.d(TAG, "[DROP] No buffered response to drop")
         }
     }
 
     private fun startAccumulationWatcher() {
         interruptAccumulationJob?.cancel()
         interruptAccumulationJob = scope.launch {
-            Log.i(TAG, "[ACCUMULATION] Starting watcher (max ${INTERRUPT_ACCUMULATION_TIMEOUT}ms)")
+            Log.i(TAG, "[ACCUMULATION] Starting watcher")
             val startTime = System.currentTimeMillis()
             var lastCheck = startTime
             var consecutiveNotBusyCount = 0
@@ -351,20 +338,12 @@ class InterruptionManager(
             while (isAccumulatingAfterInterrupt) {
                 delay(500L)
                 val elapsed = System.currentTimeMillis() - startTime
-                val listening = stateManager.isListening.value
-                val hearing = stateManager.isHearingSpeech.value
-                val transcribing = stateManager.isTranscribing.value
-                val isBusy = listening || transcribing
-
-                if (System.currentTimeMillis() - lastCheck >= 2000L) {
-                    Log.d(TAG, "[ACCUMULATION] elapsed=${elapsed}ms, listening=$listening, hearing=$hearing, transcribing=$transcribing, busy=$isBusy")
-                    lastCheck = System.currentTimeMillis()
-                }
+                val isBusy = stateManager.isListening.value || stateManager.isTranscribing.value
 
                 if (!isBusy) {
                     consecutiveNotBusyCount++
                     if (consecutiveNotBusyCount >= 3) {
-                        Log.i(TAG, "[ACCUMULATION] User stopped (${elapsed}ms), finalizing")
+                        Log.i(TAG, "[ACCUMULATION] User stopped, finalizing")
                         finalizeAccumulation()
                         break
                     }
@@ -373,19 +352,7 @@ class InterruptionManager(
                 }
 
                 if (elapsed > INTERRUPT_ACCUMULATION_TIMEOUT) {
-                    Log.w(TAG, "[ACCUMULATION] Timeout (${elapsed}ms), force finalizing")
-                    scope.launch {
-                        try {
-                            Log.w(TAG, "[ACCUMULATION] Force stopping STT...")
-                            getStt()?.stop(false)
-                            delay(200L)
-                            stateManager.setListening(false)
-                            stateManager.setHearingSpeech(false)
-                            stateManager.setTranscribing(false)
-                        } catch (e: Exception) {
-                            Log.e(TAG, "[ACCUMULATION] Error force-stopping STT: ${e.message}")
-                        }
-                    }
+                    Log.w(TAG, "[ACCUMULATION] Timeout, force finalizing")
                     finalizeAccumulation()
                     break
                 }
@@ -394,22 +361,16 @@ class InterruptionManager(
     }
 
     private fun finalizeAccumulation() {
-        if (!isAccumulatingAfterInterrupt) {
-            Log.d(TAG, "[ACCUMULATION] Already finalized")
-            return
-        }
+        if (!isAccumulatingAfterInterrupt) return
 
         val lastUserEntry = stateManager.conversation.value.lastOrNull { it.speaker == "You" }
         val accumulatedText = lastUserEntry?.sentences?.joinToString(" ")?.trim() ?: ""
-        Log.i(TAG, "[ACCUMULATION] Finalizing (len=${accumulatedText.length}): '${accumulatedText.take(100)}...'")
+        Log.i(TAG, "[ACCUMULATION] Finalizing: '${accumulatedText.take(100)}...'")
 
         val now = System.currentTimeMillis()
-        val timeSinceLastRestart = now - lastRestartTime
-
-        if (timeSinceLastRestart < MIN_RESTART_INTERVAL_MS) {
-            Log.w(TAG, "[ACCUMULATION] Too soon after last restart, delaying...")
+        if (now - lastRestartTime < MIN_RESTART_INTERVAL_MS) {
             scope.launch {
-                delay(MIN_RESTART_INTERVAL_MS - timeSinceLastRestart)
+                delay(MIN_RESTART_INTERVAL_MS - (now - lastRestartTime))
                 finalizeAccumulation()
             }
             return
@@ -425,9 +386,14 @@ class InterruptionManager(
             stateManager.setHearingSpeech(false)
             stateManager.setTranscribing(false)
 
+            // Collect any remaining audio before clearing STT
             val stt = getStt()
             if (stt is GeminiLiveSttController) {
-                Log.i(TAG, "[ACCUMULATION] Switching to MONITORING for next turn")
+                val finalSegments = stt.getCollectedAudioSegments()
+                if (finalSegments.isNotEmpty()) {
+                    accumulatedAudioSegments.addAll(finalSegments)
+                    stt.clearCollectedAudio()
+                }
                 stt.switchMicMode(com.example.advancedvoice.core.audio.MicrophoneSession.Mode.MONITORING)
             }
         }
@@ -436,20 +402,13 @@ class InterruptionManager(
             Log.i(TAG, "[ACCUMULATION] Restarting turn with accumulated text and ${accumulatedAudioSegments.size} audio segments")
             lastRestartTime = now
 
-            // Collect any remaining audio
-            val stt = getStt()
-            if (stt is GeminiLiveSttController) {
-                val finalSegments = stt.getCollectedAudioSegments()
-                if (finalSegments.isNotEmpty()) {
-                    accumulatedAudioSegments.addAll(finalSegments)
-                    stt.clearCollectedAudio()
-                }
-            }
+            // Note: We already collected the audio above in the scope.launch block,
+            // but we do it safely inside the lock logic.
+            // The audio is now fully in accumulatedAudioSegments.
 
             engine.replaceLastUserMessage(accumulatedText)
             startTurnWithExistingHistory()
         } else {
-            Log.w(TAG, "[ACCUMULATION] No text accumulated, cleaning up")
             stateManager.removeLastUserPlaceholderIfEmpty()
         }
     }
@@ -458,9 +417,7 @@ class InterruptionManager(
      * Get all accumulated audio segments for interruption handling.
      */
     fun getCombinedAudioSegments(): List<ByteArray> {
-        val segments = accumulatedAudioSegments.toList()
-        Log.d(TAG, "[AUDIO] Returning ${segments.size} combined audio segments")
-        return segments
+        return accumulatedAudioSegments.toList()
     }
 
     fun combineTranscript(newTranscript: String): String {
@@ -476,11 +433,10 @@ class InterruptionManager(
 
     fun onTurnStart(timestamp: Long) {
         generationStartTime = timestamp
-        Log.d(TAG, "[TURN] Generation started at $timestamp")
     }
 
     fun reset() {
-        Log.d(TAG, "[RESET] Resetting all interruption state")
+        Log.d(TAG, "[RESET] Resetting interruption state")
         interruptAccumulationJob?.cancel()
         isEvaluatingBargeIn = false
         isBargeInTurn = false
@@ -488,7 +444,7 @@ class InterruptionManager(
         assistantHoldBuffer = null
         assistantSourcesBuffer = null
         interruptedDuringEvaluation = false
-        accumulatedAudioSegments.clear()  //   Clear audio
+        accumulatedAudioSegments.clear() // Clear audio
         scope.launch {
             stateManager.setListening(false)
             stateManager.setHearingSpeech(false)
@@ -497,14 +453,9 @@ class InterruptionManager(
     }
 
     fun handleTimeoutDuringEvaluation() {
-        if (!isEvaluatingBargeIn) {
-            Log.d(TAG, "[TIMEOUT] Not evaluating, nothing to do")
-            return
+        if (isEvaluatingBargeIn) {
+            Log.i(TAG, "[TIMEOUT] Treating as noise")
+            handleConfirmedNoise()
         }
-
-        Log.i(TAG, "[TIMEOUT] 🕒 Session timeout during evaluation - treating as noise, flushing buffered response")
-
-        // Treat timeout as noise confirmation (user didn't say anything meaningful)
-        handleConfirmedNoise()
     }
 }

@@ -276,7 +276,13 @@ class ConversationFlowController(
                 .lastOrNull { it.speaker == "You" }
                 ?.sentences?.joinToString(" ") ?: ""
 
+            //  We need to update lastAudioSegments here too!
+            // Previously we only updated it in handleNormalTranscript
+            lastAudioSegments = combinedAudio
+            lastUserEntryIndex = stateManager.getLastUserEntryIndex()
+
             engine.startTurnWithAudio(combinedAudio, lastUserText, model)
+
         } else {
             Log.i(TAG, "[ViewModel] startTurnWithExistingHistory (text-only)")
             perfTimerHolder = PerfTimer(TAG, "llm").also { it.mark("llm_start") }

@@ -7,4 +7,5 @@ data class ConversationEntry(
     val streamingText: String? = null,
     val isRefinedTranscript: Boolean = false,  //  true after background refinement
     val audioSegments: List<ByteArray>? = null  //  stored audio for potential re-processing
+
 )

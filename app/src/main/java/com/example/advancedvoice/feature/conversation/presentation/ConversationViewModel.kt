@@ -17,6 +17,7 @@ import com.example.advancedvoice.feature.conversation.presentation.state.Convers
 import com.example.advancedvoice.feature.conversation.presentation.stt.SttManager
 import com.example.advancedvoice.feature.conversation.service.ConversationStore
 import com.example.advancedvoice.feature.conversation.service.GeminiLiveSttController
+import com.example.advancedvoice.feature.conversation.service.TranscriptRefinementService
 import com.example.advancedvoice.feature.conversation.service.TtsController
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.StateFlow
@@ -26,8 +27,6 @@ import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import okhttp3.OkHttpClient
-import com.example.advancedvoice.feature.conversation.service.TranscriptRefinementService
-
 
 class ConversationViewModel(app: Application) : AndroidViewModel(app) {
 
@@ -49,6 +48,10 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
     private val tts = TtsController(app, viewModelScope)
     private val stateManager = ConversationStateManager(scope = viewModelScope, store = store, tts = tts)
     private val perfTimerHolder = EngineCallbacksFactory.PerfTimerHolder()
+
+    @Volatile private var shouldAutoListenAfterTts = false
+
+    // Refinement Service
     private val refinementService: TranscriptRefinementService by lazy {
         TranscriptRefinementService(
             scope = viewModelScope,
@@ -56,8 +59,6 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
             stateManager = stateManager
         )
     }
-
-    @Volatile private var shouldAutoListenAfterTts = false
 
     private val engine: SentenceTurnEngine = SentenceTurnEngine(
         uiScope = viewModelScope,
@@ -94,7 +95,9 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
             getStt = { sttManager.getStt() },
             startTurnWithExistingHistory = { flowController.startTurnWithExistingHistory() },
             onInterruption = { disableAutoListenAfterTts() },
-            onNoiseConfirmed = { enableAutoListenAfterTts() }
+            onNoiseConfirmed = { enableAutoListenAfterTts() },
+            // ✅ ADDED: Provide audio from previous turn for rescue
+            getLastTurnAudio = { flowController.getLastAudioForRefinement().first }
         )
     }
 
@@ -136,15 +139,8 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
 
     private fun logInitialConfiguration() {
         viewModelScope.launch {
-            Log.i(TAG_INIT, "═══════════════════════════════════════")
             Log.i(TAG_INIT, "Conversation ViewModel Initialized")
-            Log.i(TAG_INIT, "STT Type: ${sttManager.getStt()?.javaClass?.simpleName ?: "null"}")
             Log.i(TAG_INIT, "Selected Model: ${Prefs.getSelectedModel(appCtx)}")
-            Log.i(TAG_INIT, "Faster First: ${Prefs.getFasterFirst(appCtx)}")
-            Log.i(TAG_INIT, "Auto-Listen: ${Prefs.getAutoListen(appCtx)}")
-            Log.i(TAG_INIT, "Max Sentences: ${Prefs.getMaxSentences(appCtx)}")
-            Log.i(TAG_INIT, "System Prompt Length: ${getEffectiveSystemPrompt().length}")
-            Log.i(TAG_INIT, "═══════════════════════════════════════")
         }
     }
 
@@ -173,25 +169,17 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
             tts.isSpeaking.drop(1).filter { !it }.collect {
                 val autoListenFlag = shouldAutoListenAfterTts
                 val settingEnabled = Prefs.getAutoListen(appCtx)
-                val currentPhase = phase.value
-                val listening = isListening.value
-                val speaking = isSpeaking.value
 
                 Log.i(TAG_AUTO_LISTEN, "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
                 Log.i(TAG_AUTO_LISTEN, "TTS STOPPED - Auto-Listen Check")
                 Log.i(TAG_AUTO_LISTEN, "  Flag: $autoListenFlag")
                 Log.i(TAG_AUTO_LISTEN, "  Setting: $settingEnabled")
-                Log.i(TAG_AUTO_LISTEN, "  Phase: $currentPhase")
-                Log.i(TAG_AUTO_LISTEN, "  Listening: $listening")
-                Log.i(TAG_AUTO_LISTEN, "  Speaking: $speaking")
+                Log.i(TAG_AUTO_LISTEN, "  Phase: ${phase.value}")
+                Log.i(TAG_AUTO_LISTEN, "  Listening: ${isListening.value}")
+                Log.i(TAG_AUTO_LISTEN, "  Speaking: ${isSpeaking.value}")
 
-                if (!shouldAutoListenAfterTts) {
-                    Log.d(TAG_AUTO_LISTEN, "❌ Flag disabled, skipping")
-                    return@collect
-                }
-
+                if (!shouldAutoListenAfterTts) return@collect
                 if (!settingEnabled) {
-                    Log.w(TAG_AUTO_LISTEN, "❌ Setting disabled, clearing flag")
                     shouldAutoListenAfterTts = false
                     return@collect
                 }
@@ -200,10 +188,7 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
                     Log.i(TAG_AUTO_LISTEN, "⏳ Conditions met, waiting 150ms...")
                     delay(150L)
 
-                    val stillIdle = !isSpeaking.value &&
-                            !isListening.value &&
-                            phase.value == GenerationPhase.IDLE &&
-                            shouldAutoListenAfterTts
+                    val stillIdle = !isSpeaking.value && !isListening.value && phase.value == GenerationPhase.IDLE
 
                     Log.i(TAG_AUTO_LISTEN, "After delay:")
                     Log.i(TAG_AUTO_LISTEN, "  Speaking: ${isSpeaking.value}")
@@ -212,25 +197,15 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
                     Log.i(TAG_AUTO_LISTEN, "  Flag: $shouldAutoListenAfterTts")
                     Log.i(TAG_AUTO_LISTEN, "  Still Idle: $stillIdle")
 
-                    if (stillIdle) {
+                    if (stillIdle && shouldAutoListenAfterTts) {
                         Log.i(TAG_AUTO_LISTEN, "✅✅✅ STARTING AUTO-LISTEN NOW ✅✅✅")
                         flowController.startAutoListening()
-                    } else {
-                        Log.w(TAG_AUTO_LISTEN, "❌ Conditions changed, aborting")
                     }
-                } else {
-                    Log.w(TAG_AUTO_LISTEN, "❌ Conditions not met")
                 }
 
                 shouldAutoListenAfterTts = false
                 Log.d(TAG_AUTO_LISTEN, "Flag reset to false")
                 Log.i(TAG_AUTO_LISTEN, "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-            }
-        }
-
-        viewModelScope.launch {
-            stateManager.isHearingSpeech.collect { hearing ->
-                Log.d(TAG_AUTO_LISTEN, "[DEBUG] isHearingSpeech=$hearing, flag=$shouldAutoListenAfterTts, phase=${phase.value}, speaking=${isSpeaking.value}")
             }
         }
     }
@@ -246,7 +221,7 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
         val base = Prefs.getSystemPrompt(appCtx, DEFAULT_SYSTEM_PROMPT)
         val userExtensions = Prefs.getSystemPromptExtensions(appCtx)
         val dynamicInstructions = Prefs.getDynamicInstructions(appCtx)
-            .ifBlank { buildDynamicInstructions() }  // Fallback if not set
+            .ifBlank { buildDynamicInstructions() }
 
         val fullPrompt = buildString {
             append(base)
@@ -277,9 +252,7 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-
     fun setupSttSystemFromPreferences() {
-        Log.i(TAG, "[CONFIG] Setting up STT from preferences")
         sttManager.setupFromPreferences()
         applyEngineSettings()
         logInitialConfiguration()
@@ -295,11 +268,10 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
             flowController.stopAll()
             interruption.reset()
 
-            //  Go to MONITORING instead of IDLE
             val stt = sttManager.getStt()
             if (stt is GeminiLiveSttController) {
-                stt.switchMicMode(MicrophoneSession.Mode.MONITORING)  // ← Changed from IDLE
-                Log.i(TAG, "[STOP] Switched to MONITORING mode")
+                stt.switchMicMode(MicrophoneSession.Mode.MONITORING)
+                Log.i(TAG, "[STOP] Live: Switched to MONITORING mode")
             }
         }
     }
@@ -308,11 +280,10 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
         disableAutoListenAfterTts()
         flowController.clearConversation()
 
-        //  Go to MONITORING instead of IDLE
         val stt = sttManager.getStt()
         if (stt is GeminiLiveSttController) {
-            stt.switchMicMode(MicrophoneSession.Mode.MONITORING)  // ← Changed from IDLE
-            Log.i(TAG, "[CLEAR] Switched to MONITORING mode")
+            stt.switchMicMode(MicrophoneSession.Mode.MONITORING)
+            Log.i(TAG, "[CLEAR] Live: Switched to MONITORING mode")
         }
     }
 
@@ -326,9 +297,8 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
 
     override fun onCleared() {
         super.onCleared()
-        Log.w(TAG, "ViewModel clearing...")
         flowController.cleanup()
-        sttManager.release()  //  This will disconnect WebSocket
+        sttManager.release()
         interruption.reset()
         tts.shutdown()
     }
@@ -345,13 +315,11 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
                         Log.i(TAG, "[TTS] Stopped speaking")
                         stt.notifyTtsStopped()
 
-                        //  Don't interfere if actively listening (e.g., after tap interrupt)
                         if (isListening.value) {
                             Log.i(TAG, "[TTS] Keeping current mode (user is actively listening)")
                             return@collect
                         }
 
-                        // Only switch to MONITORING if auto-listen is enabled, otherwise IDLE
                         if (Prefs.getAutoListen(appCtx) && shouldAutoListenAfterTts) {
                             Log.i(TAG, "[TTS] Switching to MONITORING (auto-listen enabled)")
                             stt.switchMicMode(MicrophoneSession.Mode.MONITORING)

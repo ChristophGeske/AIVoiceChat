@@ -10,39 +10,29 @@ import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.File
+import java.io.FileOutputStream
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
-/**
- * Service for sending audio directly to Gemini models.
- * Supports multimodal input with audio + text history.
- *
- * IMPORTANT:
- * - Multiple audio segments are merged into ONE WAV file
- *   before sending, to ensure the model hears the full message
- *   as a single continuous clip.
- */
 class GeminiAudioService(
     private val apiKeyProvider: () -> String,
     private val client: OkHttpClient = HttpClientProvider.client
 ) {
     companion object {
         private const val TAG = "GeminiAudioService"
-
-        // Assuming our audio segments are 16kHz mono 16-bit WAVs
         private const val SAMPLE_RATE = 16_000
         private const val CHANNELS = 1
         private const val BITS_PER_SAMPLE = 16
         private const val WAV_HEADER_SIZE = 44
+
+        // Flash model for fast transcription - always used for Path A
+        private const val FLASH_TRANSCRIPTION_MODEL = "gemini-2.0-flash-lite"
     }
 
     /**
-     * Generate a response from audio input + text history.
-     *
-     * @param systemPrompt System instructions
-     * @param textHistory Previous conversation turns (as text)
-     * @param audioSegments Current turn audio segments (each a WAV byte array)
-     * @param modelName Model to use (e.g., "gemini-2.5-pro" or "gemini-2.5-flash")
+     * Generate response from audio using the specified model.
+     * This is PATH B - Response Generation.
      */
     fun generateFromAudio(
         systemPrompt: String,
@@ -59,25 +49,21 @@ class GeminiAudioService(
         val effModel = GeminiModels.effective(modelName)
         val url = "https://generativelanguage.googleapis.com/v1beta/models/$effModel:generateContent?key=$apiKey"
 
-        Log.i(TAG, "Generating from audio: model=$effModel, segments=${audioSegments.size}, historySize=${textHistory.size}")
+        Log.i(TAG, "[PATH-B] Generating from audio: model=$effModel, segments=${audioSegments.size}, historySize=${textHistory.size}")
 
         val enforcedPrompt = if (enableGoogleSearch) {
             systemPrompt + "\n\nAlways use Google Search to ground your answer and include citations with source titles when available."
         } else systemPrompt
 
-        // 1. Merge all segments into one WAV
         val mergedWav = mergeWavSegments(audioSegments)
 
-        // 2. Build contents
         val contents = JSONArray()
 
-        // 2a. System as first "user" content
         contents.put(JSONObject().apply {
             put("role", "user")
             put("parts", JSONArray().put(JSONObject().put("text", enforcedPrompt)))
         })
 
-        // 2b. Text history
         for (msg in textHistory) {
             val role = if (msg.role == "assistant") "model" else "user"
             contents.put(JSONObject().apply {
@@ -86,10 +72,9 @@ class GeminiAudioService(
             })
         }
 
-        // 2c. Current user turn with merged audio
         val currentTurnParts = JSONArray()
-
         val base64Audio = Base64.encodeToString(mergedWav, Base64.NO_WRAP)
+
         currentTurnParts.put(JSONObject().apply {
             put("inlineData", JSONObject().apply {
                 put("mimeType", "audio/wav")
@@ -98,7 +83,7 @@ class GeminiAudioService(
         })
 
         currentTurnParts.put(JSONObject().apply {
-            put("text", "Listen carefully to the audio above and respond to what the user is saying.")
+            put("text", "Listen carefully to the audio above. The user is speaking to you. Understand what they are saying and respond appropriately according to your system instructions.")
         })
 
         contents.put(JSONObject().apply {
@@ -126,26 +111,44 @@ class GeminiAudioService(
         client.newCall(req).execute().use { resp ->
             val payload = resp.body?.string().orEmpty()
             if (!resp.isSuccessful) {
-                Log.e(TAG, "API error: ${resp.code} - ${payload.take(500)}")
+                Log.e(TAG, "[PATH-B] API error: ${resp.code} - ${payload.take(500)}")
                 error("Gemini error: HTTP ${resp.code} ${resp.message}\n${payload.take(400)}")
             }
 
             val text = extractText(payload)
             val sources = extractGroundingSources(payload)
 
-            Log.i(TAG, "Response received: ${text.length} chars, ${sources.size} sources")
+            Log.i(TAG, "[PATH-B] Response received: ${text.length} chars, ${sources.size} sources")
             return text to sources
         }
     }
 
     /**
-     * Transcribe audio to text (for background refinement).
-     * ALL segments are merged into a single WAV first.
+     * Fast transcription using Flash model.
+     * This is PATH A - Always uses Flash for speed, regardless of user's model choice.
+     */
+    fun transcribeAudioFast(audioSegments: List<ByteArray>): String {
+        Log.i(TAG, "[PATH-A] 🚀 Starting FAST transcription with $FLASH_TRANSCRIPTION_MODEL")
+        return transcribeAudioInternal(audioSegments, FLASH_TRANSCRIPTION_MODEL)
+    }
+
+    /**
+     * Transcribe audio with a specific model (for backward compatibility).
      */
     fun transcribeAudio(
         audioSegments: List<ByteArray>,
-        modelName: String = "gemini-2.5-pro"
+        modelName: String = FLASH_TRANSCRIPTION_MODEL
     ): String {
+        return transcribeAudioInternal(audioSegments, modelName)
+    }
+
+    private fun transcribeAudioInternal(
+        audioSegments: List<ByteArray>,
+        modelName: String
+    ): String {
+        val startTime = System.currentTimeMillis()
+        Log.d(TAG, "[PATH-A] transcribeAudio: Starting for ${audioSegments.size} segments with model=$modelName")
+
         val apiKey = apiKeyProvider().trim()
         require(apiKey.isNotEmpty()) { "Gemini API key missing" }
         require(audioSegments.isNotEmpty()) { "No audio segments provided" }
@@ -153,15 +156,12 @@ class GeminiAudioService(
         val effModel = GeminiModels.effective(modelName)
         val url = "https://generativelanguage.googleapis.com/v1beta/models/$effModel:generateContent?key=$apiKey"
 
-        Log.i(TAG, "Transcribing audio: model=$effModel, segments=${audioSegments.size}")
-
-        // Merge all segments into a single WAV
+        Log.d(TAG, "[PATH-A] Merging WAVs...")
         val mergedWav = mergeWavSegments(audioSegments)
         val base64Audio = Base64.encodeToString(mergedWav, Base64.NO_WRAP)
 
+        Log.d(TAG, "[PATH-A] Building request...")
         val parts = JSONArray()
-
-        // Single merged audio
         parts.put(JSONObject().apply {
             put("inlineData", JSONObject().apply {
                 put("mimeType", "audio/wav")
@@ -169,13 +169,18 @@ class GeminiAudioService(
             })
         })
 
-        // Exact transcription instruction
         parts.put(JSONObject().apply {
             put("text", """
-                Transcribe this audio exactly as spoken. 
-                Include filler words like "uh", "um", and repetitions.
-                Return only the transcription, nothing else.
-                If you cannot understand the audio, return an empty string.
+                Listen to this audio and provide a clean, accurate transcription.
+                
+                Instructions:
+                - Transcribe exactly what the user said
+                - Remove filler words like "uh", "um", "like", "you know"
+                - Remove false starts and repetitions
+                - Fix obvious grammar issues
+                - Keep the original meaning and intent intact
+                - Return only the cleaned transcription, nothing else
+                - If you cannot understand the audio, return an empty string
             """.trimIndent())
         })
 
@@ -185,7 +190,7 @@ class GeminiAudioService(
                 put("parts", parts)
             }))
             put("generationConfig", JSONObject().apply {
-                put("temperature", 0.0)
+                put("temperature", 0.0)  // Deterministic for transcription
             })
         }
 
@@ -195,27 +200,23 @@ class GeminiAudioService(
             .post(body.toString().toRequestBody("application/json".toMediaType()))
             .build()
 
+        Log.d(TAG, "[PATH-A] Executing network request...")
         client.newCall(req).execute().use { resp ->
+            val elapsedMs = System.currentTimeMillis() - startTime
+            Log.d(TAG, "[PATH-A] Got response code ${resp.code} in ${elapsedMs}ms")
+
             val payload = resp.body?.string().orEmpty()
             if (!resp.isSuccessful) {
-                Log.e(TAG, "Transcription API error: ${resp.code} - ${payload.take(300)}")
+                Log.e(TAG, "[PATH-A] Transcription API error: ${resp.code} - ${payload.take(300)}")
                 return ""
             }
 
             val text = extractText(payload)
-            Log.i(TAG, "Transcription result: ${text.length} chars")
+            Log.i(TAG, "[PATH-A] ✅ Transcription complete: ${text.length} chars in ${elapsedMs}ms")
             return text.trim()
         }
     }
 
-    // ════════════════════════════════════════════════════════════════════
-    // WAV MERGING HELPERS
-    // ════════════════════════════════════════════════════════════════════
-
-    /**
-     * Merge multiple WAV segments into a single WAV file.
-     * Assumes all segments share the same format (16kHz mono 16-bit).
-     */
     private fun mergeWavSegments(segments: List<ByteArray>): ByteArray {
         if (segments.isEmpty()) return ByteArray(0)
 
@@ -230,7 +231,6 @@ class GeminiAudioService(
             val pcm = wav.copyOfRange(WAV_HEADER_SIZE, wav.size)
             pcmChunks.add(pcm)
             totalPcmSize += pcm.size
-            Log.d(TAG, "Segment $index: wavSize=${wav.size}, pcmSize=${pcm.size}")
         }
 
         if (pcmChunks.isEmpty()) {
@@ -249,13 +249,21 @@ class GeminiAudioService(
             offset += pcm.size
         }
 
-        Log.i(TAG, "Merged ${pcmChunks.size} segments into WAV: totalBytes=${output.size}")
-
+        // Debug audio saving (can be removed in production)
         saveDebugAudio(output)
 
-        Log.i(TAG, "Merged ${pcmChunks.size} segments into WAV: totalBytes=${output.size}")
-
         return output
+    }
+
+    private fun saveDebugAudio(wavBytes: ByteArray) {
+        try {
+            val file = File("/data/data/com.example.advancedvoice/cache/debug_input.wav")
+            file.parentFile?.mkdirs()
+            FileOutputStream(file).use { it.write(wavBytes) }
+            Log.d(TAG, "🔊 DEBUG AUDIO SAVED: ${file.absolutePath} (${wavBytes.size} bytes)")
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to save debug audio: ${e.message}")
+        }
     }
 
     private fun createWavHeader(dataSize: Int): ByteArray {
@@ -264,29 +272,22 @@ class GeminiAudioService(
 
         val buffer = ByteBuffer.allocate(WAV_HEADER_SIZE).order(ByteOrder.LITTLE_ENDIAN)
 
-        // RIFF header
         buffer.put("RIFF".toByteArray())
-        buffer.putInt(36 + dataSize)              // ChunkSize
+        buffer.putInt(36 + dataSize)
         buffer.put("WAVE".toByteArray())
-        // fmt subchunk
         buffer.put("fmt ".toByteArray())
-        buffer.putInt(16)                         // Subchunk1Size for PCM
-        buffer.putShort(1)                        // AudioFormat (PCM = 1)
+        buffer.putInt(16)
+        buffer.putShort(1)
         buffer.putShort(CHANNELS.toShort())
         buffer.putInt(SAMPLE_RATE)
         buffer.putInt(byteRate)
         buffer.putShort(blockAlign.toShort())
         buffer.putShort(BITS_PER_SAMPLE.toShort())
-        // data subchunk
         buffer.put("data".toByteArray())
         buffer.putInt(dataSize)
 
         return buffer.array()
     }
-
-    // ════════════════════════════════════════════════════════════════════
-    // RESPONSE PARSING HELPERS
-    // ════════════════════════════════════════════════════════════════════
 
     private fun extractText(payload: String): String {
         return try {
@@ -333,17 +334,4 @@ class GeminiAudioService(
             emptyList()
         }
     }
-
-    private fun saveDebugAudio(wavBytes: ByteArray) {
-        try {
-            // Save to app cache directory
-            val file = java.io.File("/data/data/com.example.advancedvoice/cache/debug_input.wav")
-            java.io.FileOutputStream(file).use { it.write(wavBytes) }
-            Log.w(TAG, "🔊 DEBUG AUDIO SAVED TO: ${file.absolutePath} (${wavBytes.size} bytes)")
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to save debug audio: ${e.message}")
-        }
-    }
-
-
 }

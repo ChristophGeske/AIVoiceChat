@@ -51,7 +51,7 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
 
     @Volatile private var shouldAutoListenAfterTts = false
 
-    // Refinement Service
+    // Refinement Service - uses Flash model for fast transcription
     private val refinementService: TranscriptRefinementService by lazy {
         TranscriptRefinementService(
             scope = viewModelScope,
@@ -66,13 +66,12 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
         geminiKeyProvider = { Prefs.getGeminiKey(appCtx) },
         openAiKeyProvider = { Prefs.getOpenAiKey(appCtx) },
         systemPromptProvider = { getEffectiveSystemPrompt() },
+        // ✅ UPDATED: Removed refinement-related parameters from callbacks
         callbacks = EngineCallbacksFactory.create(
             stateManager = stateManager,
             tts = tts,
             perfTimerHolder = perfTimerHolder,
-            getInterruption = { interruption },
-            getRefinementService = { refinementService },
-            getAudioForRefinement = { flowController.getLastAudioForRefinement() }
+            getInterruption = { interruption }
         )
     )
 
@@ -96,11 +95,11 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
             startTurnWithExistingHistory = { flowController.startTurnWithExistingHistory() },
             onInterruption = { disableAutoListenAfterTts() },
             onNoiseConfirmed = { enableAutoListenAfterTts() },
-            // ✅ ADDED: Provide audio from previous turn for rescue
             getLastTurnAudio = { flowController.getLastAudioForRefinement().first }
         )
     }
 
+    // ✅ UPDATED: FlowController now gets refinement service
     private val flowController: ConversationFlowController by lazy {
         ConversationFlowController(
             scope = viewModelScope,
@@ -114,6 +113,7 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
                 override fun getSelectedModel() = Prefs.getSelectedModel(appCtx)
                 override fun getAutoListen() = Prefs.getAutoListen(appCtx)
             },
+            getRefinementService = { refinementService },  // ✅ NEW
             onTurnComplete = { enableAutoListenAfterTts() },
             onTapToSpeak = { disableAutoListenAfterTts() }
         )
@@ -141,6 +141,7 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             Log.i(TAG_INIT, "Conversation ViewModel Initialized")
             Log.i(TAG_INIT, "Selected Model: ${Prefs.getSelectedModel(appCtx)}")
+            Log.i(TAG_INIT, "Parallel Processing: PATH A (Flash transcription) + PATH B (User model generation)")
         }
     }
 

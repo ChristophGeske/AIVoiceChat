@@ -10,8 +10,11 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 /**
- * Service that refines streaming transcripts in the background during TTS playback.
- * Uses LLM to get high-quality transcription of the audio.
+ * Service that refines streaming transcripts using Flash model.
+ *
+ * This runs in PARALLEL with response generation:
+ * - PATH A (this service): Fast transcription with Flash → Updates UI with accurate text
+ * - PATH B (generation): User's chosen model → Generates response
  */
 class TranscriptRefinementService(
     private val scope: CoroutineScope,
@@ -27,11 +30,11 @@ class TranscriptRefinementService(
 
     /**
      * Start refining the transcript for a specific user entry.
-     * Should be called when TTS starts speaking (background task during "dead time").
+     * Uses Flash model for speed - runs in parallel with response generation.
      *
      * @param audioSegments The audio to transcribe
-     * @param userEntryIndex The index of the user entry in conversation to update
-     * @param streamingTranscript The current streaming transcript (for comparison)
+     * @param userEntryIndex The index of the user entry to update
+     * @param streamingTranscript The current streaming transcript (for logging/comparison)
      */
     fun startRefinement(
         audioSegments: List<ByteArray>,
@@ -39,34 +42,72 @@ class TranscriptRefinementService(
         streamingTranscript: String
     ) {
         if (audioSegments.isEmpty()) {
-            Log.w(TAG, "No audio to refine")
+            Log.w(TAG, "[PATH-A] ⚠️ No audio segments to refine")
             return
         }
 
         // Cancel any existing refinement
         currentRefinementJob?.cancel()
 
-        Log.i(TAG, "Starting transcript refinement for entry $userEntryIndex (${audioSegments.size} segments, streaming: '${streamingTranscript.take(50)}...')")
+        val totalBytes = audioSegments.sumOf { it.size }
+        Log.i(TAG, "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+        Log.i(TAG, "[PATH-A] 🚀 Starting PARALLEL transcript refinement")
+        Log.i(TAG, "  Entry index: $userEntryIndex")
+        Log.i(TAG, "  Audio segments: ${audioSegments.size}")
+        Log.i(TAG, "  Total audio: ${totalBytes / 1024} KB")
+        Log.i(TAG, "  Streaming preview: '${streamingTranscript.take(50)}...'")
+        Log.i(TAG, "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
         currentRefinementJob = scope.launch {
+            val startTime = System.currentTimeMillis()
+
             try {
                 val refinedTranscript = withContext(Dispatchers.IO) {
-                    audioService.transcribeAudio(audioSegments)
+                    // ✅ Always use Flash for speed
+                    audioService.transcribeAudioFast(audioSegments)
                 }
 
-                if (refinedTranscript.isNotBlank()) {
-                    Log.i(TAG, "Refinement complete: '${refinedTranscript.take(100)}...'")
+                val elapsedMs = System.currentTimeMillis() - startTime
+                Log.d(TAG, "[PATH-A] Refinement completed in ${elapsedMs}ms")
+                Log.d(TAG, "[PATH-A] Result: '${refinedTranscript.take(80)}...'")
 
-                    // Update the conversation entry with refined transcript
-                    stateManager.refineUserTranscript(userEntryIndex, refinedTranscript)
-
-                    Log.d(TAG, "Entry $userEntryIndex updated with refined transcript")
-                } else {
-                    Log.w(TAG, "Refinement returned empty result, keeping streaming transcript")
+                if (refinedTranscript.isBlank()) {
+                    Log.w(TAG, "[PATH-A] ⚠️ Refinement returned empty result - keeping streaming text")
+                    return@launch
                 }
+
+                // Verify the entry is still valid
+                val currentEntry = stateManager.conversation.value.getOrNull(userEntryIndex)
+                if (currentEntry == null) {
+                    Log.w(TAG, "[PATH-A] ⚠️ Entry $userEntryIndex no longer exists")
+                    return@launch
+                }
+
+                if (currentEntry.speaker != "You") {
+                    Log.w(TAG, "[PATH-A] ⚠️ Entry $userEntryIndex is not a user entry (speaker=${currentEntry.speaker})")
+                    return@launch
+                }
+
+                // Check if entry was already refined (avoid double-update)
+                if (currentEntry.isRefinedTranscript) {
+                    Log.d(TAG, "[PATH-A] Entry $userEntryIndex already refined, skipping")
+                    return@launch
+                }
+
+                Log.i(TAG, "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+                Log.i(TAG, "[PATH-A] ✅ APPLYING refined transcript")
+                Log.i(TAG, "  Entry: $userEntryIndex")
+                Log.i(TAG, "  Before: '${currentEntry.sentences.joinToString(" ").take(50)}...'")
+                Log.i(TAG, "  After:  '${refinedTranscript.take(50)}...'")
+                Log.i(TAG, "  Time: ${elapsedMs}ms")
+                Log.i(TAG, "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+
+                stateManager.refineUserTranscript(userEntryIndex, refinedTranscript)
+
             } catch (e: Exception) {
-                Log.e(TAG, "Refinement failed: ${e.message}", e)
-                // Keep the streaming transcript on failure
+                val elapsedMs = System.currentTimeMillis() - startTime
+                Log.e(TAG, "[PATH-A] ❌ Refinement failed after ${elapsedMs}ms: ${e.message}", e)
+                // Don't update - keep the streaming transcript
             }
         }
     }
@@ -77,7 +118,7 @@ class TranscriptRefinementService(
     fun cancel() {
         currentRefinementJob?.cancel()
         currentRefinementJob = null
-        Log.d(TAG, "Refinement cancelled")
+        Log.d(TAG, "[PATH-A] Refinement cancelled")
     }
 
     /**
